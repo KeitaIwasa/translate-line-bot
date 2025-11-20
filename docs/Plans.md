@@ -20,14 +20,16 @@
 
 ## 4. テスト
 - [ ] 単体テスト：翻訳ロジック／DB リポジトリ／LINE API ラッパー（translator・Webhook までは実施済み）
+- [ ] （2025-11-20 メモ）Secrets Manager 反映後の Lambda を `aws lambda invoke` で疎通確認済み（署名付き follow イベント → 200 OK）。今後は message イベントでの E2E テストを追加実施する。
 - [ ] 結合テスト：Webhook 受信から返信までのエンドツーエンド動作
 - [ ] 性能テスト：平均 200–350ms を満たすか検証し、ボトルネックを洗い出す
 - [ ] エラーハンドリングテスト：Gemini エラー、Neon 接続失敗、壊れたレスポンスなどの再試行挙動
 
 ## 5. デプロイ準備
-- [ ] AWS 環境（IAM, Lambda, API Gateway, CloudWatch）を IaC（template.yaml）で構築し、ステージングにデプロイ（2025-11-20: `sam build` 成功。`sam deploy --profile line-translate-bot` は API Gateway 作成時の `apigateway:POST` 権限不足で `AccessDeniedException` → スタック `translate-line-bot-stg` が ROLLBACK 完了。`line-translate-bot` プロファイルに API Gateway／CloudFormation フル権限を付与して再実行が必要。）
-- [ ] Neon プロジェクトを本番用に作成し、接続情報を Lambda に設定
-- [ ] Gemini API キーおよび LINE チャネル設定を本番用に切り替え、Webhook URL を登録
+- [x] AWS 環境（IAM, Lambda, API Gateway, CloudWatch）を IaC（template.yaml）で構築し、ステージングにデプロイ（2025-11-20: Secrets Manager `line-translate-bot-secrets` を参照するよう SAM テンプレ更新→ `sam build`/`sam deploy --profile line-translate-bot` で `translate-line-bot-stg` スタックを ap-northeast-1 に作成。API エンドポイント：`https://cbvko1l0ml.execute-api.ap-northeast-1.amazonaws.com/stg`。Lambda ARN：`arn:aws:lambda:ap-northeast-1:215896857123:function:translate-line-bot-stg-LineWebhookFunction-a1Thoi5FRgnv`。）
+- [x] Neon プロジェクトを本番用に作成し、接続情報を Lambda に設定
+  - 2025-11-20: `sql/001_init_schema.sql` で `group_members` / `messages` / `idx_messages_group_ts` を作成済み（psycopg 経由で Neon に適用）。
+- [x] Gemini API キーおよび LINE チャネル設定を本番用に切り替え、Webhook URL を登録
 - [ ] デプロイ手順書とロールバック手順をまとめる
 
 ### メモ: ステージング AWS デプロイ手順
