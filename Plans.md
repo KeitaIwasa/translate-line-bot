@@ -7,9 +7,8 @@
 
 ## 2. 技術設計
 - [x] Lambda / API Gateway / Neon / Gemini / LINE API 間のインターフェース仕様書を作成する
-- [ ] 翻訳プロンプト・Structured Output JSON Schema を確定し、サンプルを含むドキュメント化を行う
-- [ ] DB スキーマ詳細（インデックス、制約、マイグレーション計画）を決定する
-- [ ] 監視・ログ設計（CloudWatch Logs, Metrics, アラートルール）を策定する
+- [x] 翻訳プロンプト・Structured Output JSON Schema を確定し、サンプルを含むドキュメント化を行う
+- [x] DB スキーマ詳細（インデックス、制約、マイグレーション計画）を決定する
 
 ## 3. 実装
 - [ ] Lambda ハンドラー／Webhook 受信処理（署名検証含む）を実装
