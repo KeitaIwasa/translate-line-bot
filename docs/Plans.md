@@ -17,6 +17,7 @@
 - [x] LINE Messaging API 返信ロジック（翻訳結果フォーマット、部分成功ハンドリング）を実装
 - [x] 設定管理（環境変数, Secrets 管理）とデプロイ用スクリプトを整備
 - [x] template.yaml を用いた AWS リソース定義を作成（SAM テンプレ）
+- [ ] join/memberJoined/follow イベントに対応した言語設定フロー（Gemini で言語抽出→確認テンプレ生成→`group_user_languages` 登録）を実装
 
 ## 4. テスト
 - [ ] 単体テスト：翻訳ロジック／DB リポジトリ／LINE API ラッパー（translator・Webhook までは実施済み）
@@ -28,7 +29,7 @@
 ## 5. デプロイ準備
 - [x] AWS 環境（IAM, Lambda, API Gateway, CloudWatch）を IaC（template.yaml）で構築し、ステージングにデプロイ（2025-11-20: Secrets Manager `line-translate-bot-secrets` を参照するよう SAM テンプレ更新→ `sam build`/`sam deploy --profile line-translate-bot` で `translate-line-bot-stg` スタックを ap-northeast-1 に作成。API エンドポイント：`https://cbvko1l0ml.execute-api.ap-northeast-1.amazonaws.com/stg`。Lambda ARN：`arn:aws:lambda:ap-northeast-1:215896857123:function:translate-line-bot-stg-LineWebhookFunction-a1Thoi5FRgnv`。）
 - [x] Neon プロジェクトを本番用に作成し、接続情報を Lambda に設定
-  - 2025-11-20: `sql/001_init_schema.sql` で `group_members` / `messages` / `idx_messages_group_ts` を作成済み（psycopg 経由で Neon に適用）。
+  - 2025-11-20: `sql/001_init_schema.sql`/`sql/002_group_user_languages.sql` を適用し、`group_members` メタデータ＋ `group_user_languages`（多言語設定）＋ `messages` を整備済み。
 - [x] Gemini API キーおよび LINE チャネル設定を本番用に切り替え、Webhook URL を登録
 - [ ] デプロイ手順書とロールバック手順をまとめる
 

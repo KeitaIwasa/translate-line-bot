@@ -17,23 +17,22 @@ LINE 多言語翻訳ボットで使用する Neon (PostgreSQL) のデータモ�
 | ---- | --- | -------- | ---------- | ---- |
 | `group_id` | TEXT | ✔ |  | LINE グループ ID |
 | `user_id` | TEXT | ✔ |  | LINE ユーザー ID |
-| `preferred_lang` | VARCHAR(10) |  |  | ISO 639-1 言語コード（未設定可） |
-| `created_at` | TIMESTAMPTZ | ✔ | `NOW()` | 登録日時 |
-| `updated_at` | TIMESTAMPTZ | ✔ | `NOW()` | 最終更新日時 |
+| `joined_at` | TIMESTAMPTZ | ✔ | `NOW()` | ボットがグループに参加し、ユーザーを検知した日時 |
+| `last_prompted_at` | TIMESTAMPTZ |  |  | 最後に言語設定催促を送った日時（null=未通知） |
+| `last_completed_at` | TIMESTAMPTZ |  |  | ユーザーが言語設定を完了した日時（null=未設定） |
 
 - 主キー: `(group_id, user_id)`
 - インデックス:
   - `idx_group_members_user` (`user_id`): 1ユーザーが複数グループに所属する場合の検索最適化。
-- トリガー / 更新制御: `updated_at` は更新時に `NOW()` へ自動更新（`ON UPDATE` トリガー or アプリ側設定）。
-- `preferred_lang` は未設定状態を許容し、MVP では言語登録前の placeholder として扱う。
+- `last_prompted_at`/`last_completed_at` は join 再発時のリセット用メタデータ。最新ステータスは `group_user_languages` を参照する。
 
 ```sql
 CREATE TABLE group_members (
   group_id TEXT NOT NULL,
   user_id TEXT NOT NULL,
-  preferred_lang VARCHAR(10),
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_prompted_at TIMESTAMPTZ,
+  last_completed_at TIMESTAMPTZ,
   PRIMARY KEY (group_id, user_id)
 );
 
@@ -41,7 +40,35 @@ CREATE INDEX idx_group_members_user
   ON group_members (user_id);
 ```
 
-### 2.2 `messages`
+### 2.2 `group_user_languages`
+
+| 列名 | 型 | NOT NULL | デフォルト | 説明 |
+| ---- | --- | -------- | ---------- | ---- |
+| `group_id` | TEXT | ✔ |  | LINE グループ ID |
+| `user_id` | TEXT | ✔ |  | LINE ユーザー ID |
+| `lang_code` | VARCHAR(16) | ✔ |  | ISO 639-1/2/BCP47 コード |
+| `lang_name` | TEXT | ✔ |  | Gemini が返した自然言語表示名（テンプレート表示用）|
+| `created_at` | TIMESTAMPTZ | ✔ | `NOW()` | 登録日時 |
+
+- 主キー: `(group_id, user_id, lang_code)`
+- 外部キーは張らず、アプリ層で整合性を担保。
+- 1ユーザーが複数言語を持つことを許容し、「完了」ボタン押下時にまとめて挿入する。
+
+```sql
+CREATE TABLE group_user_languages (
+  group_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  lang_code VARCHAR(16) NOT NULL,
+  lang_name TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (group_id, user_id, lang_code)
+);
+
+CREATE INDEX idx_group_user_languages_user
+  ON group_user_languages (user_id);
+```
+
+### 2.3 `messages`
 
 | 列名 | 型 | NOT NULL | デフォルト | 説明 |
 | ---- | --- | -------- | ---------- | ---- |
@@ -80,8 +107,8 @@ CREATE INDEX idx_messages_group_user_time
 
 ## 3. リレーション / 外部キー
 
-- `messages.group_id` および `messages.user_id` は `group_members` とは必ずしも 1:1 ではない（bot や未登録ユーザーの発言を許容）。
-- 外部キー制約は設定しないが、アプリ層で整合性を担保する。
+- `group_user_languages` は `group_members` と 1:多 の関係（1ユーザーにつき複数言語）。外部キーは設定せず、join 再招待時は両テーブルをトランザクション内で削除する。
+- `messages.group_id` / `messages.user_id` は `group_members` と必ずしも一致しない（bot や未登録ユーザーの発言を許容）。
 
 ## 4. マイグレーション指針
 
@@ -110,19 +137,19 @@ LIMIT 20;
 ### 6.2 言語設定一覧
 
 ```sql
-SELECT user_id, preferred_lang
-FROM group_members
-WHERE group_id = $1;
+SELECT user_id, array_agg(lang_code ORDER BY lang_code) AS langs
+FROM group_user_languages
+WHERE group_id = $1
+GROUP BY user_id;
 ```
 
-### 6.3 言語設定アップサート（追加のみ）
+### 6.3 言語設定登録（完了時）
 
 ```sql
-INSERT INTO group_members (group_id, user_id, preferred_lang)
-VALUES ($1, $2, $3)
-ON CONFLICT (group_id, user_id)
-DO UPDATE SET preferred_lang = EXCLUDED.preferred_lang,
-              updated_at = NOW();
+INSERT INTO group_user_languages (group_id, user_id, lang_code, lang_name)
+SELECT $1, $2, lang_code, lang_name
+FROM UNNEST($3::TEXT[], $4::TEXT[]) AS t(lang_code, lang_name)
+ON CONFLICT (group_id, user_id, lang_code) DO NOTHING;
 ```
 
 ## 7. 監視対象メトリクス（DB）
