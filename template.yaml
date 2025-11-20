@@ -16,7 +16,7 @@ Parameters:
     Description: Lambda memory size in MB
   FunctionTimeout:
     Type: Number
-    Default: 5
+    Default: 12
     MinValue: 1
     MaxValue: 29
     Description: Lambda timeout in seconds

@@ -5,7 +5,7 @@ import hashlib
 import hmac
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -13,12 +13,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class LineEvent:
-    reply_token: str
-    group_id: str
-    user_id: str
+    event_type: str
+    reply_token: Optional[str]
+    group_id: Optional[str]
+    user_id: Optional[str]
     sender_type: str
-    text: str
-    timestamp: int
+    text: str = ""
+    timestamp: int = 0
+    postback_data: Optional[str] = None
+    joined_user_ids: List[str] = field(default_factory=list)
 
 
 class SignatureVerificationError(RuntimeError):
@@ -45,29 +48,94 @@ def parse_events(body: str) -> List[LineEvent]:
     events: List[LineEvent] = []
 
     for event in events_raw:
-        if event.get("type") != "message":
-            continue
-        message = event.get("message", {})
-        if message.get("type") != "text":
-            continue
+        event_type = event.get("type")
         source = event.get("source", {})
-        group_id = source.get("groupId") or source.get("roomId") or source.get("userId")
-        if not group_id:
-            logger.debug("Skipping event without group/room/user id", extra={"event": event})
-            continue
-        user_id = source.get("userId") or ""
+        sender_type = source.get("type", "user")
+        group_id = _resolve_group_id(source)
+        user_id = source.get("userId")
         reply_token = event.get("replyToken")
-        if not reply_token:
-            continue
-        events.append(
-            LineEvent(
-                reply_token=reply_token,
-                group_id=group_id,
-                user_id=user_id,
-                sender_type=source.get("type", "user"),
-                text=message.get("text", ""),
-                timestamp=event.get("timestamp", 0),
+
+        if event_type == "message":
+            message = event.get("message", {})
+            if message.get("type") != "text":
+                continue
+            if not group_id:
+                logger.debug("Skipping text event without group/user id", extra={"event": event})
+                continue
+            if not reply_token:
+                continue
+            events.append(
+                LineEvent(
+                    event_type="message",
+                    reply_token=reply_token,
+                    group_id=group_id,
+                    user_id=user_id,
+                    sender_type=sender_type,
+                    text=message.get("text", ""),
+                    timestamp=event.get("timestamp", 0),
+                )
             )
-        )
+        elif event_type == "postback":
+            postback = event.get("postback", {})
+            data = postback.get("data")
+            if not data or not reply_token or not group_id:
+                continue
+            events.append(
+                LineEvent(
+                    event_type="postback",
+                    reply_token=reply_token,
+                    group_id=group_id,
+                    user_id=user_id,
+                    sender_type=sender_type,
+                    postback_data=data,
+                    timestamp=event.get("timestamp", 0),
+                )
+            )
+        elif event_type == "join":
+            if not reply_token or not group_id:
+                continue
+            events.append(
+                LineEvent(
+                    event_type="join",
+                    reply_token=reply_token,
+                    group_id=group_id,
+                    user_id=user_id,
+                    sender_type=sender_type,
+                    timestamp=event.get("timestamp", 0),
+                )
+            )
+        elif event_type == "memberJoined":
+            joined = event.get("joined", {}).get("members", [])
+            joined_ids = [member.get("userId") for member in joined if member.get("userId")]
+            if not reply_token or not group_id or not joined_ids:
+                continue
+            events.append(
+                LineEvent(
+                    event_type="memberJoined",
+                    reply_token=reply_token,
+                    group_id=group_id,
+                    user_id=user_id,
+                    sender_type=sender_type,
+                    joined_user_ids=joined_ids,
+                    timestamp=event.get("timestamp", 0),
+                )
+            )
+        elif event_type == "follow":
+            if not reply_token:
+                continue
+            events.append(
+                LineEvent(
+                    event_type="follow",
+                    reply_token=reply_token,
+                    group_id=group_id,
+                    user_id=user_id,
+                    sender_type=sender_type,
+                    timestamp=event.get("timestamp", 0),
+                )
+            )
 
     return events
+
+
+def _resolve_group_id(source: Dict[str, Any]) -> Optional[str]:
+    return source.get("groupId") or source.get("roomId") or source.get("userId")

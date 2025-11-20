@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from psycopg import sql
 
@@ -25,12 +25,13 @@ class MessageRecord:
     timestamp: datetime
 
 
-def fetch_group_language_preferences(client: NeonClient, group_id: str) -> Dict[str, Optional[str]]:
+def fetch_group_language_preferences(client: NeonClient, group_id: str) -> Dict[str, List[str]]:
     query = sql.SQL(
         """
-        SELECT user_id, preferred_lang
-        FROM group_members
+        SELECT user_id, lang_code
+        FROM group_user_languages
         WHERE group_id = %s
+        ORDER BY user_id, lang_code
         """
     )
 
@@ -38,7 +39,10 @@ def fetch_group_language_preferences(client: NeonClient, group_id: str) -> Dict[
         cur.execute(query, (group_id,))
         rows = cur.fetchall()
 
-    return {row[0]: row[1] for row in rows}
+    result: Dict[str, List[str]] = {}
+    for user_id, lang_code in rows:
+        result.setdefault(user_id, []).append(lang_code)
+    return result
 
 
 def fetch_recent_messages(
@@ -94,3 +98,78 @@ def insert_message(client: NeonClient, record: MessageRecord) -> None:
             record.text,
             ts,
         ))
+
+
+def ensure_group_member(client: NeonClient, group_id: str, user_id: str) -> None:
+    query = sql.SQL(
+        """
+        INSERT INTO group_members (group_id, user_id)
+        VALUES (%s, %s)
+        ON CONFLICT (group_id, user_id)
+        DO UPDATE SET joined_at = NOW()
+        """
+    )
+
+    with client.cursor() as cur:
+        cur.execute(query, (group_id, user_id))
+
+
+def reset_group_language_settings(client: NeonClient, group_id: str) -> None:
+    with client.cursor() as cur:
+        cur.execute("DELETE FROM group_user_languages WHERE group_id = %s", (group_id,))
+        cur.execute(
+            "UPDATE group_members SET last_prompted_at = NULL, last_completed_at = NULL WHERE group_id = %s",
+            (group_id,),
+        )
+
+
+def record_language_prompt(client: NeonClient, group_id: str, user_id: str) -> None:
+    query = sql.SQL(
+        """
+        INSERT INTO group_members (group_id, user_id, last_prompted_at)
+        VALUES (%s, %s, NOW())
+        ON CONFLICT (group_id, user_id)
+        DO UPDATE SET last_prompted_at = NOW()
+        """
+    )
+
+    with client.cursor() as cur:
+        cur.execute(query, (group_id, user_id))
+
+
+def replace_user_languages(
+    client: NeonClient,
+    group_id: str,
+    user_id: str,
+    languages: Sequence[Tuple[str, str]],
+) -> None:
+    with client.cursor() as cur:
+        cur.execute("DELETE FROM group_user_languages WHERE group_id = %s AND user_id = %s", (group_id, user_id))
+        if languages:
+            cur.executemany(
+                """
+                INSERT INTO group_user_languages (group_id, user_id, lang_code, lang_name)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (group_id, user_id, lang_code) DO UPDATE SET lang_name = EXCLUDED.lang_name
+                """,
+                [(group_id, user_id, code.lower(), name) for code, name in languages],
+            )
+        cur.execute(
+            """
+            INSERT INTO group_members (group_id, user_id, last_completed_at)
+            VALUES (%s, %s, NOW())
+            ON CONFLICT (group_id, user_id)
+            DO UPDATE SET last_completed_at = NOW()
+            """,
+            (group_id, user_id),
+        )
+
+
+def fetch_user_languages(client: NeonClient, group_id: str, user_id: str) -> List[str]:
+    with client.cursor() as cur:
+        cur.execute(
+            "SELECT lang_code FROM group_user_languages WHERE group_id = %s AND user_id = %s ORDER BY lang_code",
+            (group_id, user_id),
+        )
+        rows = cur.fetchall()
+    return [row[0] for row in rows]

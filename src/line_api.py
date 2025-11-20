@@ -25,12 +25,23 @@ class LineApiClient:
         )
 
     def reply_text(self, reply_token: str, text: str) -> None:
+        self.reply_messages(reply_token, [{"type": "text", "text": text[:5000]}])
+
+    def reply_messages(self, reply_token: str, messages):  # type: ignore[override]
         url = f"{self.BASE_URL}/v2/bot/message/reply"
-        payload = {"replyToken": reply_token, "messages": [{"type": "text", "text": text[:5000]}]}
+        payload = {"replyToken": reply_token, "messages": [self._sanitize_message(msg) for msg in messages[:5]]}
         response = self._session.post(url, json=payload, timeout=5)
         if not response.ok:
             logger.error("LINE reply failed", extra={"status": response.status_code, "body": response.text})
             raise LineApiError(f"LINE reply failed with status {response.status_code}")
+
+    def push_messages(self, to: str, messages):  # type: ignore[override]
+        url = f"{self.BASE_URL}/v2/bot/message/push"
+        payload = {"to": to, "messages": [self._sanitize_message(msg) for msg in messages[:5]]}
+        response = self._session.post(url, json=payload, timeout=5)
+        if not response.ok:
+            logger.error("LINE push failed", extra={"status": response.status_code, "body": response.text})
+            raise LineApiError(f"LINE push failed with status {response.status_code}")
 
     def get_display_name(
         self,
@@ -55,3 +66,9 @@ class LineApiClient:
             return None
         data = response.json()
         return data.get("displayName")
+
+    @staticmethod
+    def _sanitize_message(message):
+        if message.get("type") == "text" and message.get("text"):
+            message = {**message, "text": message["text"][:5000]}
+        return message
