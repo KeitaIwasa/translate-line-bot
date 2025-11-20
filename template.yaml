@@ -20,22 +20,9 @@ Parameters:
     MinValue: 1
     MaxValue: 29
     Description: Lambda timeout in seconds
-  LineChannelSecret:
+  RuntimeSecretArn:
     Type: String
-    NoEcho: true
-    Description: LINE webhook signature secret
-  LineChannelAccessToken:
-    Type: String
-    NoEcho: true
-    Description: LINE Messaging API channel access token
-  GeminiApiKey:
-    Type: String
-    NoEcho: true
-    Description: Google Gemini API key
-  NeonDatabaseUrl:
-    Type: String
-    NoEcho: true
-    Description: Neon PostgreSQL connection string
+    Description: ARN of the Secrets Manager secret that stores sensitive runtime config (JSON)
   GeminiModel:
     Type: String
     Default: gemini-2.5-flash
@@ -53,10 +40,6 @@ Parameters:
     MinValue: 1
     MaxValue: 5
     Description: Number of Gemini retries
-  LineBotUserId:
-    Type: String
-    Default: ''
-    Description: Optional LINE Bot user ID for context exclusion
 
 Globals:
   Function:
@@ -67,16 +50,14 @@ Globals:
     Tracing: Active
     Environment:
       Variables:
-        LINE_CHANNEL_SECRET: !Ref LineChannelSecret
-        LINE_CHANNEL_ACCESS_TOKEN: !Ref LineChannelAccessToken
-        GEMINI_API_KEY: !Ref GeminiApiKey
-        NEON_DATABASE_URL: !Ref NeonDatabaseUrl
+        LINE_CHANNEL_SECRET: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:LINE_CHANNEL_SECRET}}"
+        LINE_CHANNEL_ACCESS_TOKEN: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:LINE_CHANNEL_ACCESS_TOKEN}}"
+        GEMINI_API_KEY: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:GEMINI_API_KEY}}"
+        NEON_DATABASE_URL: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:NEON_DATABASE_URL}}"
         GEMINI_MODEL: !Ref GeminiModel
         MAX_CONTEXT_MESSAGES: !Ref MaxContextMessages
         TRANSLATION_RETRY: !Ref TranslationRetry
-        LINE_BOT_USER_ID: !Ref LineBotUserId
-    Policies:
-      - AWSLambdaBasicExecutionRole
+        LINE_BOT_USER_ID: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:LINE_BOT_USER_ID}}"
 
 Resources:
   LineWebhookApi:
@@ -89,6 +70,8 @@ Resources:
     Properties:
       CodeUri: .
       Description: Handles LINE webhook events and triggers translation pipeline
+      Policies:
+        - AWSLambdaBasicExecutionRole
       Events:
         Webhook:
           Type: HttpApi
