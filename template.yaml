@@ -1,0 +1,106 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  LINE multilingual translation bot - serverless stack (Lambda + HTTP API)
+
+Parameters:
+  StageName:
+    Type: String
+    Default: prod
+    Description: HTTP API stage name
+  FunctionMemorySize:
+    Type: Number
+    Default: 512
+    MinValue: 128
+    MaxValue: 10240
+    Description: Lambda memory size in MB
+  FunctionTimeout:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    MaxValue: 29
+    Description: Lambda timeout in seconds
+  LineChannelSecret:
+    Type: String
+    NoEcho: true
+    Description: LINE webhook signature secret
+  LineChannelAccessToken:
+    Type: String
+    NoEcho: true
+    Description: LINE Messaging API channel access token
+  GeminiApiKey:
+    Type: String
+    NoEcho: true
+    Description: Google Gemini API key
+  NeonDatabaseUrl:
+    Type: String
+    NoEcho: true
+    Description: Neon PostgreSQL connection string
+  GeminiModel:
+    Type: String
+    Default: gemini-2.5-flash
+    AllowedPattern: ".+"
+    Description: Gemini model name
+  MaxContextMessages:
+    Type: Number
+    Default: 20
+    MinValue: 1
+    MaxValue: 50
+    Description: Maximum number of context messages sent to Gemini
+  TranslationRetry:
+    Type: Number
+    Default: 3
+    MinValue: 1
+    MaxValue: 5
+    Description: Number of Gemini retries
+  LineBotUserId:
+    Type: String
+    Default: ''
+    Description: Optional LINE Bot user ID for context exclusion
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Handler: src.lambda_handler.lambda_handler
+    MemorySize: !Ref FunctionMemorySize
+    Timeout: !Ref FunctionTimeout
+    Tracing: Active
+    Environment:
+      Variables:
+        LINE_CHANNEL_SECRET: !Ref LineChannelSecret
+        LINE_CHANNEL_ACCESS_TOKEN: !Ref LineChannelAccessToken
+        GEMINI_API_KEY: !Ref GeminiApiKey
+        NEON_DATABASE_URL: !Ref NeonDatabaseUrl
+        GEMINI_MODEL: !Ref GeminiModel
+        MAX_CONTEXT_MESSAGES: !Ref MaxContextMessages
+        TRANSLATION_RETRY: !Ref TranslationRetry
+        LINE_BOT_USER_ID: !Ref LineBotUserId
+    Policies:
+      - AWSLambdaBasicExecutionRole
+
+Resources:
+  LineWebhookApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref StageName
+
+  LineWebhookFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Description: Handles LINE webhook events and triggers translation pipeline
+      Events:
+        Webhook:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LineWebhookApi
+            Path: /webhook
+            Method: POST
+
+Outputs:
+  FunctionArn:
+    Description: ARN of the LINE webhook Lambda function
+    Value: !GetAtt LineWebhookFunction.Arn
+  HttpApiEndpoint:
+    Description: Invoke URL for the HTTP API stage
+    Value: !Sub "https://${LineWebhookApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
