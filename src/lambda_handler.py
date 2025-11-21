@@ -228,12 +228,13 @@ def _attempt_language_enrollment(event: LineEvent) -> bool:
         }
     )
 
+    confirm_text = (result.confirm_text.primary or _build_simple_confirm_text(supported))[:400]
     template_message = {
         "type": "template",
         "altText": "Confirm interpretation languages",
         "template": {
             "type": "confirm",
-            "text": "\n".join(result.confirm_text.as_lines())[:400],
+            "text": confirm_text,
             "actions": [
                 {"type": "postback", "label": f"🆗 {result.confirm_label}", "data": confirm_payload},
                 {"type": "postback", "label": f"↩️ {result.cancel_label}", "data": cancel_payload},
@@ -379,6 +380,14 @@ def _format_unsupported_message(languages) -> str:
     return "\n\n".join(messages)
 
 
+def _build_simple_confirm_text(languages) -> str:
+    names = [lang.primary_name or lang.english_name or lang.code for lang in languages]
+    joined = "、".join(filter(None, names))
+    if joined:
+        return f"{joined}の翻訳を有効にしますか？"
+    return "翻訳したい言語を確認してもよろしいですか？"
+
+
 def _encode_postback_payload(payload: Dict) -> str:
     raw = json.dumps(payload, separators=(",", ":"))
     encoded = base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
@@ -399,15 +408,12 @@ def _decode_postback_payload(data: str) -> Optional[Dict]:
 
 
 def _textset_to_dict(text_set) -> Dict[str, str]:
-    return {
-        "primary": text_set.primary,
-        "english": text_set.english,
-        "thai": text_set.thai,
-    }
+    primary = text_set.primary or text_set.english or text_set.thai or ""
+    return {"primary": primary}
 
 
 def _build_text_from_payload(payload: Optional[Dict]) -> str:
     if not payload:
         return "設定を取り消しました。再度、翻訳したい言語をすべて教えてください。"
-    lines = [payload.get("primary"), payload.get("english"), payload.get("thai")]
-    return "\n".join([line for line in lines if line])
+    primary = payload.get("primary")
+    return primary or "設定を取り消しました。再度、翻訳したい言語をすべて教えてください。"

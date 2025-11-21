@@ -18,6 +18,7 @@
 - [x] 設定管理（環境変数, Secrets 管理）とデプロイ用スクリプトを整備
 - [x] template.yaml を用いた AWS リソース定義を作成（SAM テンプレ）
 - [x] join/memberJoined/follow イベントに対応した言語設定フロー（Gemini で言語抽出→確認テンプレ生成→`group_user_languages` 登録）を実装（2025-11-20: `src/lambda_handler.py` + `src/language_preferences/` + `src/db/repositories.py` 更新。postback で完了/変更を処理し、Neon へ多言語設定を保存。）
+  - 2025-11-21: 確認テンプレのメッセージを入力言語の1文に絞り、postback data から多言語テキストを除去して LINE 制限（300文字）を超えないよう修正。
 - [x] Lambda のタイムアウト値を Gemini リクエストに合わせて再設定（2025-11-20: SAM パラメータ `FunctionTimeout=15` で `sam deploy --profile line-translate-bot --stack-name translate-line-bot-stg` を実施し、`translate-line-bot-stg-LineWebhookFunction` のタイムアウトを 15 秒へ引き上げ済み。CloudWatch Alarm は別途整備予定。）
 
 ## 4. テスト
