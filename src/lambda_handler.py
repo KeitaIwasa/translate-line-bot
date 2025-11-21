@@ -46,11 +46,11 @@ language_pref_service = LanguagePreferenceService(
 db_client = get_client(settings.neon_database_url)
 
 GROUP_PROMPT_MESSAGE = (
-    "Hello! I'm a multilingual translation bot. Please tell me the languages you want to translate to.\n"
-    "你好！我是一个多语言翻译机器人。请告诉我你想要翻译成哪些语言。\n"
-    "こんにちは！多言語翻訳ボットです。翻訳したい言語を教えてください。\n"
-    "สวัสดี! ฉันเป็นบอทแปลหลายภาษา กรุณาบอกฉันว่าคุณต้องการแปลเป็นภาษาใดบ้าง\n"
-    "ex) English, 中文, 日本語, ไทย"
+    "I'm a multilingual translation bot. Please tell me the languages you want to translate to.\n"
+    "我是一个多语言翻译机器人。请告诉我你想要翻译成哪些语言。\n"
+    "多言語翻訳ボットです。翻訳したい言語を教えてください。\n"
+    "ฉันเป็นบอทแปลหลายภาษา กรุณาบอกฉันว่าคุณต้องการแปลเป็นภาษาใดบ้าง\n"
+    "\nex) English, 中文, 日本語, ไทย"
 )
 DIRECT_GREETING = (
     "Thanks for adding me! Please invite me into a group so I can help with multilingual translation."

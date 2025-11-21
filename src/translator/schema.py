@@ -1,5 +1,4 @@
 TRANSLATION_SCHEMA = {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "properties": {
         "translations": {
@@ -17,10 +16,8 @@ TRANSLATION_SCHEMA = {
                     },
                 },
                 "required": ["lang", "text"],
-                "additionalProperties": False,
             },
         }
     },
     "required": ["translations"],
-    "additionalProperties": False,
 }

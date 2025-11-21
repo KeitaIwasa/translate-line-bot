@@ -18,13 +18,17 @@
 - [x] 設定管理（環境変数, Secrets 管理）とデプロイ用スクリプトを整備
 - [x] template.yaml を用いた AWS リソース定義を作成（SAM テンプレ）
 - [x] join/memberJoined/follow イベントに対応した言語設定フロー（Gemini で言語抽出→確認テンプレ生成→`group_user_languages` 登録）を実装（2025-11-20: `src/lambda_handler.py` + `src/language_preferences/` + `src/db/repositories.py` 更新。postback で完了/変更を処理し、Neon へ多言語設定を保存。）
+- [x] Lambda のタイムアウト値を Gemini リクエストに合わせて再設定（2025-11-20: SAM パラメータ `FunctionTimeout=15` で `sam deploy --profile line-translate-bot --stack-name translate-line-bot-stg` を実施し、`translate-line-bot-stg-LineWebhookFunction` のタイムアウトを 15 秒へ引き上げ済み。CloudWatch Alarm は別途整備予定。）
 
 ## 4. テスト
 - [ ] 単体テスト：翻訳ロジック／DB リポジトリ／LINE API ラッパー（translator・Webhook までは実施済み）
+  - 2025-11-21: Gemini クライアントのリクエスト／レスポンス検証用テスト（`tests/test_gemini_client.py`）を追加し、payload とフィルタ挙動をカバー済み。
+  - 2025-11-21: 実 API 向けライブテスト（`tests/test_gemini_live.py`）を追加し、`gemini-2.5-flash` を使った実リクエストが成功することを確認。
 - [ ] （2025-11-20 メモ）Secrets Manager 反映後の Lambda を `aws lambda invoke` で疎通確認済み（署名付き follow イベント → 200 OK）。今後は message イベントでの E2E テストを追加実施する。
 - [ ] 結合テスト：Webhook 受信から返信までのエンドツーエンド動作
 - [ ] 性能テスト：平均 200–350ms を満たすか検証し、ボトルネックを洗い出す
 - [ ] エラーハンドリングテスト：Gemini エラー、Neon 接続失敗、壊れたレスポンスなどの再試行挙動
+- [ ] 言語設定フローの E2E テストで CloudWatch Logs の Timeout／Gemini レイテンシを検証し、5 秒以内に収まらない場合のフォールバック（ユーザーへのリトライ案内）を確認する
 
 ## 5. デプロイ準備
 - [x] AWS 環境（IAM, Lambda, API Gateway, CloudWatch）を IaC（template.yaml）で構築し、ステージングにデプロイ（2025-11-20: Secrets Manager `line-translate-bot-secrets` を参照するよう SAM テンプレ更新→ `sam build`/`sam deploy --profile line-translate-bot` で `translate-line-bot-stg` スタックを ap-northeast-1 に作成。API エンドポイント：`https://cbvko1l0ml.execute-api.ap-northeast-1.amazonaws.com/stg`。Lambda ARN：`arn:aws:lambda:ap-northeast-1:215896857123:function:translate-line-bot-stg-LineWebhookFunction-a1Thoi5FRgnv`。）
