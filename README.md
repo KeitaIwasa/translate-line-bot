@@ -145,7 +145,76 @@ Lambda では **環境変数として設定**してください。
 
 ## Deployment
 
-AWS SDKを使用
+本番/ステージングとも AWS SAM でデプロイします。以下はステージング (`translate-line-bot-stg`) の例です。
+
+### 前提
+- AWS CLI / SAM CLI / Python 3.12 がローカルにインストール済み
+- `aws configure --profile line-translate-bot` で ap-northeast-1 の資格情報を設定済み
+- Secrets Manager `line-translate-bot-secrets` に以下キーを保存済み（`RuntimeSecretArn` パラメータで参照）
+  - `LINE_CHANNEL_SECRET`
+  - `LINE_CHANNEL_ACCESS_TOKEN`
+  - `LINE_BOT_USER_ID`
+  - `GEMINI_API_KEY`
+  - `NEON_DATABASE_URL`
+- `.env` にはローカル検証用の `NEON_DATABASE_URL` / `GEMINI_API_KEY` を入れてテスト可能
+
+### 1. 依存パッケージの準備
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 2. SAM ビルド
+
+```bash
+sam build
+```
+
+### 3. デプロイ
+
+```bash
+sam deploy \
+  --stack-name translate-line-bot-stg \
+  --region ap-northeast-1 \
+  --profile line-translate-bot \
+  --capabilities CAPABILITY_IAM \
+  --resolve-s3 \
+  --parameter-overrides \
+    StageName=stg \
+    FunctionMemorySize=512 \
+    FunctionTimeout=15 \
+    GeminiModel=gemini-2.5-flash \
+    MaxContextMessages=20 \
+    TranslationRetry=3 \
+    RuntimeSecretArn=arn:aws:secretsmanager:ap-northeast-1:215896857123:secret:line-translate-bot-secrets-Uqg35U
+```
+
+初回のみ `--guided` で `StageName` や `RuntimeSecretArn` を対話入力し、`samconfig.toml` に保存すると便利です。`--resolve-s3` を付けると SAM が管理 S3 バケットを自動で用意します。
+
+### 4. デプロイ確認
+
+```bash
+aws cloudformation describe-stacks \
+  --stack-name translate-line-bot-stg \
+  --profile line-translate-bot \
+  --query "Stacks[0].Outputs"
+```
+
+`HttpApiEndpoint` が表示されたら、LINE Developers の Webhook URL を更新し、`sam logs -n LineWebhookFunction --stack-name translate-line-bot-stg --profile line-translate-bot` で CloudWatch Logs も確認してください。
+
+### 5. Lambda コードのみを差し替えたい場合
+
+SAM 全体を更新せずコードだけ入れ替える場合は、`scripts/deploy.sh` を利用します。
+
+```bash
+export LAMBDA_FUNCTION_NAME=translate-line-bot-stg-LineWebhookFunction
+export AWS_REGION=ap-northeast-1
+./scripts/deploy.sh
+```
+
+Dependencies（`requirements.txt`）と `src/` を zip 化して `aws lambda update-function-code` を呼び出します。構成値を変える場合は SAM で再デプロイしてください。
 
 ---
 
