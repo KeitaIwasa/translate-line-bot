@@ -21,6 +21,7 @@ from .db.neon_client import get_client
 from .language_preferences import LanguagePreferenceService
 from .line_api import LineApiClient, LineApiError
 from .line_webhook import LineEvent, SignatureVerificationError, parse_events, verify_signature
+from .reply_formatter import format_translations
 from .translator.gemini_client import (
     ContextMessage as GeminiContextMessage,
     GeminiClient,
@@ -350,11 +351,8 @@ def _invoke_translation_with_retry(
 
 
 def _format_reply(original_text: str, translations: List[Translation]) -> str:
-    lines = [original_text.strip()]
-    for item in translations:
-        lines.append(f"[{item.lang.lower()}] {item.text.strip()}")
-    joined = "\n".join(filter(None, lines))
-    return joined[:5000]
+    del original_text  # original text is intentionally omitted in the reply format
+    return format_translations(translations)
 
 
 def _format_unsupported_message(languages) -> str:
