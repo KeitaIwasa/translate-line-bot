@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 import time
+import zlib
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -205,16 +206,10 @@ def _attempt_language_enrollment(event: LineEvent) -> bool:
         {
             "kind": "language_confirm",
             "action": "confirm",
-            "group_id": event.group_id,
-            "user_id": event.user_id,
             "languages": [
-                {"code": lang.code, "name": lang.english_name or lang.primary_name}
+                {"code": lang.code, "name": lang.primary_name or lang.english_name or lang.code}
                 for lang in supported
             ],
-            "texts": {
-                "completed": _textset_to_dict(result.completed_text),
-                "cancel": _textset_to_dict(result.cancel_text),
-            },
         }
     )
 
@@ -222,9 +217,6 @@ def _attempt_language_enrollment(event: LineEvent) -> bool:
         {
             "kind": "language_confirm",
             "action": "cancel",
-            "group_id": event.group_id,
-            "user_id": event.user_id,
-            "texts": {"cancel": _textset_to_dict(result.cancel_text)},
         }
     )
 
@@ -273,15 +265,14 @@ def _handle_postback_event(event: LineEvent) -> None:
         if not (event.group_id and event.user_id):
             return
         repositories.replace_user_languages(db_client, event.group_id, event.user_id, tuples)
-        text = _build_text_from_payload(payload.get("texts", {}).get("completed"))
+        text = _build_completion_message(tuples)
         line_client.reply_text(event.reply_token, text)
         logger.info(
             "Language preferences saved",
             extra={"group_id": event.group_id, "user_id": event.user_id, "languages": [code for code, _ in tuples]},
         )
     elif action == "cancel":
-        text = _build_text_from_payload(payload.get("texts", {}).get("cancel"))
-        line_client.reply_text(event.reply_token, text)
+        line_client.reply_text(event.reply_token, _build_cancel_message())
         logger.info("Language enrollment cancelled", extra={"group_id": event.group_id, "user_id": event.user_id})
 
 
@@ -388,32 +379,43 @@ def _build_simple_confirm_text(languages) -> str:
     return "翻訳したい言語を確認してもよろしいですか？"
 
 
+def _build_completion_message(languages) -> str:
+    names = [name for _, name in languages if name]
+    joined = "、".join(filter(None, names))
+    if joined:
+        return f"{joined}の翻訳を有効にしました。"
+    return "翻訳設定を保存しました。"
+
+
+def _build_cancel_message() -> str:
+    return "設定を取り消しました。再度、翻訳したい言語をすべて教えてください。"
+
+
 def _encode_postback_payload(payload: Dict) -> str:
-    raw = json.dumps(payload, separators=(",", ":"))
-    encoded = base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
-    return f"langpref={encoded}"
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    compressed = base64.urlsafe_b64encode(zlib.compress(raw)).decode("ascii").rstrip("=")
+    return f"langpref2={compressed}"
 
 
 def _decode_postback_payload(data: str) -> Optional[Dict]:
-    if not data.startswith("langpref="):
+    if not data.startswith("langpref"):
         return None
-    token = data.split("=", 1)[1]
+    prefix, token = data.split("=", 1)
     padding = "=" * (-len(token) % 4)
     try:
-        decoded = base64.urlsafe_b64decode(token + padding).decode("utf-8")
+        blob = base64.urlsafe_b64decode(token + padding)
+        if prefix == "langpref2":
+            blob = zlib.decompress(blob)
+        decoded = blob.decode("utf-8")
         return json.loads(decoded)
     except Exception:  # pylint: disable=broad-except
         logger.warning("Failed to decode postback payload", extra={"data": data})
         return None
 
 
-def _textset_to_dict(text_set) -> Dict[str, str]:
-    primary = text_set.primary or text_set.english or text_set.thai or ""
-    return {"primary": primary}
-
-
 def _build_text_from_payload(payload: Optional[Dict]) -> str:
+    # Deprecated helper retained for backward compatibility with older payloads (if any)
     if not payload:
-        return "設定を取り消しました。再度、翻訳したい言語をすべて教えてください。"
+        return _build_cancel_message()
     primary = payload.get("primary")
-    return primary or "設定を取り消しました。再度、翻訳したい言語をすべて教えてください。"
+    return primary or _build_cancel_message()
