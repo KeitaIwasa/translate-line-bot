@@ -49,11 +49,11 @@ language_pref_service = LanguagePreferenceService(
 db_client = get_client(settings.neon_database_url)
 
 GROUP_PROMPT_MESSAGE = (
-    "I'm a multilingual translation bot. Please tell me the languages you want to translate to.\n"
-    "我是一个多语言翻译机器人。请告诉我你想要翻译成哪些语言。\n"
-    "多言語翻訳ボットです。翻訳したい言語を教えてください。\n"
-    "ฉันเป็นบอทแปลหลายภาษา กรุณาบอกฉันว่าคุณต้องการแปลเป็นภาษาใดบ้าง\n"
-    "\nex) English, 中文, 日本語, ไทย"
+    "I'm a multilingual translation bot. Please tell me the languages you want to translate to.\n\n"
+    "多言語翻訳ボットです。翻訳したい言語を教えてください。\n\n"
+    "我是一个多语言翻译机器人。请告诉我你想要翻译成哪些语言。\n\n"
+    "ฉันเป็นบอทแปลหลายภาษา กรุณาบอกฉันว่าคุณต้องการแปลเป็นภาษาใดบ้าง\n\n"
+    "ex) English, 中文, 日本語, ไทย"
 )
 DIRECT_GREETING = (
     "Thanks for adding me! Please invite me into a group so I can help with multilingual translation."
@@ -307,8 +307,14 @@ def _handle_member_joined_event(event: LineEvent) -> None:
         if name:
             joined_names.append(name)
 
-    prefix = "、".join(joined_names) if joined_names else "New members"
-    message = f"{prefix} さん、ようこそ！\n" + GROUP_PROMPT_MESSAGE
+    prefix = "、".join(joined_names) if joined_names else "everyone"
+    message = (
+        f"Hello {prefix} !\n\n"
+        "When you want to change the interpreter's language settings, please remove this bot from the group once and then invite it again!\n\n"
+        "通訳の言語設定を変更するときは、このボットを一度グループから削除してから、再度招待してね！\n\n"
+        "如果你想更改口译语言设置，请先将此机器人从群组中删除，然后再重新邀请它！\n\n"
+        "หากคุณต้องการเปลี่ยนการตั้งค่าภาษาของล่าม กรุณานำบอทนี้ออกจากกลุ่มก่อน แล้วค่อยเชิญกลับมาอีกครั้ง!"
+    )
     line_client.reply_text(event.reply_token, message)
 
 
