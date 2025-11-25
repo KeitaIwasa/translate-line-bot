@@ -26,6 +26,7 @@ Requirements:
 - Preserve user names (sender_name) as they are. Do NOT translate names.
 - Preserve mention strings (e.g., "@John") exactly as they appear in the source text.
 - Use natural, context-aware translations.
+- Do NOT copy, quote, or echo the source_message.text in any translation output; provide only the translated text for each target language.
 - Return ONLY a JSON object that matches the given JSON Schema.
 - Do NOT include context_messages or target_languages in the output JSON.
 """

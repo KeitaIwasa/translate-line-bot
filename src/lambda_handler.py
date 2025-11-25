@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 import time
 import zlib
 from datetime import datetime, timezone
@@ -351,8 +352,35 @@ def _invoke_translation_with_retry(
 
 
 def _format_reply(original_text: str, translations: List[Translation]) -> str:
-    del original_text  # original text is intentionally omitted in the reply format
-    return format_translations(translations)
+    cleaned: List[Translation] = []
+    for item in translations:
+        text = _strip_source_echo(original_text, item.text)
+        cleaned.append(Translation(lang=item.lang, text=text))
+    return format_translations(cleaned)
+
+
+def _strip_source_echo(source_text: str, translated_text: str) -> str:
+    """Remove the original utterance when the model echoes it in the translation output."""
+
+    if not source_text or not translated_text:
+        return translated_text or ""
+
+    source = source_text.strip()
+    candidate = translated_text.strip()
+
+    # Drop exact echo
+    if candidate.lower() == source.lower():
+        return ""
+
+    # Common pattern: "<source> - <translation>" or "<source>：<translation>"
+    prefix_pattern = rf"^{re.escape(source)}\s*[-:：、，,。\u3000]*"
+    candidate = re.sub(prefix_pattern, "", candidate, flags=re.IGNORECASE)
+
+    # Common pattern: "<source> (<translation>)" when the source is echoed once
+    if candidate.startswith(source):
+        candidate = candidate[len(source):].lstrip(" ()[]-—–:：、，,。\u3000")
+
+    return candidate.strip()
 
 
 def _format_unsupported_message(languages) -> str:

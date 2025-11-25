@@ -16,6 +16,7 @@
 - [x] Gemini クライアントと翻訳ロジック（文脈投入・レスポンス検証・再試行）を実装
 - [x] LINE Messaging API 返信ロジック（翻訳結果フォーマット、部分成功ハンドリング）を実装
   - 2025-11-21: 翻訳結果の返信フォーマットから原文と言語コードを除去し、各翻訳を改行区切りで表示するよう更新。
+  - 2025-11-25: Gemini へのプロンプトに「原文をエコーしない」条件を追加し、返信整形時にも原文エコーを除去するサニタイズ処理を挿入。
 - [x] 設定管理（環境変数, Secrets 管理）とデプロイ用スクリプトを整備
 - [x] template.yaml を用いた AWS リソース定義を作成（SAM テンプレ）
 - [x] join/memberJoined/follow イベントに対応した言語設定フロー（Gemini で言語抽出→確認テンプレ生成→`group_user_languages` 登録）を実装（2025-11-20: `src/lambda_handler.py` + `src/language_preferences/` + `src/db/repositories.py` 更新。postback で完了/変更を処理し、Neon へ多言語設定を保存。）
