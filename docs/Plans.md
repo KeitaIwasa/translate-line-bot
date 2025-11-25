@@ -47,6 +47,7 @@
 5. Lambda コードのみのホットデプロイは `scripts/deploy.sh`（`LAMBDA_FUNCTION_NAME`/`AWS_REGION` 必須）で差分反映し、構成変更は必ず SAM で実施する。
 
 ## 6. リリース / 運用
+- [x] 障害対応（2025-11-25: Lambda が `translator` モジュールを読み込めず起動失敗 → `src/reply_formatter.py` の絶対 import を相対 import へ修正し、`sam build && sam deploy --stack-name translate-line-bot-stg --profile line-translate-bot` で再デプロイ。`No module named 'translator'` は解消済み）
 - [ ] ステージング環境で最終受け入れテストを完了し、Go/No-Go 判定を実行
 - [ ] 本番反映後、初回数日の監視体制（当番表・連絡方法）を決める
 - [ ] 運用ドキュメント（障害対応フロー、問い合わせ対応）を整備

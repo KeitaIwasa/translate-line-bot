@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import List
 
-from translator.gemini_client import Translation
+from .translator.gemini_client import Translation
 
 MAX_REPLY_LENGTH = 5000
 

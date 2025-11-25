@@ -193,6 +193,11 @@ sam deploy \
 
 初回のみ `--guided` で `StageName` や `RuntimeSecretArn` を対話入力し、`samconfig.toml` に保存すると便利です。`--resolve-s3` を付けると SAM が管理 S3 バケットを自動で用意します。
 
+#### デプロイ時のよくあるミス
+- `--stack-name` を付け忘れると SAM がどのスタックを更新するか判断できず即失敗します。常に `translate-line-bot-stg` を指定してください。
+- Lambda コードを S3 にアップロードするため `--resolve-s3` か `--s3-bucket` のどちらかが必須です。付け忘れると「S3 Bucket not specified」で止まります。
+- IAM 権限を含むスタックなので `--capabilities CAPABILITY_IAM` が必要です。これを付けないと CloudFormation の ChangeSet 作成が `Requires capabilities : [CAPABILITY_IAM]` で失敗します。
+
 ### 4. デプロイ確認
 
 ```bash
