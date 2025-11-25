@@ -14,7 +14,7 @@ class Settings:
     neon_database_url: str
     gemini_model: str = "gemini-2.5-flash"
     max_context_messages: int = 20
-    gemini_timeout_seconds: int = 10
+    gemini_timeout_seconds: int = 15
     translation_retry: int = 3
     log_level: str = "INFO"
     bot_user_id: Optional[str] = None
@@ -44,7 +44,7 @@ def get_settings() -> Settings:
         neon_database_url=required["NEON_DATABASE_URL"],
         gemini_model=env.get("GEMINI_MODEL", "gemini-2.5-flash"),
         max_context_messages=int(env.get("MAX_CONTEXT_MESSAGES", "20")),
-        gemini_timeout_seconds=int(env.get("GEMINI_TIMEOUT_SECONDS", "10")),
+        gemini_timeout_seconds=int(env.get("GEMINI_TIMEOUT_SECONDS", "15")),
         translation_retry=int(env.get("TRANSLATION_RETRY", "3")),
         log_level=env.get("LOG_LEVEL", "INFO"),
         bot_user_id=env.get("LINE_BOT_USER_ID"),

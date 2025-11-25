@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -141,50 +142,73 @@ class LanguagePreferenceService:
         if not text or not text.strip():
             return None
 
-        payload = self._build_payload(text)
-        response = self._session.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent",
-            params={"key": self._api_key},
-            json=payload,
-            timeout=self._timeout,
-        )
-        response.raise_for_status()
-        body = response.json()
-        logger.debug("Gemini language preference raw response", extra={"body": body})
+        start = time.monotonic()
+        max_attempts = 2
+        last_error: Exception | None = None
 
-        try:
-            candidate = body["candidates"][0]
-            part_text = candidate["content"]["parts"][0]["text"]
-        except (KeyError, IndexError) as exc:
-            raise ValueError(f"Unexpected Gemini response format: {body}") from exc
+        for attempt in range(max_attempts):
+            remaining = self._timeout - (time.monotonic() - start)
+            if remaining <= 1:
+                break
 
-        data = json.loads(part_text)
-        languages = [
-            LanguageOption(
-                code=item.get("code", "").lower(),
-                primary_name=item.get("display", {}).get("primary", ""),
-                english_name=item.get("display", {}).get("english", ""),
-                thai_name=item.get("display", {}).get("thai", ""),
-                supported=bool(item.get("supported", True)),
-            )
-            for item in data.get("languages", [])
-            if item.get("code")
-        ]
-        if not languages:
-            return None
+            payload = self._build_payload(text)
+            try:
+                response = self._session.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent",
+                    params={"key": self._api_key},
+                    json=payload,
+                    timeout=remaining,
+                )
+                response.raise_for_status()
+                body = response.json()
+                logger.debug("Gemini language preference raw response", extra={"body": body})
 
-        text_blocks = data.get("textBlocks", {})
-        buttons = data.get("buttonLabels", {})
-        result = LanguagePreferenceResult(
-            primary_language=data.get("primaryLanguage", languages[0].code),
-            languages=languages,
-            confirm_text=_parse_text_set(text_blocks.get("confirm")),
-            completed_text=_parse_text_set(text_blocks.get("completed")),
-            cancel_text=_parse_text_set(text_blocks.get("cancel")),
-            confirm_label=buttons.get("confirm", "完了"),
-            cancel_label=buttons.get("cancel", "変更する"),
-        )
-        return result
+                try:
+                    candidate = body["candidates"][0]
+                    part_text = candidate["content"]["parts"][0]["text"]
+                except (KeyError, IndexError) as exc:
+                    raise ValueError(f"Unexpected Gemini response format: {body}") from exc
+
+                data = json.loads(part_text)
+                languages = [
+                    LanguageOption(
+                        code=item.get("code", "").lower(),
+                        primary_name=item.get("display", {}).get("primary", ""),
+                        english_name=item.get("display", {}).get("english", ""),
+                        thai_name=item.get("display", {}).get("thai", ""),
+                        supported=bool(item.get("supported", True)),
+                    )
+                    for item in data.get("languages", [])
+                    if item.get("code")
+                ]
+                if not languages:
+                    return None
+
+                text_blocks = data.get("textBlocks", {})
+                buttons = data.get("buttonLabels", {})
+                result = LanguagePreferenceResult(
+                    primary_language=data.get("primaryLanguage", languages[0].code),
+                    languages=languages,
+                    confirm_text=_parse_text_set(text_blocks.get("confirm")),
+                    completed_text=_parse_text_set(text_blocks.get("completed")),
+                    cancel_text=_parse_text_set(text_blocks.get("cancel")),
+                    confirm_label=buttons.get("confirm", "完了"),
+                    cancel_label=buttons.get("cancel", "変更する"),
+                )
+                return result
+            except Exception as exc:  # pylint: disable=broad-except
+                last_error = exc
+                logger.warning(
+                    "Language preference request failed (attempt %s/%s)",
+                    attempt + 1,
+                    max_attempts,
+                    exc_info=exc,
+                )
+                time.sleep(0.2 * (attempt + 1))
+
+        if last_error:
+            raise last_error
+        return None
 
     def _build_payload(self, message_text: str) -> Dict:
         return {

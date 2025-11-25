@@ -58,6 +58,11 @@ GROUP_PROMPT_MESSAGE = (
 DIRECT_GREETING = (
     "Thanks for adding me! Please invite me into a group so I can help with multilingual translation."
 )
+LANGUAGE_ANALYSIS_FALLBACK = (
+    "ごめんなさい、翻訳する言語の確認に失敗しました。数秒おいてから、翻訳したい言語をカンマ区切りで送ってください。\n"
+    "Sorry, I couldn't detect your languages. Please resend after a few seconds (e.g., English, 日本語, 中文, ไทย).\n"
+    "ขออภัย ไม่สามารถระบุภาษาได้ กรุณาลองส่งมาใหม่อีกครั้ง (ตัวอย่าง: English, 日本語, 中文, ไทย)"
+)
 
 
 def lambda_handler(event, _context):
@@ -178,11 +183,15 @@ def _attempt_language_enrollment(event: LineEvent) -> bool:
         result = language_pref_service.analyze(event.text)
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("Failed to analyze language preferences: %s", exc)
-        return False
+        if event.reply_token:
+            line_client.reply_text(event.reply_token, LANGUAGE_ANALYSIS_FALLBACK)
+        return True
 
     if not result:
         logger.info("Language analysis returned no result", extra={"user_id": event.user_id})
-        return False
+        if event.reply_token:
+            line_client.reply_text(event.reply_token, LANGUAGE_ANALYSIS_FALLBACK)
+        return True
 
     supported = result.supported_languages
     unsupported = result.unsupported_languages
