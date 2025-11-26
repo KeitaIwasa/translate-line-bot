@@ -76,8 +76,13 @@ class GeminiClient:
         params = {"key": self._api_key}
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent"
 
-        logger.info("Gemini request payload: %s", json.dumps(payload, ensure_ascii=False))
-        logger.debug("Sending translation request to Gemini", extra={"target_langs": target_languages})
+        try:
+            user_content_str = payload["contents"][0]["parts"][0]["text"]
+            user_content_obj = json.loads(user_content_str)
+            logger.info("Gemini request content decoded: %s", json.dumps(user_content_obj, ensure_ascii=False))
+        except Exception:  # pylint: disable=broad-except
+            logger.debug("Failed to decode Gemini request content for logging", exc_info=True)
+
         response = self._session.post(url, params=params, json=payload, timeout=self._timeout)
         try:
             response.raise_for_status()
@@ -87,8 +92,6 @@ class GeminiClient:
             raise
 
         body = response.json()
-        logger.info("Gemini response body: %s", json.dumps(body, ensure_ascii=False))
-
         try:
             candidate = body["candidates"][0]
             part_text = candidate["content"]["parts"][0]["text"]
@@ -141,7 +144,8 @@ class GeminiClient:
                                         for msg in context_messages
                                     ],
                                     "target_languages": target_languages,
-                                }
+                                },
+                                ensure_ascii=False,
                             )
                         }
                     ],

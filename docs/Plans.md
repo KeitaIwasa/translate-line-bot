@@ -23,6 +23,8 @@
   - 2025-11-26: CloudWatch で payload JSON を直接確認できるよう `Gemini request payload: {json}` 形式で出力し、デバッグ用の一時ログを削除。
   - 2025-11-26: Gemini のレスポンス JSON も `Gemini response body: {json}` 形式で INFO 出力するよう追加。
   - 2025-11-26: 新コンテナで root handlers が空になるケースに備え、`lambda_handler` で StreamHandler を強制追加し INFO ログを恒常化。
+  - 2025-11-26: Gemini リクエストの `text` 部分をデコードして人が読める JSON も INFO 出力し、payload 内の Unicode エスケープを回避。
+  - 2025-11-26: Gemini レスポンスの content もデコードして人が読める JSON で INFO 出力。
   - 2025-11-26: Gemini Structured Output をパース後の翻訳 JSON を `Gemini parsed translations: {json}` として INFO 出力し、Unicode エスケープせず可読ログに改善。
   - 2025-11-26: 言語設定を「ユーザー毎」から「グループ単位（一度設定すれば全員に適用）」へ変更。DB は `group_languages` に集約し、確認ポストバックでグループ全体の言語リストを保存するよう更新。
   - 2025-11-26: 言語設定確認テンプレートの重複押下で完了メッセージが何度も送られる問題を修正（初回以降は無視）。
