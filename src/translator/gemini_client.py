@@ -13,22 +13,24 @@ from .schema import TRANSLATION_SCHEMA
 logger = logging.getLogger(__name__)
 
 SYSTEM_INSTRUCTION = """
-You are a translation engine for a multi-language LINE group.
+You are an interpreting engine for a multilingual LINE group.
 
-You receive a JSON object with:
-- "source_message": the message to translate, including sender information.
-- "context_messages": recent messages in the same group, each with sender information.
-- "target_languages": an array of language codes to translate into.
+You receive a JSON object containing:
+
+* "source_message": the message to be translated
+* "context_messages": recent messages in the same group
+* "target_languages": an array of language codes to translate into
 
 Requirements:
-- Use "source_message.text" as the text to translate.
-- Use "context_messages" only to understand the context and who is talking to whom.
-- Preserve user names (sender_name) as they are. Do NOT translate names.
-- Preserve mention strings (e.g., "@John") exactly as they appear in the source text.
-- Use natural, context-aware translations.
-- Do NOT copy, quote, or echo the source_message.text in any translation output; provide only the translated text for each target language.
-- Return ONLY a JSON object that matches the given JSON Schema.
-- Do NOT include context_messages or target_languages in the output JSON.
+
+* Use "source_message.text" as the text to translate.
+* Use "context_messages" to understand the context and who is speaking to whom.
+* Preserve user names (sender_name) exactly as they are; Do NOT translate them.
+* Preserve mention strings (e.g., "@John") in their original form.
+* Produce natural interpretations that match each user's tone and the conversational context.
+* Do not copy, quote, or directly reproduce the source_message.text in the translation output; return only the translated text for each target language.
+* Output only a JSON object that conforms to the specified JSON Schema.
+* Do NOT include context_messages or target_languages in the output JSON.
 """
 
 
@@ -115,6 +117,9 @@ class GeminiClient:
         context_messages: Iterable[ContextMessage],
         target_languages: List[str],
     ) -> dict:
+        def _format_timestamp(dt: datetime) -> str:
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+
         payload = {
             "systemInstruction": {
                 "parts": [
@@ -133,13 +138,13 @@ class GeminiClient:
                                     "source_message": {
                                         "sender_name": source_message.sender_name,
                                         "text": source_message.text,
-                                        "timestamp": source_message.timestamp.isoformat(),
+                                        "timestamp": _format_timestamp(source_message.timestamp),
                                     },
                                     "context_messages": [
                                         {
                                             "sender_name": msg.sender_name,
                                             "text": msg.text,
-                                            "timestamp": msg.timestamp.isoformat(),
+                                            "timestamp": _format_timestamp(msg.timestamp),
                                         }
                                         for msg in context_messages
                                     ],
