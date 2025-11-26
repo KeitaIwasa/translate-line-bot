@@ -12,3 +12,4 @@
 - 2025-11-26: `pytest` 全体実行で `tests/test_reply_formatting.py` が相対 import エラーになるため、パス/パッケージ設定の修正が必要（詳細は `docs/Plans.md`）。
 - 2025-11-26: 新アーキテクチャ案を `src_new/` 配下に実装（Dispatcher/Handlers/Domain/Infra 分離）。切り替える場合は Handler 指定を `src_new.lambda_handler::lambda_handler` に変更し、CodeUri を合わせてデプロイする（現行 `src/` は無変更）。
 - 2025-11-26: ステージング `translate-line-bot-stg` を `src_new.lambda_handler` ハンドラ構成でデプロイ済み（scripts/deploy.sh）。HttpApiEndpoint=`https://cbvko1l0ml.execute-api.ap-northeast-1.amazonaws.com/stg`。
+- 2025-11-26: `scripts/deploy.sh` が STAGE に応じて Secrets Manager の名前を自動選択（prod→`prod/line-translate-bot-secrets`, その他→`stg/line-translate-bot-secrets`）。`RUNTIME_SECRET_ARN` を環境変数で渡せば上書き可能。

@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -21,10 +20,9 @@ class Settings:
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Load strongly typed settings from environment variables."""
+    """環境変数から設定を読み込む薄いラッパー（既存実装と同等）。"""
 
     env = os.environ
-
     required = {
         "LINE_CHANNEL_SECRET": env.get("LINE_CHANNEL_SECRET"),
         "LINE_CHANNEL_ACCESS_TOKEN": env.get("LINE_CHANNEL_ACCESS_TOKEN"),
