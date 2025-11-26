@@ -6,7 +6,7 @@ import logging
 import re
 import time
 import zlib
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
 
 try:  # pragma: no cover - optional dependency
@@ -290,6 +290,8 @@ def _handle_postback_event(event: LineEvent) -> None:
 def _handle_join_event(event: LineEvent) -> None:
     if not (event.group_id and event.reply_token):
         return
+    join_time = _event_timestamp(event) or datetime.now(timezone.utc)
+    repositories.record_bot_joined_at(db_client, event.group_id, join_time)
     repositories.reset_group_language_settings(db_client, event.group_id)
     line_client.reply_text(event.reply_token, GROUP_PROMPT_MESSAGE)
 
@@ -298,11 +300,21 @@ def _handle_member_joined_event(event: LineEvent) -> None:
     if not (event.group_id and event.reply_token):
         return
 
-    joined_names: List[str] = []
+    event_time = _event_timestamp(event) or datetime.now(timezone.utc)
+    bot_joined_at = repositories.fetch_bot_joined_at(db_client, event.group_id)
+
     for user_id in event.joined_user_ids:
         if not user_id:
             continue
         repositories.ensure_group_member(db_client, event.group_id, user_id)
+
+    if bot_joined_at and (event_time - bot_joined_at) < timedelta(minutes=10):
+        return
+
+    joined_names: List[str] = []
+    for user_id in event.joined_user_ids:
+        if not user_id:
+            continue
         name = line_client.get_display_name("group", event.group_id, user_id)
         if name:
             joined_names.append(name)
@@ -452,6 +464,15 @@ def _decode_postback_payload(data: str) -> Optional[Dict]:
     except Exception:  # pylint: disable=broad-except
         logger.warning("Failed to decode postback payload", extra={"data": data})
         return None
+
+
+def _event_timestamp(event: LineEvent) -> Optional[datetime]:
+    try:
+        if event.timestamp:
+            return datetime.fromtimestamp(event.timestamp / 1000, tz=timezone.utc)
+    except Exception:  # pylint: disable=broad-except
+        logger.warning("Failed to parse event timestamp", extra={"timestamp": event.timestamp})
+    return None
 
 
 def _build_text_from_payload(payload: Optional[Dict]) -> str:

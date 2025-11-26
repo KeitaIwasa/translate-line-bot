@@ -8,6 +8,8 @@ from psycopg import sql
 
 from .neon_client import NeonClient
 
+BOT_JOIN_MARKER = "__bot_join__"
+
 
 @dataclass(frozen=True)
 class ContextMessage:
@@ -112,6 +114,34 @@ def ensure_group_member(client: NeonClient, group_id: str, user_id: str) -> None
 
     with client.cursor() as cur:
         cur.execute(query, (group_id, user_id))
+
+
+def record_bot_joined_at(client: NeonClient, group_id: str, joined_at: datetime) -> None:
+    ts = joined_at
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+
+    query = sql.SQL(
+        """
+        INSERT INTO group_members (group_id, user_id, joined_at)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (group_id, user_id)
+        DO UPDATE SET joined_at = EXCLUDED.joined_at
+        """
+    )
+
+    with client.cursor() as cur:
+        cur.execute(query, (group_id, BOT_JOIN_MARKER, ts))
+
+
+def fetch_bot_joined_at(client: NeonClient, group_id: str) -> Optional[datetime]:
+    with client.cursor() as cur:
+        cur.execute(
+            "SELECT joined_at FROM group_members WHERE group_id = %s AND user_id = %s",
+            (group_id, BOT_JOIN_MARKER),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
 
 
 def reset_group_language_settings(client: NeonClient, group_id: str) -> None:
