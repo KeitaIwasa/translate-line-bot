@@ -32,8 +32,17 @@ from .translator.gemini_client import (
 from .translator.service import TranslationService
 
 settings = get_settings()
-logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
+level = getattr(logging, settings.log_level.upper(), logging.INFO)
+logging.basicConfig(level=level, force=True)
+# Ensure a stream handler exists even if Lambda/runtime cleared handlers
+root_logger = logging.getLogger()
+if not root_logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+    root_logger.addHandler(handler)
+root_logger.setLevel(level)
 logger = logging.getLogger(__name__)
+logger.setLevel(level)
 
 line_client = LineApiClient(settings.line_channel_access_token)
 gemini_translation_client = GeminiClient(
