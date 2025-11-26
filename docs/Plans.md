@@ -19,6 +19,9 @@
   - 2025-11-25: Gemini へのプロンプトに「原文をエコーしない」条件を追加し、返信整形時にも原文エコーを除去するサニタイズ処理を挿入。
   - 2025-11-26: Gemini 429 (rate limit) を受けた場合はリトライせず、1回だけ「You have reached the rate limit. Please try again later.」を返信。直前に同一メッセージを送っていれば送信しないよう抑止。
   - 2025-11-26: Gemini へ送信する payload を CloudWatch Logs で確認できるよう INFO ログ出力を追加。
+  - 2025-11-26: Lambda 既定 WARNING ハンドラで INFO ログが落ちない問題に対応し、`logging.basicConfig(..., force=True)` でログレベルを確実に適用。
+  - 2025-11-26: CloudWatch で payload JSON を直接確認できるよう `Gemini request payload: {json}` 形式で出力し、デバッグ用の一時ログを削除。
+  - 2025-11-26: Gemini のレスポンス JSON も `Gemini response body: {json}` 形式で INFO 出力するよう追加。
   - 2025-11-26: 言語設定を「ユーザー毎」から「グループ単位（一度設定すれば全員に適用）」へ変更。DB は `group_languages` に集約し、確認ポストバックでグループ全体の言語リストを保存するよう更新。
   - 2025-11-26: 言語設定確認テンプレートの重複押下で完了メッセージが何度も送られる問題を修正（初回以降は無視）。
   - 2025-11-26: 言語設定確認テンプレートで「完了」後に「変更する」を押しても（または逆順でも）応答しないよう postback を相互排他に変更。
