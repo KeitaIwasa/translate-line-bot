@@ -44,7 +44,7 @@ Parameters:
 Globals:
   Function:
     Runtime: python3.12
-    Handler: src.lambda_handler.lambda_handler
+    Handler: src_new.lambda_handler.lambda_handler
     MemorySize: !Ref FunctionMemorySize
     Timeout: !Ref FunctionTimeout
     Tracing: Active

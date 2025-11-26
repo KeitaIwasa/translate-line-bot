@@ -25,13 +25,14 @@ Gemini 2.5 Flash の Structured Output を用いて、
 
 ---
 
-## Architecture (Minimal Version)
+## Architecture (Modular Version)
 
 ```
-LINE → API Gateway → Lambda(Python)
-                     ├→ NeonDB (language settings / context 20 messages)
-                     ├→ Gemini 2.5 Flash (translation)
-                     └→ LINE Messaging API (reply)
+LINE → API Gateway → Lambda (Python, layered)
+                     ├→ presentation  : webhook parsing / reply formatting
+                     ├→ domain        : use-cases & models
+                     ├→ infra         : LINE / Gemini / Neon adapters
+                     └→ app           : DI bootstrap & event dispatcher
 ```
 
 ---
@@ -52,23 +53,42 @@ LINE → API Gateway → Lambda(Python)
 
 ## Repository Structure
 
+### 新アーキテクチャ（推奨・移行中、`src_new/`）
+```
+src_new/
+├─ lambda_handler.py          # 薄いエントリポイント（署名検証＋ディスパッチのみ）
+├─ app/
+│   ├─ bootstrap.py           # DI/依存組み立て
+│   ├─ dispatcher.py          # event.type ルーティング
+│   └─ handlers/              # message/postback/join/memberJoined/follow
+├─ domain/
+│   ├─ models.py              # イベント・翻訳リクエスト・言語設定などのドメインモデル
+│   ├─ ports.py               # LINE/Gemini/Neon 抽象インターフェース
+│   └─ services/translation_service.py
+├─ infra/
+│   ├─ line_api.py            # LinePort 実装
+│   ├─ gemini_translation.py  # TranslationPort 実装
+│   ├─ language_pref_client.py# LanguagePreferencePort 実装
+│   ├─ neon_client.py         # psycopg ConnectionPool ラッパー
+│   └─ neon_repositories.py   # MessageRepositoryPort 実装
+├─ presentation/
+│   ├─ line_webhook_parser.py # Webhook JSON → ドメインイベント
+│   └─ reply_formatter.py     # 原文エコー除去＋返信整形
+└─ config.py
+```
+
+### 既存シンプル構成（互換・当面維持、`src/`）
 ```
 src/
-├─ lambda_handler.py         # Lambdaエントリポイント
-├─ line_webhook.py           # LINE Webhook処理
-├─ line_api.py               # LINE Messaging API呼び出し
-│
-├─ translator/
-│   ├─ gemini_client.py      # Gemini 2.5 Flash呼び出し
-│   └─ schema.py             # Structured Output JSON Schema
-│
-├─ db/
-│   ├─ neon_client.py        # Neon用DB接続クライアント
-│   └─ repositories.py       # 言語設定/文脈取得処理
-│
-├─ config.py                 # 環境変数管理
-└─ utils/ (必要なら)
+├─ lambda_handler.py          # 旧エントリポイント（ロジック内包）
+├─ line_webhook.py            # Webhook パース＆署名検証
+├─ line_api.py                # LINE Messaging API
+├─ translator/                # Gemini クライアント
+├─ db/                        # Neon リポジトリ
+└─ reply_formatter.py         # 翻訳整形
 ```
+
+> 注: `src_new` を Handler で参照するか、CodeUri を合わせて指定してください（下記参照）。
 
 ---
 
@@ -150,7 +170,7 @@ Lambda では **環境変数として設定**してください。
 ### 前提
 - AWS CLI / SAM CLI / Python 3.12 がローカルにインストール済み
 - `aws configure --profile line-translate-bot` で ap-northeast-1 の資格情報を設定済み
-- Secrets Manager `line-translate-bot-secrets` に以下キーを保存済み（`RuntimeSecretArn` パラメータで参照）
+- Secrets Manager `prod/line-translate-bot-secrets` に以下キーを保存済み（`RuntimeSecretArn` パラメータで参照）
   - `LINE_CHANNEL_SECRET`
   - `LINE_CHANNEL_ACCESS_TOKEN`
   - `GEMINI_API_KEY`
@@ -187,7 +207,7 @@ sam deploy \
     GeminiModel=gemini-2.5-flash \
     MaxContextMessages=20 \
     TranslationRetry=3 \
-    RuntimeSecretArn=arn:aws:secretsmanager:ap-northeast-1:215896857123:secret:line-translate-bot-secrets-Uqg35U
+    RuntimeSecretArn=arn:aws:secretsmanager:ap-northeast-1:215896857123:secret:prod/line-translate-bot-secrets-Uqg35U
 ```
 
 初回のみ `--guided` で `StageName` や `RuntimeSecretArn` を対話入力し、`samconfig.toml` に保存すると便利です。`--resolve-s3` を付けると SAM が管理 S3 バケットを自動で用意します。
@@ -242,6 +262,23 @@ export AWS_REGION=ap-northeast-1
 ```
 
 Dependencies（`requirements.txt`）と `src/` を zip 化して `aws lambda update-function-code` を呼び出します。構成値を変える場合は SAM で再デプロイしてください。
+
+### 6. 新アーキテクチャに切り替える場合
+
+`template.yaml` の Lambda 設定を以下のように変更します（例）:
+
+```yaml
+Resources:
+  LineWebhookFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src_new        # ルートを src_new に変更
+      Handler: lambda_handler.lambda_handler
+      Runtime: python3.12
+      # 既存の環境変数/ロール/タイムアウトなどはそのまま
+```
+
+もしくは Handler を `src_new.lambda_handler::lambda_handler` に設定する方法でも可。デプロイ前に `sam build` で解決されることを確認してください。
 
 ---
 
