@@ -26,6 +26,7 @@ from .reply_formatter import format_translations
 from .translator.gemini_client import (
     ContextMessage as GeminiContextMessage,
     GeminiClient,
+    GeminiRateLimitError,
     Translation,
 )
 from .translator.service import TranslationService
@@ -47,6 +48,9 @@ language_pref_service = LanguagePreferenceService(
     timeout_seconds=settings.gemini_timeout_seconds,
 )
 db_client = get_client(settings.neon_database_url)
+
+RATE_LIMIT_MESSAGE = "You have reached the rate limit. Please try again later."
+_last_rate_limit_message: Dict[str, str] = {}
 
 GROUP_PROMPT_MESSAGE = (
     "I'm a multilingual translation bot. Please tell me the languages you want to translate to.\n\n"
@@ -165,6 +169,9 @@ def _handle_message_event(event: LineEvent) -> None:
         if translations:
             reply_text = _format_reply(event.text, translations)
             line_client.reply_text(event.reply_token, reply_text)
+    except GeminiRateLimitError:
+        logger.warning("Gemini rate limited; notifying user")
+        _send_rate_limit_notice(event)
     except Exception:
         logger.exception("Translation pipeline failed")
     finally:
@@ -365,6 +372,9 @@ def _invoke_translation_with_retry(
                 candidate_languages=candidate_languages,
             )
         except Exception as exc:  # pylint: disable=broad-except
+            if isinstance(exc, GeminiRateLimitError):
+                last_error = exc
+                break
             logger.warning(
                 "Gemini translation failed (attempt %s/%s)",
                 attempt + 1,
@@ -376,6 +386,15 @@ def _invoke_translation_with_retry(
     if last_error:
         raise last_error
     return []
+
+
+def _send_rate_limit_notice(event: LineEvent) -> None:
+    key = event.group_id or event.user_id or "unknown"
+    if _last_rate_limit_message.get(key) == RATE_LIMIT_MESSAGE:
+        return
+    if event.reply_token:
+        line_client.reply_text(event.reply_token, RATE_LIMIT_MESSAGE)
+        _last_rate_limit_message[key] = RATE_LIMIT_MESSAGE
 
 
 def _format_reply(original_text: str, translations: List[Translation]) -> str:

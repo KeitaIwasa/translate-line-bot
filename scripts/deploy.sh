@@ -1,31 +1,50 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ -z "${LAMBDA_FUNCTION_NAME:-}" || -z "${AWS_REGION:-}" ]]; then
-  echo "Please set LAMBDA_FUNCTION_NAME and AWS_REGION environment variables." >&2
-  exit 1
+# ステージング／本番共通の SAM デプロイスクリプト
+# 環境変数で上書き可能なパラメータ:
+# STACK_NAME, PROFILE, REGION, STAGE, GEMINI_MODEL, FUNCTION_MEMORY_SIZE, FUNCTION_TIMEOUT,
+# MAX_CONTEXT_MESSAGES, TRANSLATION_RETRY, RUNTIME_SECRET_ARN, S3_BUCKET
+
+STACK_NAME="${STACK_NAME:-translate-line-bot-stg}"
+PROFILE="${PROFILE:-line-translate-bot}"
+REGION="${REGION:-ap-northeast-1}"
+STAGE="${STAGE:-stg}"
+GEMINI_MODEL="${GEMINI_MODEL:-gemini-2.5-flash}"
+FUNCTION_MEMORY_SIZE="${FUNCTION_MEMORY_SIZE:-512}"
+FUNCTION_TIMEOUT="${FUNCTION_TIMEOUT:-15}"
+MAX_CONTEXT_MESSAGES="${MAX_CONTEXT_MESSAGES:-20}"
+TRANSLATION_RETRY="${TRANSLATION_RETRY:-3}"
+RUNTIME_SECRET_ARN="${RUNTIME_SECRET_ARN:-arn:aws:secretsmanager:ap-northeast-1:215896857123:secret:line-translate-bot-secrets-Uqg35U}"
+S3_BUCKET="${S3_BUCKET:-}"
+
+echo "SAM Build..."
+sam build
+
+deploy_args=(
+  --stack-name "$STACK_NAME"
+  --region "$REGION"
+  --profile "$PROFILE"
+  --capabilities CAPABILITY_IAM
+  --parameter-overrides
+    StageName="$STAGE"
+    FunctionMemorySize="$FUNCTION_MEMORY_SIZE"
+    FunctionTimeout="$FUNCTION_TIMEOUT"
+    GeminiModel="$GEMINI_MODEL"
+    MaxContextMessages="$MAX_CONTEXT_MESSAGES"
+    TranslationRetry="$TRANSLATION_RETRY"
+    RuntimeSecretArn="$RUNTIME_SECRET_ARN"
+)
+
+if [[ -n "$S3_BUCKET" ]]; then
+  echo "Using provided S3 bucket: $S3_BUCKET"
+  deploy_args+=(--s3-bucket "$S3_BUCKET")
+else
+  echo "No S3 bucket provided. Using --resolve-s3 to create/use a managed bucket."
+  deploy_args+=(--resolve-s3)
 fi
 
-ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
-DIST_DIR="$ROOT_DIR/dist"
-BUILD_DIR="$DIST_DIR/build"
-PACKAGE_ZIP="$DIST_DIR/translate-line-bot.zip"
+echo "Deploying stack '$STACK_NAME' to region '$REGION' (stage=$STAGE, profile=$PROFILE)..."
+sam deploy "${deploy_args[@]}"
 
-rm -rf "$DIST_DIR"
-mkdir -p "$BUILD_DIR"
-
-pip3 install --upgrade pip >/dev/null
-pip3 install -r "$ROOT_DIR/requirements.txt" -t "$BUILD_DIR"
-
-cp -R "$ROOT_DIR"/src/* "$BUILD_DIR"/
-
-pushd "$BUILD_DIR" >/dev/null
-zip -r "$PACKAGE_ZIP" .
-popd >/dev/null
-
-aws lambda update-function-code \
-  --function-name "$LAMBDA_FUNCTION_NAME" \
-  --region "$AWS_REGION" \
-  --zip-file "fileb://$PACKAGE_ZIP"
-
-echo "Deployed package: $PACKAGE_ZIP"
+echo "Deploy completed."

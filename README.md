@@ -193,6 +193,29 @@ sam deploy \
 
 初回のみ `--guided` で `StageName` や `RuntimeSecretArn` を対話入力し、`samconfig.toml` に保存すると便利です。`--resolve-s3` を付けると SAM が管理 S3 バケットを自動で用意します。
 
+### 3-1. デプロイスクリプト (`scripts/deploy.sh`) の利用
+
+手元の環境変数で上書きしつつ、ビルドからデプロイまで一括実行できます。
+
+```bash
+# ステージング（既定値のまま）
+./scripts/deploy.sh
+
+# 任意のデプロイ用 S3 バケットを指定
+S3_BUCKET=my-sam-artifacts ./scripts/deploy.sh
+
+# 本番スタックなど別環境にデプロイ
+STACK_NAME=translate-line-bot-prod STAGE=prod PROFILE=line-translate-bot ./scripts/deploy.sh
+```
+
+主な上書き可能変数:
+- `STACK_NAME` (既定: translate-line-bot-stg)
+- `PROFILE` (既定: line-translate-bot)
+- `REGION` (既定: ap-northeast-1)
+- `STAGE` (既定: stg)
+- `S3_BUCKET`（未指定なら `--resolve-s3` で自動バケット利用）
+- `RUNTIME_SECRET_ARN` ほか Lambda パラメータ
+
 #### デプロイ時のよくあるミス
 - `--stack-name` を付け忘れると SAM がどのスタックを更新するか判断できず即失敗します。常に `translate-line-bot-stg` を指定してください。
 - Lambda コードを S3 にアップロードするため `--resolve-s3` か `--s3-bucket` のどちらかが必須です。付け忘れると「S3 Bucket not specified」で止まります。

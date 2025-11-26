@@ -52,6 +52,10 @@ class Translation:
     text: str
 
 
+class GeminiRateLimitError(requests.HTTPError):
+    """Raised when Gemini returns HTTP 429 Too Many Requests."""
+
+
 class GeminiClient:
     def __init__(self, api_key: str, model: str, timeout_seconds: int = 10) -> None:
         self._api_key = api_key
@@ -72,9 +76,15 @@ class GeminiClient:
         params = {"key": self._api_key}
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent"
 
+        logger.info("Gemini request payload", extra={"payload": payload})
         logger.debug("Sending translation request to Gemini", extra={"target_langs": target_languages})
         response = self._session.post(url, params=params, json=payload, timeout=self._timeout)
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 429:
+                raise GeminiRateLimitError(exc.response) from exc
+            raise
 
         body = response.json()
         logger.debug("Gemini raw response", extra={"body": body})
