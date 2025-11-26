@@ -281,7 +281,13 @@ def _handle_postback_event(event: LineEvent) -> None:
         ]
         if not event.group_id:
             return
-        repositories.replace_group_languages(db_client, event.group_id, tuples)
+        completed = repositories.try_complete_group_languages(db_client, event.group_id, tuples)
+        if not completed:
+            logger.info(
+                "Duplicate language confirmation ignored",
+                extra={"group_id": event.group_id, "languages": [code for code, _ in tuples]},
+            )
+            return
         text = _build_completion_message(tuples)
         line_client.reply_text(event.reply_token, text)
         logger.info(

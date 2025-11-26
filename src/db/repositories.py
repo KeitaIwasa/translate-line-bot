@@ -192,3 +192,61 @@ def replace_group_languages(
             """,
             (group_id, GROUP_LANG_MARKER),
         )
+
+
+def try_complete_group_languages(
+    client: NeonClient,
+    group_id: str,
+    languages: Sequence[Tuple[str, str]],
+) -> bool:
+    """Complete language enrollment once; ignore subsequent duplicate postbacks.
+
+    Returns True if completion was performed, False if already completed.
+    """
+
+    with client.connection() as conn:
+        with conn.cursor() as cur:
+            # Ensure marker row exists and lock it to avoid races.
+            cur.execute(
+                """
+                INSERT INTO group_members (group_id, user_id)
+                VALUES (%s, %s)
+                ON CONFLICT (group_id, user_id) DO NOTHING
+                """,
+                (group_id, GROUP_LANG_MARKER),
+            )
+            cur.execute(
+                """
+                SELECT last_completed_at
+                FROM group_members
+                WHERE group_id = %s AND user_id = %s
+                FOR UPDATE
+                """,
+                (group_id, GROUP_LANG_MARKER),
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                # Already completed previously.
+                return False
+
+            cur.execute("DELETE FROM group_languages WHERE group_id = %s", (group_id,))
+            if languages:
+                cur.executemany(
+                    """
+                    INSERT INTO group_languages (group_id, lang_code, lang_name)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (group_id, lang_code) DO UPDATE SET lang_name = EXCLUDED.lang_name
+                    """,
+                    [(group_id, code.lower(), name) for code, name in languages],
+                )
+
+            cur.execute(
+                """
+                UPDATE group_members
+                SET last_completed_at = NOW()
+                WHERE group_id = %s AND user_id = %s
+                """,
+                (group_id, GROUP_LANG_MARKER),
+            )
+
+    return True

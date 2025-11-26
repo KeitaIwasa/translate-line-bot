@@ -20,6 +20,7 @@
   - 2025-11-26: Gemini 429 (rate limit) を受けた場合はリトライせず、1回だけ「You have reached the rate limit. Please try again later.」を返信。直前に同一メッセージを送っていれば送信しないよう抑止。
   - 2025-11-26: Gemini へ送信する payload を CloudWatch Logs で確認できるよう INFO ログ出力を追加。
   - 2025-11-26: 言語設定を「ユーザー毎」から「グループ単位（一度設定すれば全員に適用）」へ変更。DB は `group_languages` に集約し、確認ポストバックでグループ全体の言語リストを保存するよう更新。
+  - 2025-11-26: 言語設定確認テンプレートの重複押下で完了メッセージが何度も送られる問題を修正（初回以降は無視）。
 - [x] デプロイ用スクリプト `scripts/deploy.sh` を追加（環境変数で stack/profile/parameters を上書き可。S3 バケット未指定時は --resolve-s3 を使用）。
 - [x] 設定管理（環境変数, Secrets 管理）とデプロイ用スクリプトを整備
 - [x] template.yaml を用いた AWS リソース定義を作成（SAM テンプレ）
@@ -27,16 +28,6 @@
   - 2025-11-21: 確認テンプレのメッセージを入力言語の1文に絞り、postback data から多言語テキストを除去して LINE 制限（300文字）を超えないよう修正。
   - 2025-11-25: memberJoined イベントの歓迎文を「再招待で言語設定変更」案内に差し替え。ボット参加から10分以内に追加されたメンバーには歓迎メッセージを送らないよう制御し、`group_members` に `__bot_join__` レコードで参加時刻を記録。
 - [x] Lambda のタイムアウト値を Gemini リクエストに合わせて再設定（2025-11-20: SAM パラメータ `FunctionTimeout=15` で `sam deploy --profile line-translate-bot --stack-name translate-line-bot-stg` を実施し、`translate-line-bot-stg-LineWebhookFunction` のタイムアウトを 15 秒へ引き上げ済み。CloudWatch Alarm は別途整備予定。）
-
-## 4. テスト
-- [ ] 単体テスト：翻訳ロジック／DB リポジトリ／LINE API ラッパー（translator・Webhook までは実施済み）
-  - 2025-11-21: Gemini クライアントのリクエスト／レスポンス検証用テスト（`tests/test_gemini_client.py`）を追加し、payload とフィルタ挙動をカバー済み。
-  - 2025-11-21: 実 API 向けライブテスト（`tests/test_gemini_live.py`）を追加し、`gemini-2.5-flash` を使った実リクエストが成功することを確認。
-- [ ] （2025-11-20 メモ）Secrets Manager 反映後の Lambda を `aws lambda invoke` で疎通確認済み（署名付き follow イベント → 200 OK）。今後は message イベントでの E2E テストを追加実施する。
-- [ ] 結合テスト：Webhook 受信から返信までのエンドツーエンド動作
-- [ ] 性能テスト：平均 200–350ms を満たすか検証し、ボトルネックを洗い出す
-- [ ] エラーハンドリングテスト：Gemini エラー、Neon 接続失敗、壊れたレスポンスなどの再試行挙動
-- [ ] 言語設定フローの E2E テストで CloudWatch Logs の Timeout／Gemini レイテンシを検証し、5 秒以内に収まらない場合のフォールバック（ユーザーへのリトライ案内）を確認する
 
 ## 5. デプロイ準備
 - [x] AWS 環境（IAM, Lambda, API Gateway, CloudWatch）を IaC（template.yaml）で構築し、ステージングにデプロイ（2025-11-20: Secrets Manager `line-translate-bot-secrets` を参照するよう SAM テンプレ更新→ `sam build`/`sam deploy --profile line-translate-bot` で `translate-line-bot-stg` スタックを ap-northeast-1 に作成。API エンドポイント：`https://cbvko1l0ml.execute-api.ap-northeast-1.amazonaws.com/stg`。Lambda ARN：`arn:aws:lambda:ap-northeast-1:215896857123:function:translate-line-bot-stg-LineWebhookFunction-a1Thoi5FRgnv`。）
