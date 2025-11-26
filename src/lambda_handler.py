@@ -297,6 +297,15 @@ def _handle_postback_event(event: LineEvent) -> None:
             extra={"group_id": event.group_id, "languages": [code for code, _ in tuples]},
         )
     elif action == "cancel":
+        if not event.group_id:
+            return
+        cancelled = repositories.try_cancel_language_prompt(db_client, event.group_id)
+        if not cancelled:
+            logger.info(
+                "Duplicate language cancellation ignored",
+                extra={"group_id": event.group_id, "user_id": event.user_id},
+            )
+            return
         line_client.reply_text(event.reply_token, _build_cancel_message())
         logger.info("Language enrollment cancelled", extra={"group_id": event.group_id, "user_id": event.user_id})
 

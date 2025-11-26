@@ -8,3 +8,5 @@
 - デプロイには`scripts/deploy.sh`を使用
 - Neon 接続メモ：`.env` の `NEON_DATABASE_URL` を使用。ローカルで SQL 適用する場合は `python3 -m venv .venv && . .venv/bin/activate && pip install psycopg[binary]` で環境を作り、`python - <<'PY' ... psycopg.connect(NEON_DATABASE_URL) ...` のように実行する。
 - Codex/CLI で `timeout` を短く設定すると SAM deploy 前にローカルで 124 終了する（AWS 側失敗ではない）。`./scripts/deploy.sh` を実行する際は実行環境のタイムアウトを 300–600 秒に設定しておくこと。
+- 2025-11-26: 本番スタック `translate-line-bot-prod` を `STACK_NAME=translate-line-bot-prod STAGE=prod PROFILE=line-translate-bot ./scripts/deploy.sh` で更新。HttpApiEndpoint=`https://h2xf6dwz5e.execute-api.ap-northeast-1.amazonaws.com/prod`、FunctionArn=`arn:aws:lambda:ap-northeast-1:215896857123:function:translate-line-bot-prod-LineWebhookFunction-moXA62iCKlH3`。`sam deploy` は約 100 秒、ローカルのタイムアウトは 600 秒で実行。
+- 2025-11-26: `pytest` 全体実行で `tests/test_reply_formatting.py` が相対 import エラーになるため、パス/パッケージ設定の修正が必要（詳細は `docs/Plans.md`）。

@@ -21,6 +21,7 @@
   - 2025-11-26: Gemini へ送信する payload を CloudWatch Logs で確認できるよう INFO ログ出力を追加。
   - 2025-11-26: 言語設定を「ユーザー毎」から「グループ単位（一度設定すれば全員に適用）」へ変更。DB は `group_languages` に集約し、確認ポストバックでグループ全体の言語リストを保存するよう更新。
   - 2025-11-26: 言語設定確認テンプレートの重複押下で完了メッセージが何度も送られる問題を修正（初回以降は無視）。
+  - 2025-11-26: 言語設定確認テンプレートで「完了」後に「変更する」を押しても（または逆順でも）応答しないよう postback を相互排他に変更。
 - [x] 言語設定確認テンプレートが未対応言語を含む文面を出すことがあるため、Gemini 生成文を使わず対応言語だけで確認文を組み立てるサニタイズを追加する（2025-11-26: 日本語/アラビア語/絵文字/サンスクリット語入力で確認文にサンスクリット語が残存）。
 - [x] デプロイ用スクリプト `scripts/deploy.sh` を追加（環境変数で stack/profile/parameters を上書き可。S3 バケット未指定時は --resolve-s3 を使用）。
 - [x] 設定管理（環境変数, Secrets 管理）とデプロイ用スクリプトを整備
@@ -45,6 +46,7 @@
 5. Lambda コードのみのホットデプロイは `scripts/deploy.sh`（`LAMBDA_FUNCTION_NAME`/`AWS_REGION` 必須）で差分反映し、構成変更は必ず SAM で実施する。
 
 ## 6. リリース / 運用
+- [x] 本番スタック `translate-line-bot-prod` にデプロイ（2025-11-26: `./scripts/deploy.sh` を `STACK_NAME=translate-line-bot-prod STAGE=prod PROFILE=line-translate-bot` で実行。HttpApiEndpoint=`https://h2xf6dwz5e.execute-api.ap-northeast-1.amazonaws.com/prod`, FunctionArn=`arn:aws:lambda:ap-northeast-1:215896857123:function:translate-line-bot-prod-LineWebhookFunction-moXA62iCKlH3`）
 - [x] 障害対応（2025-11-25: Lambda が `translator` モジュールを読み込めず起動失敗 → `src/reply_formatter.py` の絶対 import を相対 import へ修正し、`sam build && sam deploy --stack-name translate-line-bot-stg --profile line-translate-bot` で再デプロイ。`No module named 'translator'` は解消済み）
 - [ ] ステージング環境で最終受け入れテストを完了し、Go/No-Go 判定を実行
 - [ ] 本番反映後、初回数日の監視体制（当番表・連絡方法）を決める
@@ -52,3 +54,4 @@
 - [ ] リリースノートとユーザー向けアナウンスを作成・配信
 - [x] Gemini 言語設定解析のタイムアウト時にフォールバック返信（リトライ案内＆既定言語候補提示）を行い、無返信を防ぐ
 - [x] LINE Reply API 400 エラーのレスポンス本文と replyToken を CloudWatch に出力し、4xx/5xx を検知するメトリクス・アラームを追加（ログ出力まで対応、メトリクス/アラームは今後追加検討）
+- [ ] `pytest` 全体実行時に `tests/test_reply_formatting.py` でパッケージ import エラー（`.translator` 相対 import）。パス設定またはモジュール構成を修正しテストが通る状態にする。
