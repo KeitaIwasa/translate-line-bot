@@ -96,6 +96,7 @@ class GeminiClient:
             raise ValueError(f"Unexpected Gemini response format: {body}") from exc
 
         data = json.loads(part_text)
+        logger.info("Gemini parsed translations: %s", json.dumps(data, ensure_ascii=False))
         translations = data.get("translations", [])
         allowed = {lang.lower() for lang in target_languages}
         parsed = [
