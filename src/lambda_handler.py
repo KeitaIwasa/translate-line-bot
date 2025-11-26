@@ -210,10 +210,11 @@ def _attempt_language_enrollment(event: LineEvent) -> bool:
         },
     )
 
-    messages = []
+    messages: List[Dict] = []
     if unsupported:
         messages.append({"type": "text", "text": _format_unsupported_message(unsupported)})
 
+    # 対応言語がなければ未対応メッセージだけ返して終了
     if not supported:
         if messages and event.reply_token:
             line_client.reply_messages(event.reply_token, messages)
@@ -237,7 +238,8 @@ def _attempt_language_enrollment(event: LineEvent) -> bool:
         }
     )
 
-    confirm_text = (result.confirm_text.primary or _build_simple_confirm_text(supported))[:400]
+    # Gemini 生成文に未対応言語が混入することを避けるため、確認文は対応言語のみで組み立てる
+    confirm_text = _build_simple_confirm_text(supported)[:400]
     template_message = {
         "type": "template",
         "altText": "Confirm interpretation languages",
