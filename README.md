@@ -16,7 +16,7 @@ Gemini 2.5 Flash の Structured Output を用いて、
 ## Features
 
 * 多言語ユーザーが混在する LINE グループ向け
-* 各ユーザーが希望言語を登録
+* グループで一度だけ希望言語を登録（全メンバーに共有）
 * メッセージの「原文の言語以外」に翻訳を自動生成
 * Gemini 2.5 Flash Structured Output による自然＋安定した JSON 生成
 * AWS Lambda による完全サーバレス構成
@@ -252,7 +252,7 @@ Dependencies（`requirements.txt`）と `src/` を zip 化して `aws lambda upd
 2. Lambda が `200 OK` を即返信（高速化）
 3. Lambda 内で非同期的に以下を実行：
 
-   * Neon からユーザー言語設定を取得
+   * Neon からグループの翻訳対象言語を取得
    * Neon から過去20件の文脈を取得
    * 翻訳先言語リストを決定
    * Gemini 2.5 Flash に1回だけ Structured Output で翻訳要求

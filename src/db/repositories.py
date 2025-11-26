@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from psycopg import sql
 
 from .neon_client import NeonClient
 
 BOT_JOIN_MARKER = "__bot_join__"
+GROUP_LANG_MARKER = "__group_lang__"
 
 
 @dataclass(frozen=True)
@@ -27,13 +28,13 @@ class MessageRecord:
     timestamp: datetime
 
 
-def fetch_group_language_preferences(client: NeonClient, group_id: str) -> Dict[str, List[str]]:
+def fetch_group_languages(client: NeonClient, group_id: str) -> List[str]:
     query = sql.SQL(
         """
-        SELECT user_id, lang_code
-        FROM group_user_languages
+        SELECT lang_code
+        FROM group_languages
         WHERE group_id = %s
-        ORDER BY user_id, lang_code
+        ORDER BY lang_code
         """
     )
 
@@ -41,10 +42,7 @@ def fetch_group_language_preferences(client: NeonClient, group_id: str) -> Dict[
         cur.execute(query, (group_id,))
         rows = cur.fetchall()
 
-    result: Dict[str, List[str]] = {}
-    for user_id, lang_code in rows:
-        result.setdefault(user_id, []).append(lang_code)
-    return result
+    return [row[0] for row in rows]
 
 
 def fetch_recent_messages(
@@ -146,14 +144,16 @@ def fetch_bot_joined_at(client: NeonClient, group_id: str) -> Optional[datetime]
 
 def reset_group_language_settings(client: NeonClient, group_id: str) -> None:
     with client.cursor() as cur:
-        cur.execute("DELETE FROM group_user_languages WHERE group_id = %s", (group_id,))
+        cur.execute("DELETE FROM group_languages WHERE group_id = %s", (group_id,))
         cur.execute(
             "UPDATE group_members SET last_prompted_at = NULL, last_completed_at = NULL WHERE group_id = %s",
             (group_id,),
         )
 
 
-def record_language_prompt(client: NeonClient, group_id: str, user_id: str) -> None:
+def record_language_prompt(client: NeonClient, group_id: str) -> None:
+    """Mark when the group-level language prompt was last sent."""
+
     query = sql.SQL(
         """
         INSERT INTO group_members (group_id, user_id, last_prompted_at)
@@ -164,25 +164,24 @@ def record_language_prompt(client: NeonClient, group_id: str, user_id: str) -> N
     )
 
     with client.cursor() as cur:
-        cur.execute(query, (group_id, user_id))
+        cur.execute(query, (group_id, GROUP_LANG_MARKER))
 
 
-def replace_user_languages(
+def replace_group_languages(
     client: NeonClient,
     group_id: str,
-    user_id: str,
     languages: Sequence[Tuple[str, str]],
 ) -> None:
     with client.cursor() as cur:
-        cur.execute("DELETE FROM group_user_languages WHERE group_id = %s AND user_id = %s", (group_id, user_id))
+        cur.execute("DELETE FROM group_languages WHERE group_id = %s", (group_id,))
         if languages:
             cur.executemany(
                 """
-                INSERT INTO group_user_languages (group_id, user_id, lang_code, lang_name)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (group_id, user_id, lang_code) DO UPDATE SET lang_name = EXCLUDED.lang_name
+                INSERT INTO group_languages (group_id, lang_code, lang_name)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (group_id, lang_code) DO UPDATE SET lang_name = EXCLUDED.lang_name
                 """,
-                [(group_id, user_id, code.lower(), name) for code, name in languages],
+                [(group_id, code.lower(), name) for code, name in languages],
             )
         cur.execute(
             """
@@ -191,15 +190,5 @@ def replace_user_languages(
             ON CONFLICT (group_id, user_id)
             DO UPDATE SET last_completed_at = NOW()
             """,
-            (group_id, user_id),
+            (group_id, GROUP_LANG_MARKER),
         )
-
-
-def fetch_user_languages(client: NeonClient, group_id: str, user_id: str) -> List[str]:
-    with client.cursor() as cur:
-        cur.execute(
-            "SELECT lang_code FROM group_user_languages WHERE group_id = %s AND user_id = %s ORDER BY lang_code",
-            (group_id, user_id),
-        )
-        rows = cur.fetchall()
-    return [row[0] for row in rows]

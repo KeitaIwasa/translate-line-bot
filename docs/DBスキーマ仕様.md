@@ -24,7 +24,7 @@ LINE 多言語翻訳ボットで使用する Neon (PostgreSQL) のデータモ�
 - 主キー: `(group_id, user_id)`
 - インデックス:
   - `idx_group_members_user` (`user_id`): 1ユーザーが複数グループに所属する場合の検索最適化。
-- `last_prompted_at`/`last_completed_at` は join 再発時のリセット用メタデータ。最新ステータスは `group_user_languages` を参照する。
+- `last_prompted_at`/`last_completed_at` は join 再発時のリセット用メタデータ。最新ステータスは `group_languages` を参照する。
 
 ```sql
 CREATE TABLE group_members (
@@ -40,32 +40,27 @@ CREATE INDEX idx_group_members_user
   ON group_members (user_id);
 ```
 
-### 2.2 `group_user_languages`
+### 2.2 `group_languages`
 
 | 列名 | 型 | NOT NULL | デフォルト | 説明 |
 | ---- | --- | -------- | ---------- | ---- |
 | `group_id` | TEXT | ✔ |  | LINE グループ ID |
-| `user_id` | TEXT | ✔ |  | LINE ユーザー ID |
 | `lang_code` | VARCHAR(16) | ✔ |  | ISO 639-1/2/BCP47 コード |
 | `lang_name` | TEXT | ✔ |  | Gemini が返した自然言語表示名（テンプレート表示用）|
 | `created_at` | TIMESTAMPTZ | ✔ | `NOW()` | 登録日時 |
 
-- 主キー: `(group_id, user_id, lang_code)`
+- 主キー: `(group_id, lang_code)`
 - 外部キーは張らず、アプリ層で整合性を担保。
-- 1ユーザーが複数言語を持つことを許容し、「完了」ボタン押下時にまとめて挿入する。
+- グループ単位で翻訳対象言語を共有し、一度設定すれば全メンバーに適用する。
 
 ```sql
-CREATE TABLE group_user_languages (
+CREATE TABLE group_languages (
   group_id TEXT NOT NULL,
-  user_id TEXT NOT NULL,
   lang_code VARCHAR(16) NOT NULL,
   lang_name TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  PRIMARY KEY (group_id, user_id, lang_code)
+  PRIMARY KEY (group_id, lang_code)
 );
-
-CREATE INDEX idx_group_user_languages_user
-  ON group_user_languages (user_id);
 ```
 
 ### 2.3 `messages`
@@ -107,7 +102,7 @@ CREATE INDEX idx_messages_group_user_time
 
 ## 3. リレーション / 外部キー
 
-- `group_user_languages` は `group_members` と 1:多 の関係（1ユーザーにつき複数言語）。外部キーは設定せず、join 再招待時は両テーブルをトランザクション内で削除する。
+- `group_languages` はグループ単位で保持し、外部キーは設定しない（Bot 再招待時にアプリ層で削除）。
 - `messages.group_id` / `messages.user_id` は `group_members` と必ずしも一致しない（bot や未登録ユーザーの発言を許容）。
 
 ## 4. マイグレーション指針
@@ -137,19 +132,18 @@ LIMIT 20;
 ### 6.2 言語設定一覧
 
 ```sql
-SELECT user_id, array_agg(lang_code ORDER BY lang_code) AS langs
-FROM group_user_languages
-WHERE group_id = $1
-GROUP BY user_id;
+SELECT array_agg(lang_code ORDER BY lang_code) AS langs
+FROM group_languages
+WHERE group_id = $1;
 ```
 
 ### 6.3 言語設定登録（完了時）
 
 ```sql
-INSERT INTO group_user_languages (group_id, user_id, lang_code, lang_name)
-SELECT $1, $2, lang_code, lang_name
-FROM UNNEST($3::TEXT[], $4::TEXT[]) AS t(lang_code, lang_name)
-ON CONFLICT (group_id, user_id, lang_code) DO NOTHING;
+INSERT INTO group_languages (group_id, lang_code, lang_name)
+SELECT $1, lang_code, lang_name
+FROM UNNEST($2::TEXT[], $3::TEXT[]) AS t(lang_code, lang_name)
+ON CONFLICT (group_id, lang_code) DO NOTHING;
 ```
 
 ## 7. 監視対象メトリクス（DB）

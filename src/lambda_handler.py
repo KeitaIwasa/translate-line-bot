@@ -127,13 +127,12 @@ def _handle_message_event(event: LineEvent) -> None:
     timestamp = datetime.fromtimestamp(event.timestamp / 1000, tz=timezone.utc)
     sender_name = _resolve_sender_name(event)
 
-    language_map = repositories.fetch_group_language_preferences(db_client, event.group_id)
-    candidate_languages = list({lang for langs in language_map.values() for lang in langs if lang})
+    group_languages = repositories.fetch_group_languages(db_client, event.group_id)
+    candidate_languages = list(dict.fromkeys(lang for lang in group_languages if lang))
 
-    user_languages = language_map.get(event.user_id) or []
-    if not user_languages:
+    if not candidate_languages:
         logger.info(
-            "user has no language preferences yet; attempting enrollment",
+            "group has no language preferences yet; attempting enrollment",
             extra={"group_id": event.group_id, "user_id": event.user_id},
         )
         if _attempt_language_enrollment(event):
@@ -255,7 +254,7 @@ def _attempt_language_enrollment(event: LineEvent) -> bool:
     messages.append(template_message)
     if event.reply_token:
         line_client.reply_messages(event.reply_token, messages)
-    repositories.record_language_prompt(db_client, event.group_id, event.user_id)
+    repositories.record_language_prompt(db_client, event.group_id)
     logger.info(
         "Language enrollment prompt sent",
         extra={"group_id": event.group_id, "user_id": event.user_id, "prompted_langs": [lang.code for lang in supported]},
@@ -280,14 +279,14 @@ def _handle_postback_event(event: LineEvent) -> None:
             for item in langs
             if item.get("code")
         ]
-        if not (event.group_id and event.user_id):
+        if not event.group_id:
             return
-        repositories.replace_user_languages(db_client, event.group_id, event.user_id, tuples)
+        repositories.replace_group_languages(db_client, event.group_id, tuples)
         text = _build_completion_message(tuples)
         line_client.reply_text(event.reply_token, text)
         logger.info(
             "Language preferences saved",
-            extra={"group_id": event.group_id, "user_id": event.user_id, "languages": [code for code, _ in tuples]},
+            extra={"group_id": event.group_id, "languages": [code for code, _ in tuples]},
         )
     elif action == "cancel":
         line_client.reply_text(event.reply_token, _build_cancel_message())
