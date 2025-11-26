@@ -17,7 +17,6 @@ class Settings:
     gemini_timeout_seconds: int = 15
     translation_retry: int = 3
     log_level: str = "INFO"
-    bot_user_id: Optional[str] = None
 
 
 @lru_cache(maxsize=1)
@@ -47,5 +46,4 @@ def get_settings() -> Settings:
         gemini_timeout_seconds=int(env.get("GEMINI_TIMEOUT_SECONDS", "15")),
         translation_retry=int(env.get("TRANSLATION_RETRY", "3")),
         log_level=env.get("LOG_LEVEL", "INFO"),
-        bot_user_id=env.get("LINE_BOT_USER_ID"),
     )

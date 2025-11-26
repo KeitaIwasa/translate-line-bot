@@ -80,7 +80,6 @@ CREATE TABLE group_languages (
   - `idx_messages_group_time` (`group_id`, `timestamp DESC`)：文脈20件取得用。
   - `idx_messages_group_user_time` (`group_id`, `user_id`, `timestamp DESC`)：ユーザー別参照や bot 除外条件で使用。
 - `sender_name` は「発言時点の表示ラベル」をそのまま保存し、後日名前が変わっても過去ログは更新しない。
-- 備考: 文脈取得時は `user_id <> :bot_user_id` 条件を付与。
 
 ```sql
 CREATE TABLE messages (

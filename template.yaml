@@ -57,7 +57,6 @@ Globals:
         GEMINI_MODEL: !Ref GeminiModel
         MAX_CONTEXT_MESSAGES: !Ref MaxContextMessages
         TRANSLATION_RETRY: !Ref TranslationRetry
-        LINE_BOT_USER_ID: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:LINE_BOT_USER_ID}}"
 
 Resources:
   LineWebhookApi:

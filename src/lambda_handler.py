@@ -119,9 +119,6 @@ def _handle_message_event(event: LineEvent) -> None:
         line_client.reply_text(event.reply_token, DIRECT_GREETING)
         return
 
-    if settings.bot_user_id and event.user_id == settings.bot_user_id:
-        return
-
     repositories.ensure_group_member(db_client, event.group_id, event.user_id)
 
     timestamp = datetime.fromtimestamp(event.timestamp / 1000, tz=timezone.utc)
@@ -141,7 +138,6 @@ def _handle_message_event(event: LineEvent) -> None:
     context_messages = repositories.fetch_recent_messages(
         db_client,
         event.group_id,
-        settings.bot_user_id,
         settings.max_context_messages,
     )
     gemini_context = [

@@ -153,7 +153,6 @@ Lambda では **環境変数として設定**してください。
 - Secrets Manager `line-translate-bot-secrets` に以下キーを保存済み（`RuntimeSecretArn` パラメータで参照）
   - `LINE_CHANNEL_SECRET`
   - `LINE_CHANNEL_ACCESS_TOKEN`
-  - `LINE_BOT_USER_ID`
   - `GEMINI_API_KEY`
   - `NEON_DATABASE_URL`
 - `.env` にはローカル検証用の `NEON_DATABASE_URL` / `GEMINI_API_KEY` を入れてテスト可能

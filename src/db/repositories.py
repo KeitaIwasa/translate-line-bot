@@ -48,14 +48,10 @@ def fetch_group_languages(client: NeonClient, group_id: str) -> List[str]:
 def fetch_recent_messages(
     client: NeonClient,
     group_id: str,
-    bot_user_id: Optional[str],
     limit: int,
 ) -> List[ContextMessage]:
     params = [group_id]
     exclusion_clause = ""
-    if bot_user_id:
-        exclusion_clause = "AND user_id <> %s"
-        params.append(bot_user_id)
 
     query = sql.SQL(
         f"""
