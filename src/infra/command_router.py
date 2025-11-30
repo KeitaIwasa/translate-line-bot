@@ -34,6 +34,9 @@ Constraints:
 - Produce ack_text in the same language as the instruction. The ack_text should be concise and confirm the action.
 - Do NOT include the bot mention text in the ack_text.
 - Do NOT echo the entire user message.
+- For specific actions, tailor ack_text as follows:
+  - pause: "翻訳を一時停止します。再開するときはもう一度メンションしてください。" (translate to instruction language if needed, but keep the meaning about resuming by mentioning again)
+  - resume: "翻訳を再開します。" (translate to instruction language if needed)
 """.strip()
 
 

@@ -9,6 +9,8 @@ import zlib
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Sequence, Tuple
 
+import requests
+
 from ...domain import models
 from ...domain.ports import (
     CommandRouterPort,
@@ -443,6 +445,13 @@ class MessageHandler:
                     context_messages=context,
                     candidate_languages=candidate_languages,
                 )
+            except requests.exceptions.Timeout as exc:
+                logger.warning(
+                    "Gemini translation timeout",
+                    extra={"attempt": attempt + 1, "timeout_seconds": getattr(self._translation, "_translator", None) and getattr(self._translation._translator, "_timeout", None)},  # type: ignore[attr-defined]
+                )
+                last_error = exc
+                break
             except Exception as exc:  # pylint: disable=broad-except
                 if isinstance(exc, GeminiRateLimitError):
                     last_error = exc
@@ -471,6 +480,13 @@ class MessageHandler:
         for attempt in range(self._translation_retry):
             try:
                 return self._interface_translation.translate(base_text, target_languages)
+            except requests.exceptions.Timeout as exc:
+                logger.warning(
+                    "Gemini interface translation timeout",
+                    extra={"attempt": attempt + 1, "timeout_seconds": getattr(self._interface_translation, "_translator", None) and getattr(self._interface_translation._translator, "_timeout", None)},  # type: ignore[attr-defined]
+                )
+                last_error = exc
+                break
             except Exception as exc:  # pylint: disable=broad-except
                 if isinstance(exc, GeminiRateLimitError):
                     last_error = exc

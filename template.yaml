@@ -16,7 +16,7 @@ Parameters:
     Description: Lambda memory size in MB
   FunctionTimeout:
     Type: Number
-    Default: 15
+    Default: 20
     MinValue: 1
     MaxValue: 29
     Description: Lambda timeout in seconds
@@ -36,7 +36,7 @@ Parameters:
     Description: Maximum number of context messages sent to Gemini
   TranslationRetry:
     Type: Number
-    Default: 3
+    Default: 2
     MinValue: 1
     MaxValue: 5
     Description: Number of Gemini retries

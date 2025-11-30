@@ -5,3 +5,4 @@
   1. `pytest`を実行して全テストが通ることを確認する
   2. ステージング環境にデプロイ
 - 言語設定確認/完了/キャンセルの文言は payload に `primary_language` と各テキストを含めて返し、Postback 側はそれをそのまま返信します（fallback は日本語固定文言）。
+- 2025-11-30 本番で Gemini 呼び出しが 15s で Lambda timeout。`GEMINI_TIMEOUT_SECONDS` と FunctionTimeout の再調整が必要。
