@@ -3,6 +3,8 @@ import os
 from src.app.handlers.message_handler import MessageHandler
 from src.domain import models
 from src.domain.services.translation_service import TranslationService
+from src.domain.services.interface_translation_service import InterfaceTranslationService
+from src.domain.services.language_detection_service import LanguageDetectionService
 
 
 os.environ.setdefault("LINE_CHANNEL_SECRET", "dummy")
@@ -69,6 +71,35 @@ class DummyRepo:
     def fetch_bot_joined_at(self, *args, **kwargs):
         return None
 
+    def add_group_languages(self, *args, **kwargs):
+        return None
+
+    def remove_group_languages(self, *args, **kwargs):
+        return None
+
+    def set_translation_enabled(self, *args, **kwargs):
+        return None
+
+    def is_translation_enabled(self, *args, **kwargs):
+        return True
+
+
+class DummyCommandRouter:
+    def decide(self, text: str):
+        return models.CommandDecision(action="unknown", instruction_language="ja", ack_text="")
+
+
+class DummyInterfaceTranslation(InterfaceTranslationService):
+    def __init__(self):
+        class _Translator:
+            def translate(self, *args, **kwargs):
+                return []
+
+        super().__init__(_Translator())
+
+    def translate(self, *args, **kwargs):
+        return []
+
 
 class DummyLangPrefService:
     def __init__(self, result):
@@ -93,6 +124,7 @@ def test_language_enrollment_ignores_unsupported_in_confirm():
         confirm_text="",
         cancel_text="",
         completion_text="",
+        primary_language="ja",
     )
 
     line = DummyLineClient()
@@ -100,10 +132,14 @@ def test_language_enrollment_ignores_unsupported_in_confirm():
     handler = MessageHandler(
         line_client=line,
         translation_service=DummyTranslationService(),
+        interface_translation=DummyInterfaceTranslation(),
+        language_detector=LanguageDetectionService(),
         language_pref_service=DummyLangPrefService(fake_result),
+        command_router=DummyCommandRouter(),
         repo=repo,
         max_context_messages=1,
         translation_retry=1,
+        bot_mention_name="bot",
     )
 
     event = models.MessageEvent(
@@ -129,7 +165,62 @@ def test_language_enrollment_ignores_unsupported_in_confirm():
     confirm_payload = _decode_payload(template["actions"][0]["data"])
     langs = [item["code"] for item in confirm_payload["languages"]]
     assert langs == ["ja", "ar"]
+    assert confirm_payload["completion_text"].startswith("日本語、アラビア語")
+    assert confirm_payload["primary_language"] == "ja"
     assert repo.recorded is True
+
+
+def test_language_enrollment_uses_instruction_language_texts():
+    fake_supported = [
+        models.LanguageChoice(code="en", name="English"),
+        models.LanguageChoice(code="ja", name="Japanese"),
+        models.LanguageChoice(code="zh-hans", name="Simplified Chinese"),
+    ]
+    fake_result = models.LanguagePreference(
+        supported=fake_supported,
+        unsupported=[],
+        confirm_label="Confirm",
+        cancel_label="Cancel",
+        confirm_text="Enable translation for English, Japanese, and Simplified Chinese?",
+        cancel_text="Canceled. Please tell me all languages again.",
+        completion_text="Enabled translation for your selected languages.",
+        primary_language="en",
+    )
+
+    line = DummyLineClient()
+    repo = DummyRepo()
+    handler = MessageHandler(
+        line_client=line,
+        translation_service=DummyTranslationService(),
+        interface_translation=DummyInterfaceTranslation(),
+        language_detector=LanguageDetectionService(),
+        language_pref_service=DummyLangPrefService(fake_result),
+        command_router=DummyCommandRouter(),
+        repo=repo,
+        max_context_messages=1,
+        translation_retry=1,
+        bot_mention_name="bot",
+    )
+
+    event = models.MessageEvent(
+        event_type="message",
+        reply_token="reply-token",
+        timestamp=0,
+        text="English, Japanese, simplified chinese",
+        user_id="U",
+        group_id="G",
+        sender_type="group",
+    )
+
+    handler._attempt_language_enrollment(event)
+
+    template = line.sent["messages"][0]["template"]
+    assert template["text"] == "Enable translation for English, Japanese, and Simplified Chinese?"
+    confirm_payload = _decode_payload(template["actions"][0]["data"])
+    assert confirm_payload["primary_language"] == "en"
+    assert confirm_payload["completion_text"] == "Enabled translation for your selected languages."
+    cancel_payload = _decode_payload(template["actions"][1]["data"])
+    assert cancel_payload["cancel_text"] == "Canceled. Please tell me all languages again."
 
 
 def _decode_payload(data: str):

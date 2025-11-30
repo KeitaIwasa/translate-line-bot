@@ -99,6 +99,25 @@ CREATE INDEX idx_messages_group_user_time
   ON messages (group_id, user_id, timestamp DESC);
 ```
 
+### 2.4 `group_settings`
+
+| 列名 | 型 | NOT NULL | デフォルト | 説明 |
+| ---- | --- | -------- | ---------- | ---- |
+| `group_id` | TEXT | ✔ |  | LINE グループ ID |
+| `translation_enabled` | BOOLEAN | ✔ | TRUE | 通訳を稼働させるかのフラグ |
+| `updated_at` | TIMESTAMPTZ | ✔ | `NOW()` | 最終更新時刻 |
+
+- 主キー: `group_id`
+- ボットメンションによる「翻訳停止/再開」の状態を保持する。
+
+```sql
+CREATE TABLE group_settings (
+  group_id TEXT PRIMARY KEY,
+  translation_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
 ## 3. リレーション / 外部キー
 
 - `group_languages` はグループ単位で保持し、外部キーは設定しない（Bot 再招待時にアプリ層で削除）。

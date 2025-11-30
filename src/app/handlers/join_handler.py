@@ -25,6 +25,7 @@ class JoinHandler:
         join_time = _event_timestamp(event) or datetime.now(timezone.utc)
         self._repo.record_bot_joined_at(event.group_id, join_time)
         self._repo.reset_group_language_settings(event.group_id)
+        self._repo.set_translation_enabled(event.group_id, False)
         self._line.reply_text(event.reply_token, GROUP_PROMPT_MESSAGE)
 
 

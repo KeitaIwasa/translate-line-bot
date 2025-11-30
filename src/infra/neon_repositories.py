@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List, Optional, Sequence, Tuple
 
-from psycopg import sql
+from psycopg import errors, sql
 
 from ..domain.models import ContextMessage, StoredMessage
 from ..domain.ports import MessageRepositoryPort
@@ -12,6 +13,7 @@ from .neon_client import NeonClient
 
 BOT_JOIN_MARKER = "__bot_join__"
 GROUP_LANG_MARKER = "__group_lang__"
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -181,6 +183,72 @@ class NeonMessageRepository(MessageRepositoryPort):
                     (group_id, GROUP_LANG_MARKER),
                 )
         return True
+
+    def add_group_languages(self, group_id: str, languages: Sequence[Tuple[str, str]]) -> None:
+        if not languages:
+            return
+        with self._client.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO group_languages (group_id, lang_code, lang_name)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (group_id, lang_code) DO UPDATE SET lang_name = EXCLUDED.lang_name
+                """,
+                [(group_id, code.lower(), name) for code, name in languages],
+            )
+
+    def remove_group_languages(self, group_id: str, lang_codes: Sequence[str]) -> None:
+        if not lang_codes:
+            return
+        with self._client.cursor() as cur:
+            cur.execute(
+                "DELETE FROM group_languages WHERE group_id = %s AND lang_code = ANY(%s)",
+                (group_id, list({code.lower() for code in lang_codes})),
+            )
+
+    def set_translation_enabled(self, group_id: str, enabled: bool) -> None:
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO group_settings (group_id, translation_enabled)
+                    VALUES (%s, %s)
+                    ON CONFLICT (group_id)
+                    DO UPDATE SET translation_enabled = EXCLUDED.translation_enabled, updated_at = NOW()
+                    """,
+                    (group_id, enabled),
+                )
+        except errors.UndefinedTable:
+            # 後方互換: group_settings が未作成でも致命的エラーにしない
+            logger.warning(
+                "group_settings table missing; skip persisting translation_enabled",
+                extra={"group_id": group_id},
+            )
+            return
+        except Exception:
+            logger.exception("Failed to set translation_enabled", extra={"group_id": group_id})
+            raise
+
+    def is_translation_enabled(self, group_id: str) -> bool:
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    "SELECT translation_enabled FROM group_settings WHERE group_id = %s",
+                    (group_id,),
+                )
+                row = cur.fetchone()
+            if row is None:
+                return True
+            return bool(row[0])
+        except errors.UndefinedTable:
+            logger.warning(
+                "group_settings table missing; defaulting translation_enabled=True",
+                extra={"group_id": group_id},
+            )
+            return True
+        except Exception:
+            logger.exception("Failed to fetch translation_enabled", extra={"group_id": group_id})
+            raise
 
     def reset_group_language_settings(self, group_id: str) -> None:
         with self._client.cursor() as cur:

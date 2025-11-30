@@ -16,7 +16,7 @@ Parameters:
     Description: Lambda memory size in MB
   FunctionTimeout:
     Type: Number
-    Default: 15
+    Default: 20
     MinValue: 1
     MaxValue: 29
     Description: Lambda timeout in seconds
@@ -36,7 +36,7 @@ Parameters:
     Description: Maximum number of context messages sent to Gemini
   TranslationRetry:
     Type: Number
-    Default: 3
+    Default: 2
     MinValue: 1
     MaxValue: 5
     Description: Number of Gemini retries
@@ -55,8 +55,10 @@ Globals:
         GEMINI_API_KEY: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:GEMINI_API_KEY}}"
         NEON_DATABASE_URL: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:NEON_DATABASE_URL}}"
         GEMINI_MODEL: !Ref GeminiModel
+        COMMAND_MODEL: !Ref GeminiModel
         MAX_CONTEXT_MESSAGES: !Ref MaxContextMessages
         TRANSLATION_RETRY: !Ref TranslationRetry
+        BOT_MENTION_NAME: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:BOT_MENTION_NAME}}"
 
 Resources:
   LineWebhookApi:

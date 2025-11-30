@@ -39,7 +39,8 @@ class PostbackHandler:
                     extra={"group_id": event.group_id, "languages": [code for code, _ in tuples]},
                 )
                 return
-            text = _build_completion_message(tuples)
+            self._repo.set_translation_enabled(event.group_id, True)
+            text = payload.get("completion_text") or _build_completion_message(tuples)
             self._line.reply_text(event.reply_token, text)
             logger.info(
                 "Language preferences saved",
@@ -53,7 +54,9 @@ class PostbackHandler:
                     extra={"group_id": event.group_id, "user_id": event.user_id},
                 )
                 return
-            self._line.reply_text(event.reply_token, _build_cancel_message())
+            self._repo.set_translation_enabled(event.group_id, False)
+            cancel_text = payload.get("cancel_text") or _build_cancel_message()
+            self._line.reply_text(event.reply_token, cancel_text)
             logger.info("Language enrollment cancelled", extra={"group_id": event.group_id, "user_id": event.user_id})
 
 

@@ -12,9 +12,11 @@ class Settings:
     gemini_api_key: str
     neon_database_url: str
     gemini_model: str = "gemini-2.5-flash"
+    command_model: str = "gemini-2.5-flash"
+    bot_mention_name: str = "通訳AI"
     max_context_messages: int = 8
-    gemini_timeout_seconds: int = 15
-    translation_retry: int = 3
+    gemini_timeout_seconds: int = 10
+    translation_retry: int = 2
     log_level: str = "INFO"
 
 
@@ -40,8 +42,10 @@ def get_settings() -> Settings:
         gemini_api_key=required["GEMINI_API_KEY"],
         neon_database_url=required["NEON_DATABASE_URL"],
         gemini_model=env.get("GEMINI_MODEL", "gemini-2.5-flash"),
+        command_model=env.get("COMMAND_MODEL", env.get("GEMINI_MODEL", "gemini-2.5-flash")),
+        bot_mention_name=env.get("BOT_MENTION_NAME", "通訳AI"),
         max_context_messages=int(env.get("MAX_CONTEXT_MESSAGES", "8")),
-        gemini_timeout_seconds=int(env.get("GEMINI_TIMEOUT_SECONDS", "15")),
-        translation_retry=int(env.get("TRANSLATION_RETRY", "3")),
+        gemini_timeout_seconds=int(env.get("GEMINI_TIMEOUT_SECONDS", "10")),
+        translation_retry=int(env.get("TRANSLATION_RETRY", "2")),
         log_level=env.get("LOG_LEVEL", "INFO"),
     )

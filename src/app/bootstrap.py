@@ -4,8 +4,11 @@ import logging
 
 from ..config import get_settings
 from ..domain.services.translation_service import TranslationService
+from ..domain.services.interface_translation_service import InterfaceTranslationService
+from ..domain.services.language_detection_service import LanguageDetectionService
 from ..infra.gemini_translation import GeminiTranslationAdapter
 from ..infra.language_pref_client import LanguagePreferenceAdapter
+from ..infra.command_router import GeminiCommandRouter
 from ..infra.line_api import LineApiAdapter
 from ..infra.neon_client import get_client
 from ..infra.neon_repositories import NeonMessageRepository
@@ -30,9 +33,16 @@ def build_dispatcher() -> Dispatcher:
         timeout_seconds=settings.gemini_timeout_seconds,
     )
     translation_service = TranslationService(translation_adapter)
+    interface_translation = InterfaceTranslationService(translation_adapter)
+    language_detector = LanguageDetectionService()
     language_pref_service = LanguagePreferenceAdapter(
         api_key=settings.gemini_api_key,
         model=settings.gemini_model,
+        timeout_seconds=settings.gemini_timeout_seconds,
+    )
+    command_router = GeminiCommandRouter(
+        api_key=settings.gemini_api_key,
+        model=settings.command_model,
         timeout_seconds=settings.gemini_timeout_seconds,
     )
     db_client = get_client(settings.neon_database_url)
@@ -42,9 +52,13 @@ def build_dispatcher() -> Dispatcher:
         line_client=line_client,
         translation_service=translation_service,
         language_pref_service=language_pref_service,
+        command_router=command_router,
         repo=repo,
         max_context_messages=settings.max_context_messages,
         translation_retry=settings.translation_retry,
+        bot_mention_name=settings.bot_mention_name,
+        interface_translation=interface_translation,
+        language_detector=language_detector,
     )
     postback_handler = PostbackHandler(line_client, repo)
     join_handler = JoinHandler(line_client, repo)

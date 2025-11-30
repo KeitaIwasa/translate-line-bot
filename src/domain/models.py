@@ -64,6 +64,17 @@ class TranslationResult:
     text: str
 
 
+# === Command routing ===
+@dataclass(frozen=True)
+class CommandDecision:
+    action: str  # language_settings | howto | pause | resume | unknown
+    operation: str = ""  # reset_all | add | remove | add_and_remove (for language_settings)
+    languages_to_add: List[LanguageChoice] = field(default_factory=list)
+    languages_to_remove: List[LanguageChoice] = field(default_factory=list)
+    instruction_language: str = ""
+    ack_text: str = ""
+
+
 # === Group language settings ===
 @dataclass(frozen=True)
 class LanguageChoice:
@@ -80,6 +91,7 @@ class LanguagePreference:
     confirm_text: str = ""
     cancel_text: str = ""
     completion_text: str = ""
+    primary_language: str = ""
 
 
 @dataclass(frozen=True)

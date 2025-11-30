@@ -1,8 +1,37 @@
-# ToDo リスト
-## アーキテクチャ改善（Lambda 可読性向上）
-- [x] Lambda 内のイベント分岐を `app/dispatcher.py` に集約し、イベントごとにユースケースハンドラ（message/postback/join/memberJoined/follow）をクラス分離する（`src_new/` に新構成を追加）
-- [x] ドメインモデル（GroupLanguageSetting, MessageRecord, TranslationRequest/Result）を `domain/models` 配下に整理し、整形専用オブジェクトを `presentation/view_models` に切り出す（`src_new/domain`, `src_new/presentation`）
-- [x] 外部サービスのインターフェース（LINE, Gemini, Neon）を `domain/ports` で抽象化し、`infra/` に実装を配置、DI コンテナ `app/bootstrap.py` で組み立てる（`src_new/`）
-- [x] `lambda_handler.py` を薄いエントリポイントにし、初期化・依存解決とイベントディスパッチのみ行う構造へ移行する（`src_new/lambda_handler.py`）
-- [ ] ハンドラ単体テスト用に、LINE Webhook Event の固定フィクスチャとモックポートを追加し、主要ユースケースのユニットテストを整備する
-  - 2025-11-26: 上記4項目を `src_new/` で実装（既存 `src/` は無変更）。デプロイに組み込む場合は `template.yaml` / `scripts/deploy.sh` で CodeUri/Handler を調整して新構成を参照させる必要あり。
+# 2025-11-30 メンション経由の機能提供追加計画
+
+## ゴール
+- グループ内でボットがメンションされたときだけ、指示言語に合わせて機能応答できること。
+- 指示文を Gemini で判定し、言語設定変更 / 使い方説明 / 翻訳停止・再開 を Lambda 側で実行すること。
+- どの機能にも該当しない場合に案内文を返し、通常翻訳を再開できること。
+
+## タスク（ToDo）
+- [x] メンション検知の要件整理: 環境変数でボット名を持たせ、LINE メッセージからメンション有無を判定するルールを決める。
+- [x] Gemini コマンド判定スキーマ設計: 4 操作種別（言語設定、使い方、停止、再開、その他）と、言語設定内の操作タイプ（リセット/追加/削除/追加+削除）＋対象言語配列を Structured Output で受け取るプロンプトを定義。
+- [x] ルーティング実装: MessageHandler でメンション付き指示を拾い、判定結果に応じて各モードへ分岐。通常翻訳との共存ルール（メンションなしは従来通訳継続）を整理。
+- [x] 言語設定モード実装: 
+  - [x] リセット&再設定フロー（既存の言語確認テンプレートを流用）
+  - [x] 部分追加/削除/追加+削除の DB 更新メソッドをリポジトリに追加
+  - [x] 言語設定中は翻訳停止、完了時に自動再開（translation_enabled フラグで制御）
+- [x] 使い方説明: 固定メッセージを設定済み言語すべてに Gemini で翻訳し列挙、指示言語でのレスポンスも担保。
+- [x] 翻訳停止/再開: グループ単位の停止フラグを永続化（group_settings テーブル）、状態に応じて翻訳処理をスキップ＆再開通知。
+- [x] インターフェース応答の多言語化ユーティリティ: 設定言語一覧に向けて Gemini で定型文を翻訳し、停止/再開通知で列挙表示する。
+- [x] 非該当時の案内: 指示言語でガイダンスを返し、翻訳を再開する挙動を実装。
+- [x] 環境変数・デプロイ設定更新: BOT メンション名や新モデル設定を `config.py`/`template.yaml`/`scripts/deploy.sh` に反映（BOT_MENTION_NAME は Secrets Manager 経由）。
+- [x] 使い方応答フォーマット調整: 言語ラベル([en]など)を外し、シンプルな多言語文のみを返す。
+- [x] 使い方応答で日本語原文を常に含める（グループ設定に ja がある場合）
+- [x] インターフェース応答から言語ラベルを除去（本番反映済み）
+- [x] メンション操作は Gemini 判定のみを使用し、Lambda 側キーワードフォールバックを廃止。対応不可の指示は UNKNOWN_INSTRUCTION を返す。
+- [x] 言語設定リセット時の応答を固定文言に統一し、指示の意図を明示する。
+- [x] テスト追加・修正: コマンド判定、メンションルーティング、停止/再開フラグ、部分言語更新のリポジトリ挙動など。
+  - [x] メンション有無でのコマンド判定テストを追加（@なしは翻訳フローへ）
+- [x] 言語設定プロンプト/完了メッセージの多言語化: LLM からの textBlocks（confirm/completed/cancel）と primaryLanguage を活用し、指示言語に合わせて確認・完了・キャンセル応答を返す。fallback では既存の UI 翻訳ユーティリティを使う。
+- [x] タイムアウト調整: `GEMINI_TIMEOUT_SECONDS` を 10s、`TRANSLATION_RETRY` を 2 に変更し、Lambda FunctionTimeout を 20s に拡張。
+- [ ] 本番で Gemini 呼び出しが 15s で Lambda timeout となるため、`GEMINI_TIMEOUT_SECONDS` と FunctionTimeout の再調整を検証する。
+- [x] Gemini の thinking を無効化（`thinkingBudget=0` を全 API 呼び出しに設定）。
+
+## メモ/前提
+- デプロイは `scripts/deploy.sh`（STAGE ごとに Secrets 名が変わる）。ローカルタイムアウトは 300–600 秒に設定する。
+- 本番スタック: STACK_NAME=translate-line-bot-prod, HttpApiEndpoint=https://h2xf6dwz5e.execute-api.ap-northeast-1.amazonaws.com/prod。
+- 2025-11-30: `sql/20251130_add_group_settings.sql` を本番 Neon に適用済み（group_settings テーブル作成）。
+- 2025-11-30: `pytest` 実行済み（17件成功）、stg スタックにデプロイ完了（translate-line-bot-stg）。

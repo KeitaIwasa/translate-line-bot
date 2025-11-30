@@ -161,6 +161,7 @@ class LanguagePreferenceAdapter(LanguagePreferencePort):
                     confirm_text=_pick_primary(text_blocks.get("confirm")),
                     cancel_text=_pick_primary(text_blocks.get("cancel")),
                     completion_text=_pick_primary(text_blocks.get("completed")),
+                    primary_language=data.get("primaryLanguage", "").lower(),
                 )
             except Exception as exc:  # pylint: disable=broad-except
                 last_error = exc
@@ -201,6 +202,7 @@ class LanguagePreferenceAdapter(LanguagePreferencePort):
                 "temperature": 0.2,
                 "responseMimeType": "application/json",
                 "responseSchema": LANGUAGE_PREF_SCHEMA,
+                "thinkingConfig": {"thinkingBudget": 0},
             },
         }
 
