@@ -91,6 +91,7 @@ class LanguagePreference:
     confirm_text: str = ""
     cancel_text: str = ""
     completion_text: str = ""
+    primary_language: str = ""
 
 
 @dataclass(frozen=True)

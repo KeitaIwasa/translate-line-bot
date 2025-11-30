@@ -25,6 +25,7 @@ from ...presentation.reply_formatter import (
     build_translation_reply,
     strip_source_echo,
 )
+from .postback_handler import _build_cancel_message, _build_completion_message
 
 logger = logging.getLogger(__name__)
 
@@ -165,18 +166,26 @@ class MessageHandler:
                 self._line.reply_messages(event.reply_token, messages)
             return True
 
+        prompt_texts = self._prepare_language_prompt_texts(supported, result)
         confirm_payload = self._encode_postback_payload(
             {
                 "kind": "language_confirm",
                 "action": "confirm",
                 "languages": [{"code": lang.code, "name": lang.name} for lang in supported],
+                "primary_language": prompt_texts["primary_language"],
+                "completion_text": prompt_texts["completion_text"],
             }
         )
         cancel_payload = self._encode_postback_payload(
-            {"kind": "language_confirm", "action": "cancel"}
+            {
+                "kind": "language_confirm",
+                "action": "cancel",
+                "primary_language": prompt_texts["primary_language"],
+                "cancel_text": prompt_texts["cancel_text"],
+            }
         )
 
-        confirm_text = self._build_simple_confirm_text(supported)[:400]
+        confirm_text = prompt_texts["confirm_text"]
         template_message = {
             "type": "template",
             "altText": "Confirm interpretation languages",
@@ -521,6 +530,42 @@ class MessageHandler:
             self._line.reply_text(event.reply_token, RATE_LIMIT_MESSAGE)
             _last_rate_limit_message[key] = RATE_LIMIT_MESSAGE
 
+    def _prepare_language_prompt_texts(self, supported, preference: models.LanguagePreference) -> Dict[str, str]:
+        primary_lang = (preference.primary_language or "").lower()
+
+        base_confirm = self._build_simple_confirm_text(supported)
+        confirm_text = preference.confirm_text or self._translate_template(base_confirm, primary_lang)
+        if not confirm_text:
+            confirm_text = base_confirm
+        confirm_text = self._truncate(confirm_text, 240)
+
+        base_completion = _build_completion_message([(lang.code, lang.name) for lang in supported])
+        completion_text = preference.completion_text or self._translate_template(base_completion, primary_lang)
+        if not completion_text:
+            completion_text = base_completion
+        completion_text = self._truncate(completion_text, 240)
+
+        base_cancel = _build_cancel_message()
+        cancel_text = preference.cancel_text or self._translate_template(base_cancel, primary_lang)
+        if not cancel_text:
+            cancel_text = base_cancel
+        cancel_text = self._truncate(cancel_text, 240)
+
+        return {
+            "primary_language": primary_lang,
+            "confirm_text": confirm_text,
+            "completion_text": completion_text,
+            "cancel_text": cancel_text,
+        }
+
+    @staticmethod
+    def _truncate(text: str, limit: int) -> str:
+        if not text:
+            return ""
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1] + "…"
+
     def _resolve_sender_name(self, event: models.MessageEvent) -> str:
         if event.user_id:
             name = self._line.get_display_name(event.sender_type, event.group_id, event.user_id)
@@ -551,7 +596,38 @@ class MessageHandler:
         return "翻訳したい言語を確認してもよろしいですか？"
 
     @staticmethod
-    def _encode_postback_payload(payload: Dict) -> str:
-        raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        compressed = base64.urlsafe_b64encode(zlib.compress(raw)).decode("ascii").rstrip("=")
-        return f"langpref2={compressed}"
+    def _encode_postback_payload(payload: Dict, max_bytes: int = 320) -> str:
+        """Encode payload for LINE postback with size guard (LINE上限≈300 bytes)."""
+        def _encode(data: Dict) -> str:
+            raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
+            compressed = base64.urlsafe_b64encode(zlib.compress(raw)).decode("ascii").rstrip("=")
+            return f"langpref2={compressed}"
+
+        encoded = _encode(payload)
+        if len(encoded.encode("utf-8")) <= max_bytes:
+            return encoded
+
+        # try shortening optional texts first
+        def _shrink_text(key: str, factor: float = 0.6) -> bool:
+            if key in payload and payload[key]:
+                text = payload[key]
+                new_len = max(int(len(text) * factor), 40)
+                payload[key] = text[:new_len]
+                return True
+            return False
+
+        for _ in range(3):
+            changed = False
+            for key in ("completion_text", "cancel_text"):
+                changed |= _shrink_text(key)
+            encoded = _encode(payload)
+            if len(encoded.encode("utf-8")) <= max_bytes:
+                return encoded
+            if not changed:
+                break
+
+        # last resort: drop optional texts
+        payload.pop("completion_text", None)
+        payload.pop("cancel_text", None)
+        encoded = _encode(payload)
+        return encoded[:max_bytes]
