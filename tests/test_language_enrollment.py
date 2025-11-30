@@ -91,7 +91,11 @@ class DummyCommandRouter:
 
 class DummyInterfaceTranslation(InterfaceTranslationService):
     def __init__(self):
-        pass
+        class _Translator:
+            def translate(self, *args, **kwargs):
+                return []
+
+        super().__init__(_Translator())
 
     def translate(self, *args, **kwargs):
         return []

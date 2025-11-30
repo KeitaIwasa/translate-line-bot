@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List, Optional, Sequence, Tuple
 
-from psycopg import sql
+from psycopg import errors, sql
 
 from ..domain.models import ContextMessage, StoredMessage
 from ..domain.ports import MessageRepositoryPort
@@ -12,6 +13,7 @@ from .neon_client import NeonClient
 
 BOT_JOIN_MARKER = "__bot_join__"
 GROUP_LANG_MARKER = "__group_lang__"
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -216,9 +218,16 @@ class NeonMessageRepository(MessageRepositoryPort):
                     """,
                     (group_id, enabled),
                 )
-        except Exception:
+        except errors.UndefinedTable:
             # 後方互換: group_settings が未作成でも致命的エラーにしない
+            logger.warning(
+                "group_settings table missing; skip persisting translation_enabled",
+                extra={"group_id": group_id},
+            )
             return
+        except Exception:
+            logger.exception("Failed to set translation_enabled", extra={"group_id": group_id})
+            raise
 
     def is_translation_enabled(self, group_id: str) -> bool:
         try:
@@ -231,8 +240,15 @@ class NeonMessageRepository(MessageRepositoryPort):
             if row is None:
                 return True
             return bool(row[0])
-        except Exception:
+        except errors.UndefinedTable:
+            logger.warning(
+                "group_settings table missing; defaulting translation_enabled=True",
+                extra={"group_id": group_id},
+            )
             return True
+        except Exception:
+            logger.exception("Failed to fetch translation_enabled", extra={"group_id": group_id})
+            raise
 
     def reset_group_language_settings(self, group_id: str) -> None:
         with self._client.cursor() as cur:

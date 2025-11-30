@@ -1,6 +1,3 @@
-import pytest
-
-
 from src.app.handlers.message_handler import MessageHandler
 
 

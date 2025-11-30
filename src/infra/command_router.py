@@ -91,7 +91,7 @@ class GeminiCommandRouter(CommandRouterPort):
         payload = self._build_payload(text)
         response = self._session.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent",
-            params={"key": self._api_key},
+            headers={"x-goog-api-key": self._api_key},
             json=payload,
             timeout=self._timeout,
         )

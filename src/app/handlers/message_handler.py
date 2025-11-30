@@ -125,8 +125,6 @@ class MessageHandler:
             except Exception:
                 logger.exception("Failed to persist message")
 
-        return None if handled else None
-
     # --- internal helpers ---
     def _attempt_language_enrollment(self, event: models.MessageEvent) -> bool:
         logger.info(
@@ -448,10 +446,14 @@ class MessageHandler:
             except requests.exceptions.Timeout as exc:
                 logger.warning(
                     "Gemini translation timeout",
-                    extra={"attempt": attempt + 1, "timeout_seconds": getattr(self._translation, "_translator", None) and getattr(self._translation._translator, "_timeout", None)},  # type: ignore[attr-defined]
+                    extra={
+                        "attempt": attempt + 1,
+                        "timeout_seconds": getattr(getattr(self._translation, "_translator", None), "_timeout", None),
+                    },
                 )
                 last_error = exc
-                break
+                time.sleep(0.5 * (attempt + 1))
+                continue
             except Exception as exc:  # pylint: disable=broad-except
                 if isinstance(exc, GeminiRateLimitError):
                     last_error = exc
@@ -483,10 +485,16 @@ class MessageHandler:
             except requests.exceptions.Timeout as exc:
                 logger.warning(
                     "Gemini interface translation timeout",
-                    extra={"attempt": attempt + 1, "timeout_seconds": getattr(self._interface_translation, "_translator", None) and getattr(self._interface_translation._translator, "_timeout", None)},  # type: ignore[attr-defined]
+                    extra={
+                        "attempt": attempt + 1,
+                        "timeout_seconds": getattr(
+                            getattr(self._interface_translation, "_translator", None), "_timeout", None
+                        ),
+                    },
                 )
                 last_error = exc
-                break
+                time.sleep(0.5 * (attempt + 1))
+                continue
             except Exception as exc:  # pylint: disable=broad-except
                 if isinstance(exc, GeminiRateLimitError):
                     last_error = exc

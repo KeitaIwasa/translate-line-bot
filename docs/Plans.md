@@ -27,6 +27,7 @@
   - [x] メンション有無でのコマンド判定テストを追加（@なしは翻訳フローへ）
 - [x] 言語設定プロンプト/完了メッセージの多言語化: LLM からの textBlocks（confirm/completed/cancel）と primaryLanguage を活用し、指示言語に合わせて確認・完了・キャンセル応答を返す。fallback では既存の UI 翻訳ユーティリティを使う。
 - [x] タイムアウト調整: `GEMINI_TIMEOUT_SECONDS` を 10s、`TRANSLATION_RETRY` を 2 に変更し、Lambda FunctionTimeout を 20s に拡張。
+- [ ] 本番で Gemini 呼び出しが 15s で Lambda timeout となるため、`GEMINI_TIMEOUT_SECONDS` と FunctionTimeout の再調整を検証する。
 
 ## メモ/前提
 - デプロイは `scripts/deploy.sh`（STAGE ごとに Secrets 名が変わる）。ローカルタイムアウトは 300–600 秒に設定する。
