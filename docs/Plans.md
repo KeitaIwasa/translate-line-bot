@@ -18,10 +18,15 @@
 - [x] インターフェース応答の多言語化ユーティリティ: 設定言語一覧に向けて Gemini で定型文を翻訳し、停止/再開通知で列挙表示する。
 - [x] 非該当時の案内: 指示言語でガイダンスを返し、翻訳を再開する挙動を実装。
 - [x] 環境変数・デプロイ設定更新: BOT メンション名や新モデル設定を `config.py`/`template.yaml`/`scripts/deploy.sh` に反映（BOT_MENTION_NAME は Secrets Manager 経由）。
+- [x] 使い方応答フォーマット調整: 言語ラベル([en]など)を外し、シンプルな多言語文のみを返す。
+- [x] 使い方応答で日本語原文を常に含める（グループ設定に ja がある場合）
+- [x] メンション操作は Gemini 判定のみを使用し、Lambda 側キーワードフォールバックを廃止。対応不可の指示は UNKNOWN_INSTRUCTION を返す。
 - [ ] テスト追加・修正: コマンド判定、メンションルーティング、停止/再開フラグ、部分言語更新のリポジトリ挙動など。
+  - [x] メンション有無でのコマンド判定テストを追加（@なしは翻訳フローへ）
 - [ ] テスト実行: ローカル pytest 実行での動作確認。問題があれば、修正。
 - [ ] ドキュメント更新: `要件定義書.md`, README, `AGENTS.md` に新しい操作方法、環境変数、運用手順などを追記。
 
 ## メモ/前提
 - デプロイは `scripts/deploy.sh`（STAGE ごとに Secrets 名が変わる）。ローカルタイムアウトは 300–600 秒に設定する。
 - 本番スタック: STACK_NAME=translate-line-bot-prod, HttpApiEndpoint=https://h2xf6dwz5e.execute-api.ap-northeast-1.amazonaws.com/prod。
+- 2025-11-30: `sql/20251130_add_group_settings.sql` を本番 Neon に適用済み（group_settings テーブル作成）。

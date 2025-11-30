@@ -208,22 +208,21 @@ class MessageHandler:
         name = self._bot_mention_name
         if not name:
             return None
-        pattern = rf"@?\s*{re.escape(name)}"
+        # メンションとしての @<bot name> が含まれているときだけコマンド扱いする
+        pattern = rf"@\s*{re.escape(name)}"
         if not re.search(pattern, text, flags=re.IGNORECASE):
             return None
-        stripped = re.sub(pattern, "", text, count=1, flags=re.IGNORECASE).strip()
+        stripped = re.sub(pattern, " ", text, count=1, flags=re.IGNORECASE)
+        stripped = re.sub(r"\s{2,}", " ", stripped).strip()
         stripped = stripped.lstrip("-—–:：、，,。.!！?？ ")
         return stripped or ""
 
     def _handle_command(self, event: models.MessageEvent, command_text: str) -> bool:
         decision = self._command_router.decide(command_text)
-        action = decision.action
-
-        if not action:
-            action = "unknown"
+        action = decision.action or "unknown"
 
         if action == "language_settings":
-            return self._handle_language_settings(event, decision)
+            return self._handle_language_settings(event, decision, command_text)
 
         if action == "howto":
             message = self._build_usage_response(decision.instruction_language, event.group_id)
@@ -249,16 +248,19 @@ class MessageHandler:
                 self._line.reply_text(event.reply_token, ack[:5000])
             return True
 
-        # unknown
-        detected = decision.instruction_language or self._lang_detector.detect(command_text)
-        fallback = self._build_unknown_response(detected)
-        self._repo.set_translation_enabled(event.group_id, True)
-        if event.reply_token and fallback:
-            self._line.reply_text(event.reply_token, fallback)
-        return True
+        return self._respond_unknown_instruction(event, decision.instruction_language, command_text)
 
-    def _handle_language_settings(self, event: models.MessageEvent, decision: models.CommandDecision) -> bool:
+    def _handle_language_settings(
+        self,
+        event: models.MessageEvent,
+        decision: models.CommandDecision,
+        command_text: Optional[str] = None,
+    ) -> bool:
         op = decision.operation or "reset_all"
+        valid_ops = {"reset_all", "add_and_remove", "add", "remove"}
+        if op not in valid_ops:
+            logger.info("Unsupported language operation", extra={"op": op})
+            return self._respond_unknown_instruction(event, decision.instruction_language, command_text)
         add_langs = [(lang.code, lang.name) for lang in decision.languages_to_add]
         remove_codes = [lang.code for lang in decision.languages_to_remove]
 
@@ -285,9 +287,6 @@ class MessageHandler:
         elif op == "remove":
             if remove_codes:
                 self._repo.remove_group_languages(event.group_id, remove_codes)
-        else:
-            logger.info("Unknown language op; treated as reset", extra={"op": op})
-            self._repo.reset_group_language_settings(event.group_id)
 
         # 言語変更後は翻訳再開
         self._repo.set_translation_enabled(event.group_id, True)
@@ -295,6 +294,19 @@ class MessageHandler:
         if event.reply_token:
             ack = decision.ack_text or self._translate_template("言語設定を更新しました。", decision.instruction_language)
             self._line.reply_text(event.reply_token, ack[:5000])
+        return True
+
+    def _respond_unknown_instruction(
+        self,
+        event: models.MessageEvent,
+        instruction_lang: str,
+        original_text: Optional[str] = None,
+    ) -> bool:
+        detected = instruction_lang or (self._lang_detector.detect(original_text) if original_text else "")
+        fallback = self._build_unknown_response(detected)
+        self._repo.set_translation_enabled(event.group_id, True)
+        if event.reply_token and fallback:
+            self._line.reply_text(event.reply_token, fallback)
         return True
 
     def _handle_translation_flow(self, event: models.MessageEvent, sender_name: str, translation_enabled: bool) -> bool:
@@ -343,9 +355,11 @@ class MessageHandler:
             candidate_languages=targets_list,
         )
 
-        # 依頼言語が日本語の場合、元テキストを先頭に置く
+        targets_lower = {lang.lower() for lang in targets_list}
+
+        # グループまたは依頼言語に日本語が含まれる場合は、必ず日本語原文を先頭に置く
         lines: List[str] = []
-        if instruction_lang.lower().startswith("ja"):
+        if "ja" in targets_lower:
             lines.append(USAGE_MESSAGE_JA)
 
         seen_langs = set()
@@ -353,8 +367,8 @@ class MessageHandler:
             if item.lang.lower() in seen_langs:
                 continue
             seen_langs.add(item.lang.lower())
-            prefix = f"[{item.lang}] "
-            lines.append(prefix + strip_source_echo(USAGE_MESSAGE_JA, item.text))
+            cleaned = strip_source_echo(USAGE_MESSAGE_JA, item.text)
+            lines.append(cleaned)
 
         return "\n\n".join(lines)[:MAX_REPLY_LENGTH]
 

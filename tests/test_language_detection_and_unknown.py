@@ -35,6 +35,11 @@ class DummyCommandRouter:
         return models.CommandDecision(action="unknown", instruction_language="", ack_text="")
 
 
+class DummyTranslationService:
+    def translate(self, *_args, **_kwargs):
+        return []
+
+
 class DummyRepo:
     def ensure_group_member(self, *_args, **_kwargs):
         return None
@@ -119,3 +124,50 @@ def test_unknown_instruction_translated_to_detected_language(gemini_adapter):
     assert result != UNKNOWN_INSTRUCTION_JA
     # Heuristic: translated text should contain ASCII letters predominantly (avoid original Japanese)
     assert any(ch.isascii() and ch.isalpha() for ch in result)
+
+
+def test_language_settings_invalid_operation_returns_unknown_instruction():
+    class RecordingLineClient(DummyLineClient):
+        def __init__(self):
+            self.last_text = None
+
+        def reply_text(self, _reply_token, text):
+            self.last_text = text
+            return None
+
+    class InvalidOpCommandRouter:
+        def decide(self, _text: str):
+            return models.CommandDecision(
+                action="language_settings",
+                operation="invalid",
+                instruction_language="",
+                ack_text="",
+            )
+
+    line_client = RecordingLineClient()
+    handler = MessageHandler(
+        line_client=line_client,
+        translation_service=DummyTranslationService(),
+        interface_translation=InterfaceTranslationService(DummyTranslationService()),
+        language_detector=LanguageDetectionService(),
+        language_pref_service=DummyLangPrefService(),
+        command_router=InvalidOpCommandRouter(),
+        repo=DummyRepo(),
+        max_context_messages=1,
+        translation_retry=1,
+        bot_mention_name="bot",
+    )
+
+    event = models.MessageEvent(
+        event_type="message",
+        reply_token="token",
+        timestamp=0,
+        text="@bot do something",  # command_text is provided separately
+        user_id="U",
+        group_id="G",
+        sender_type="group",
+    )
+
+    handler._handle_command(event, "unsupported")
+
+    assert line_client.last_text == UNKNOWN_INSTRUCTION_JA

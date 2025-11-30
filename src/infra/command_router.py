@@ -47,7 +47,7 @@ SCHEMA = {
         "instruction_language": {"type": "string"},
         "operation": {
             "type": "string",
-            "enum": ["reset_all", "add", "remove", "add_and_remove", ""],
+            "enum": ["reset_all", "add", "remove", "add_and_remove"],
         },
         "languages_to_add": {
             "type": "array",
@@ -100,7 +100,7 @@ class GeminiCommandRouter(CommandRouterPort):
                 response.status_code,
                 response.text[:800],
             )
-            return self._keyword_fallback(text)
+            return self._unknown_decision()
 
         body = response.json()
         logger.debug("command router raw response", extra={"body": body})
@@ -115,7 +115,7 @@ class GeminiCommandRouter(CommandRouterPort):
             data = json.loads(part_text)
         except Exception:
             logger.error("Command router JSON parse failed", extra={"part_text": part_text})
-            return self._keyword_fallback(text)
+            return self._unknown_decision()
 
         def _parse_lang_list(items: List[Dict] | None) -> List[LanguageChoice]:
             if not items:
@@ -136,21 +136,13 @@ class GeminiCommandRouter(CommandRouterPort):
             instruction_language=data.get("instruction_language", ""),
             ack_text=data.get("ack_text", ""),
         )
-        if decision.action == "unknown":
-            return self._keyword_fallback(text)
+        valid_actions = {"language_settings", "howto", "pause", "resume", "unknown"}
+        if decision.action not in valid_actions:
+            return self._unknown_decision()
         return decision
 
-    def _keyword_fallback(self, text: str) -> CommandDecision:
-        lower = text.lower()
-        lower = lower
-        if any(k in text for k in ["翻訳停止", "停止", "pause"]) or "stop" in lower:
-            return CommandDecision(action="pause", instruction_language="", ack_text="")
-        if any(k in text for k in ["翻訳再開", "再開", "resume", "restart", "start"]) or "continue" in lower:
-            return CommandDecision(action="resume", instruction_language="", ack_text="")
-        if "使い方" in text or "how to" in lower or "help" in lower:
-            return CommandDecision(action="howto", instruction_language="", ack_text="")
-        if "言語" in text or "language" in lower:
-            return CommandDecision(action="language_settings", operation="reset_all", instruction_language="", ack_text="")
+    @staticmethod
+    def _unknown_decision() -> CommandDecision:
         return CommandDecision(action="unknown", instruction_language="", ack_text="")
 
     def _build_payload(self, message_text: str) -> Dict:
