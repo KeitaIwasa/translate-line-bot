@@ -26,7 +26,6 @@
 - [x] テスト追加・修正: コマンド判定、メンションルーティング、停止/再開フラグ、部分言語更新のリポジトリ挙動など。
   - [x] メンション有無でのコマンド判定テストを追加（@なしは翻訳フローへ）
 - [x] 言語設定プロンプト/完了メッセージの多言語化: LLM からの textBlocks（confirm/completed/cancel）と primaryLanguage を活用し、指示言語に合わせて確認・完了・キャンセル応答を返す。fallback では既存の UI 翻訳ユーティリティを使う。
-- [ ] ドキュメント更新: `要件定義書.md` は反映済み。README/`AGENTS.md` の追記（操作方法・環境変数・運用手順）が未対応。
 - [x] タイムアウト調整: `GEMINI_TIMEOUT_SECONDS` を 10s、`TRANSLATION_RETRY` を 2 に変更し、Lambda FunctionTimeout を 20s に拡張。
 
 ## メモ/前提
