@@ -3,6 +3,8 @@ import os
 from src.app.handlers.message_handler import MessageHandler
 from src.domain import models
 from src.domain.services.translation_service import TranslationService
+from src.domain.services.interface_translation_service import InterfaceTranslationService
+from src.domain.services.language_detection_service import LanguageDetectionService
 
 
 os.environ.setdefault("LINE_CHANNEL_SECRET", "dummy")
@@ -87,6 +89,14 @@ class DummyCommandRouter:
         return models.CommandDecision(action="unknown", instruction_language="ja", ack_text="")
 
 
+class DummyInterfaceTranslation(InterfaceTranslationService):
+    def __init__(self):
+        pass
+
+    def translate(self, *args, **kwargs):
+        return []
+
+
 class DummyLangPrefService:
     def __init__(self, result):
         self.result = result
@@ -117,6 +127,8 @@ def test_language_enrollment_ignores_unsupported_in_confirm():
     handler = MessageHandler(
         line_client=line,
         translation_service=DummyTranslationService(),
+        interface_translation=DummyInterfaceTranslation(),
+        language_detector=LanguageDetectionService(),
         language_pref_service=DummyLangPrefService(fake_result),
         command_router=DummyCommandRouter(),
         repo=repo,

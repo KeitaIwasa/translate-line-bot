@@ -17,8 +17,14 @@ from ...domain.ports import (
     MessageRepositoryPort,
 )
 from ...domain.services.translation_service import TranslationService
+from ...domain.services.interface_translation_service import InterfaceTranslationService
+from ...domain.services.language_detection_service import LanguageDetectionService
 from ...infra.gemini_translation import GeminiRateLimitError
-from ...presentation.reply_formatter import build_translation_reply
+from ...presentation.reply_formatter import (
+    MAX_REPLY_LENGTH,
+    build_translation_reply,
+    strip_source_echo,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +61,8 @@ class MessageHandler:
         self,
         line_client: LinePort,
         translation_service: TranslationService,
+        interface_translation: InterfaceTranslationService,
+        language_detector: LanguageDetectionService,
         language_pref_service: LanguagePreferencePort,
         command_router: CommandRouterPort,
         repo: MessageRepositoryPort,
@@ -64,6 +72,8 @@ class MessageHandler:
     ) -> None:
         self._line = line_client
         self._translation = translation_service
+        self._interface_translation = interface_translation
+        self._lang_detector = language_detector
         self._lang_pref = language_pref_service
         self._command_router = command_router
         self._repo = repo
@@ -225,23 +235,23 @@ class MessageHandler:
 
         if action == "pause":
             self._repo.set_translation_enabled(event.group_id, False)
-            ack = decision.ack_text or self._translate_template(
-                "翻訳を一時停止します。再開するときはもう一度メンションしてください。",
-                decision.instruction_language,
-            )
+            base_ack = decision.ack_text or "翻訳を一時停止します。再開するときはもう一度メンションしてください。"
+            ack = self._build_multilingual_interface_message(base_ack, event.group_id)
             if event.reply_token:
                 self._line.reply_text(event.reply_token, ack[:5000])
             return True
 
         if action == "resume":
             self._repo.set_translation_enabled(event.group_id, True)
-            ack = decision.ack_text or self._translate_template("翻訳を再開します。", decision.instruction_language)
+            base_ack = decision.ack_text or "翻訳を再開します。"
+            ack = self._build_multilingual_interface_message(base_ack, event.group_id)
             if event.reply_token:
                 self._line.reply_text(event.reply_token, ack[:5000])
             return True
 
         # unknown
-        fallback = self._build_unknown_response(decision.instruction_language)
+        detected = decision.instruction_language or self._lang_detector.detect(command_text)
+        fallback = self._build_unknown_response(detected)
         self._repo.set_translation_enabled(event.group_id, True)
         if event.reply_token and fallback:
             self._line.reply_text(event.reply_token, fallback)
@@ -424,6 +434,69 @@ class MessageHandler:
         if last_error:
             raise last_error
         return []
+
+    def _invoke_interface_translation_with_retry(
+        self,
+        base_text: str,
+        target_languages: Sequence[str],
+    ):
+        if not target_languages:
+            return []
+
+        last_error: Exception | None = None
+        for attempt in range(self._translation_retry):
+            try:
+                return self._interface_translation.translate(base_text, target_languages)
+            except Exception as exc:  # pylint: disable=broad-except
+                if isinstance(exc, GeminiRateLimitError):
+                    last_error = exc
+                    break
+                logger.warning(
+                    "Gemini interface translation failed (attempt %s/%s)",
+                    attempt + 1,
+                    self._translation_retry,
+                )
+                last_error = exc
+                time.sleep(0.5 * (attempt + 1))
+        logger.error("Gemini interface translation failed after retries")
+        if last_error:
+            raise last_error
+        return []
+
+    def _build_multilingual_interface_message(self, base_text: str, group_id: str) -> str:
+        languages = self._repo.fetch_group_languages(group_id)
+        translations = self._invoke_interface_translation_with_retry(base_text, languages)
+
+        if not translations:
+            return base_text
+
+        ordered_langs: List[str] = []
+        seen_order = set()
+        for lang in languages:
+            if not lang:
+                continue
+            lowered = lang.lower()
+            if lowered in seen_order:
+                continue
+            seen_order.add(lowered)
+            ordered_langs.append(lang)
+
+        text_by_lang = {}
+        for item in translations:
+            lowered = item.lang.lower()
+            if lowered in text_by_lang:
+                continue
+            cleaned = strip_source_echo(base_text, item.text)
+            text_by_lang[lowered] = cleaned or item.text or base_text
+
+        lines: List[str] = []
+        for lang in ordered_langs:
+            lowered = lang.lower()
+            text = text_by_lang.get(lowered, base_text)
+            text = (text or base_text).strip()
+            lines.append(f"[{lang}] {text}")
+
+        return "\n\n".join(lines)[:MAX_REPLY_LENGTH]
 
     def _send_rate_limit_notice(self, event: models.MessageEvent) -> None:
         key = event.group_id or event.user_id or "unknown"

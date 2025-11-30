@@ -4,6 +4,8 @@ import logging
 
 from ..config import get_settings
 from ..domain.services.translation_service import TranslationService
+from ..domain.services.interface_translation_service import InterfaceTranslationService
+from ..domain.services.language_detection_service import LanguageDetectionService
 from ..infra.gemini_translation import GeminiTranslationAdapter
 from ..infra.language_pref_client import LanguagePreferenceAdapter
 from ..infra.command_router import GeminiCommandRouter
@@ -31,6 +33,8 @@ def build_dispatcher() -> Dispatcher:
         timeout_seconds=settings.gemini_timeout_seconds,
     )
     translation_service = TranslationService(translation_adapter)
+    interface_translation = InterfaceTranslationService(translation_adapter)
+    language_detector = LanguageDetectionService()
     language_pref_service = LanguagePreferenceAdapter(
         api_key=settings.gemini_api_key,
         model=settings.gemini_model,
@@ -53,6 +57,8 @@ def build_dispatcher() -> Dispatcher:
         max_context_messages=settings.max_context_messages,
         translation_retry=settings.translation_retry,
         bot_mention_name=settings.bot_mention_name,
+        interface_translation=interface_translation,
+        language_detector=language_detector,
     )
     postback_handler = PostbackHandler(line_client, repo)
     join_handler = JoinHandler(line_client, repo)
