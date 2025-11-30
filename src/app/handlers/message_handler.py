@@ -269,7 +269,8 @@ class MessageHandler:
             # 言語設定モード中は翻訳停止
             self._repo.set_translation_enabled(event.group_id, False)
             if event.reply_token:
-                ack = decision.ack_text or self._translate_template(
+                # リセット時は必ずガイダンス文言を返す（LLM 生成のあいまいな承諾メッセージを避ける）
+                ack = self._translate_template(
                     "言語設定をリセットしました。通訳したい言語をすべて教えてください。",
                     decision.instruction_language,
                 )
