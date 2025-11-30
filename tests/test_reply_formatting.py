@@ -1,5 +1,5 @@
 from reply_formatter import format_translations
-from domain.models import TranslationResult
+from src.domain.models import TranslationResult
 
 
 def test_format_reply_drops_original_and_language_codes():

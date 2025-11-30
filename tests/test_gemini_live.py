@@ -4,8 +4,8 @@ import os
 import pytest
 from dotenv import load_dotenv
 
-from domain.models import ContextMessage, TranslationRequest
-from infra.gemini_translation import GeminiTranslationAdapter
+from src.domain.models import ContextMessage, TranslationRequest
+from src.infra.gemini_translation import GeminiTranslationAdapter
 
 
 load_dotenv(dotenv_path=".env")

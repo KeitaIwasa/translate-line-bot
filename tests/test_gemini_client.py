@@ -3,8 +3,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from domain.models import ContextMessage, TranslationRequest
-from infra.gemini_translation import GeminiTranslationAdapter
+from src.domain.models import ContextMessage, TranslationRequest
+from src.infra.gemini_translation import GeminiTranslationAdapter
 
 
 class DummyResponse:

@@ -2,8 +2,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from domain.models import ContextMessage, TranslationResult
-from domain.services.translation_service import TranslationService
+from src.domain.models import ContextMessage, TranslationResult
+from src.domain.services.translation_service import TranslationService
 
 
 class DummyTranslator:
@@ -26,7 +26,7 @@ def test_translate_filters_detected_language(monkeypatch):
     dummy_client = DummyTranslator(dummy_response)
     service = TranslationService(dummy_client)
 
-    monkeypatch.setattr("domain.services.translation_service.detect_language", lambda _: "en")
+    monkeypatch.setattr("src.domain.services.translation_service.detect_language", lambda _: "en")
 
     timestamp = datetime.now(tz=timezone.utc)
     result = service.translate(
@@ -45,7 +45,7 @@ def test_translate_filters_detected_language(monkeypatch):
 def test_translate_returns_empty_when_no_targets(monkeypatch):
     dummy_client = DummyTranslator(return_value=[TranslationResult(lang="ja", text="hi")])
     service = TranslationService(dummy_client)
-    monkeypatch.setattr("domain.services.translation_service.detect_language", lambda _: "ja")
+    monkeypatch.setattr("src.domain.services.translation_service.detect_language", lambda _: "ja")
 
     timestamp = datetime.now(tz=timezone.utc)
     result = service.translate(

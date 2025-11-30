@@ -8,9 +8,9 @@ from typing import Iterable, List
 
 import requests
 
-from domain.models import TranslationRequest, TranslationResult
-from domain.ports import TranslationPort
-from infra.translation_schema import TRANSLATION_SCHEMA
+from src.domain.models import TranslationRequest, TranslationResult
+from src.domain.ports import TranslationPort
+from src.infra.translation_schema import TRANSLATION_SCHEMA
 
 logger = logging.getLogger(__name__)
 
