@@ -5,7 +5,8 @@ import json
 
 import pytest
 
-from line_webhook import LineEvent, SignatureVerificationError, parse_events, verify_signature
+from src.presentation.line_webhook_parser import SignatureVerificationError, parse_events, verify_signature
+from src.domain import models
 
 
 def test_parse_events_filters_non_text():
@@ -37,7 +38,7 @@ def test_parse_events_filters_non_text():
     events = parse_events(body)
     assert len(events) == 1
     event = events[0]
-    assert isinstance(event, LineEvent)
+    assert isinstance(event, models.MessageEvent)
     assert event.text == "hello"
     assert event.group_id == "G"
     assert event.user_id == "U"

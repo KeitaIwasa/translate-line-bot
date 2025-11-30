@@ -8,7 +8,9 @@ from typing import Iterable, List
 
 import requests
 
-from .schema import TRANSLATION_SCHEMA
+from src.domain.models import TranslationRequest, TranslationResult
+from src.domain.ports import TranslationPort
+from src.infra.translation_schema import TRANSLATION_SCHEMA
 
 logger = logging.getLogger(__name__)
 
@@ -16,13 +18,11 @@ SYSTEM_INSTRUCTION = """
 You are an interpreting engine for a multilingual LINE group.
 
 You receive a JSON object containing:
-
 * "source_message": the message to be translated
 * "context_messages": recent messages in the same group
 * "target_languages": an array of language codes to translate into
 
 Requirements:
-
 * Use "source_message.text" as the text to translate.
 * Use "context_messages" to understand the context and who is speaking to whom.
 * Preserve user names (sender_name) exactly as they are; Do NOT translate them.
@@ -31,61 +31,66 @@ Requirements:
 * Do not copy, quote, or directly reproduce the source_message.text in the translation output; return only the translated text for each target language.
 * Output only a JSON object that conforms to the specified JSON Schema.
 * Do NOT include context_messages or target_languages in the output JSON.
-"""
-
-
-@dataclass(frozen=True)
-class SourceMessage:
-    sender_name: str
-    text: str
-    timestamp: datetime
-
-
-@dataclass(frozen=True)
-class ContextMessage:
-    sender_name: str
-    text: str
-    timestamp: datetime
-
-
-@dataclass(frozen=True)
-class Translation:
-    lang: str
-    text: str
+""".strip()
 
 
 class GeminiRateLimitError(requests.HTTPError):
     """Raised when Gemini returns HTTP 429 Too Many Requests."""
 
 
-class GeminiClient:
+@dataclass(frozen=True)
+class _SourceMessage:
+    sender_name: str
+    text: str
+    timestamp: datetime
+
+
+@dataclass(frozen=True)
+class _ContextMessage:
+    sender_name: str
+    text: str
+    timestamp: datetime
+
+
+class GeminiTranslationAdapter(TranslationPort):
+    """Gemini への I/O を担当するインフラ層のアダプタ。"""
+
     def __init__(self, api_key: str, model: str, timeout_seconds: int = 10) -> None:
         self._api_key = api_key
         self._model = model
         self._timeout = timeout_seconds
         self._session = requests.Session()
 
-    def translate(
-        self,
-        source_message: SourceMessage,
-        context_messages: Iterable[ContextMessage],
-        target_languages: List[str],
-    ) -> List[Translation]:
-        if not target_languages:
+    def translate(self, request: TranslationRequest) -> List[TranslationResult]:
+        if not request.candidate_languages:
             return []
 
-        payload = self._build_payload(source_message, context_messages, target_languages)
-        params = {"key": self._api_key}
+        source = _SourceMessage(
+            sender_name=request.sender_name,
+            text=request.message_text,
+            timestamp=request.timestamp,
+        )
+        context = [
+            _ContextMessage(sender_name=msg.sender_name, text=msg.text, timestamp=msg.timestamp)
+            for msg in request.context_messages
+        ]
+
+        payload = self._build_payload(source, context, list(request.candidate_languages))
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent"
 
+        # 可読ログ：ユーザーコンテンツをデコードして出力
         try:
-            user_content_str = payload["contents"][0]["parts"][0]["text"]
-            user_content_obj = json.loads(user_content_str)
+            user_content_obj = json.loads(payload["contents"][0]["parts"][0]["text"])
             logger.info("Gemini request content decoded: %s", json.dumps(user_content_obj, ensure_ascii=False))
         except Exception:  # pylint: disable=broad-except
             logger.debug("Failed to decode Gemini request content for logging", exc_info=True)
 
-        response = self._session.post(url, params=params, json=payload, timeout=self._timeout)
+        response = self._session.post(
+            url,
+            params={"key": self._api_key},
+            json=payload,
+            timeout=self._timeout,
+        )
         try:
             response.raise_for_status()
         except requests.HTTPError as exc:
@@ -102,32 +107,26 @@ class GeminiClient:
 
         data = json.loads(part_text)
         logger.info("Gemini parsed translations: %s", json.dumps(data, ensure_ascii=False))
+
         translations = data.get("translations", [])
-        allowed = {lang.lower() for lang in target_languages}
-        parsed = [
-            Translation(lang=item["lang"], text=item["text"])
+        allowed = {lang.lower() for lang in request.candidate_languages}
+        return [
+            TranslationResult(lang=item["lang"], text=item["text"])
             for item in translations
             if item.get("lang") and item.get("text") and item["lang"].lower() in allowed
         ]
-        return parsed
 
     def _build_payload(
         self,
-        source_message: SourceMessage,
-        context_messages: Iterable[ContextMessage],
+        source_message: _SourceMessage,
+        context_messages: Iterable[_ContextMessage],
         target_languages: List[str],
     ) -> dict:
         def _format_timestamp(dt: datetime) -> str:
             return dt.strftime("%Y-%m-%d %H:%M:%S")
 
         payload = {
-            "systemInstruction": {
-                "parts": [
-                    {
-                        "text": SYSTEM_INSTRUCTION.strip(),
-                    }
-                ]
-            },
+            "systemInstruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]},
             "contents": [
                 {
                     "role": "user",

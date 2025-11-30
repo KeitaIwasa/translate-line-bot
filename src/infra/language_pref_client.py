@@ -8,6 +8,9 @@ from typing import Dict, List, Optional
 
 import requests
 
+from ..domain.models import LanguageChoice, LanguagePreference
+from ..domain.ports import LanguagePreferencePort
+
 logger = logging.getLogger(__name__)
 
 LANGUAGE_PREF_SYSTEM_PROMPT = """
@@ -93,52 +96,16 @@ LANGUAGE_PREF_SCHEMA = {
 }
 
 
-@dataclass(frozen=True)
-class LanguageOption:
-    code: str
-    primary_name: str
-    english_name: str
-    thai_name: str
-    supported: bool
+class LanguagePreferenceAdapter(LanguagePreferencePort):
+    """Gemini を使った言語設定推定クライアント。"""
 
-
-@dataclass(frozen=True)
-class TextSet:
-    primary: str
-    english: str
-    thai: str
-
-    def as_lines(self) -> List[str]:
-        return [line for line in (self.primary, self.english, self.thai) if line]
-
-
-@dataclass(frozen=True)
-class LanguagePreferenceResult:
-    primary_language: str
-    languages: List[LanguageOption]
-    confirm_text: TextSet
-    completed_text: TextSet
-    cancel_text: TextSet
-    confirm_label: str
-    cancel_label: str
-
-    @property
-    def supported_languages(self) -> List[LanguageOption]:
-        return [lang for lang in self.languages if lang.supported]
-
-    @property
-    def unsupported_languages(self) -> List[LanguageOption]:
-        return [lang for lang in self.languages if not lang.supported]
-
-
-class LanguagePreferenceService:
     def __init__(self, api_key: str, model: str, timeout_seconds: int = 10) -> None:
         self._api_key = api_key
         self._model = model
         self._timeout = timeout_seconds
         self._session = requests.Session()
 
-    def analyze(self, text: str) -> Optional[LanguagePreferenceResult]:
+    def analyze(self, text: str) -> LanguagePreference | None:
         if not text or not text.strip():
             return None
 
@@ -171,12 +138,9 @@ class LanguagePreferenceService:
 
                 data = json.loads(part_text)
                 languages = [
-                    LanguageOption(
+                    LanguageChoice(
                         code=item.get("code", "").lower(),
-                        primary_name=item.get("display", {}).get("primary", ""),
-                        english_name=item.get("display", {}).get("english", ""),
-                        thai_name=item.get("display", {}).get("thai", ""),
-                        supported=bool(item.get("supported", True)),
+                        name=item.get("display", {}).get("primary", "") or item.get("code", ""),
                     )
                     for item in data.get("languages", [])
                     if item.get("code")
@@ -184,18 +148,20 @@ class LanguagePreferenceService:
                 if not languages:
                     return None
 
+                supported = [lang for lang, raw in zip(languages, data.get("languages", [])) if raw.get("supported", True)]
+                unsupported = [lang for lang, raw in zip(languages, data.get("languages", [])) if not raw.get("supported", True)]
+
                 text_blocks = data.get("textBlocks", {})
                 buttons = data.get("buttonLabels", {})
-                result = LanguagePreferenceResult(
-                    primary_language=data.get("primaryLanguage", languages[0].code),
-                    languages=languages,
-                    confirm_text=_parse_text_set(text_blocks.get("confirm")),
-                    completed_text=_parse_text_set(text_blocks.get("completed")),
-                    cancel_text=_parse_text_set(text_blocks.get("cancel")),
+                return LanguagePreference(
+                    supported=supported,
+                    unsupported=unsupported,
                     confirm_label=buttons.get("confirm", "完了"),
                     cancel_label=buttons.get("cancel", "変更する"),
+                    confirm_text=_pick_primary(text_blocks.get("confirm")),
+                    cancel_text=_pick_primary(text_blocks.get("cancel")),
+                    completion_text=_pick_primary(text_blocks.get("completed")),
                 )
-                return result
             except Exception as exc:  # pylint: disable=broad-except
                 last_error = exc
                 logger.warning(
@@ -239,10 +205,6 @@ class LanguagePreferenceService:
         }
 
 
-def _parse_text_set(payload: Optional[Dict]) -> TextSet:
-    payload = payload or {}
-    return TextSet(
-        primary=payload.get("primary", ""),
-        english=payload.get("english", ""),
-        thai=payload.get("thai", ""),
-    )
+def _pick_primary(block: Optional[Dict]) -> str:
+    block = block or {}
+    return block.get("primary", "") or block.get("english", "") or block.get("thai", "")

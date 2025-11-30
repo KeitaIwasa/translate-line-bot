@@ -13,10 +13,18 @@ STAGE="${STAGE:-stg}"
 GEMINI_MODEL="${GEMINI_MODEL:-gemini-2.5-flash}"
 FUNCTION_MEMORY_SIZE="${FUNCTION_MEMORY_SIZE:-512}"
 FUNCTION_TIMEOUT="${FUNCTION_TIMEOUT:-15}"
-MAX_CONTEXT_MESSAGES="${MAX_CONTEXT_MESSAGES:-20}"
+MAX_CONTEXT_MESSAGES="${MAX_CONTEXT_MESSAGES:-8}"
 TRANSLATION_RETRY="${TRANSLATION_RETRY:-3}"
-RUNTIME_SECRET_ARN="${RUNTIME_SECRET_ARN:-arn:aws:secretsmanager:ap-northeast-1:215896857123:secret:line-translate-bot-secrets-Uqg35U}"
+RUNTIME_SECRET_ARN="${RUNTIME_SECRET_ARN:-}"
 S3_BUCKET="${S3_BUCKET:-}"
+
+if [[ -z "$RUNTIME_SECRET_ARN" ]]; then
+  if [[ "$STAGE" == "prod" ]]; then
+    RUNTIME_SECRET_ARN="prod/line-translate-bot-secrets"
+  else
+    RUNTIME_SECRET_ARN="stg/line-translate-bot-secrets"
+  fi
+fi
 
 echo "SAM Build..."
 sam build

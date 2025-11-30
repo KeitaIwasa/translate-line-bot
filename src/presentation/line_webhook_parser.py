@@ -5,23 +5,11 @@ import hashlib
 import hmac
 import json
 import logging
-from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
+
+from ..domain import models
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class LineEvent:
-    event_type: str
-    reply_token: Optional[str]
-    group_id: Optional[str]
-    user_id: Optional[str]
-    sender_type: str
-    text: str = ""
-    timestamp: int = 0
-    postback_data: Optional[str] = None
-    joined_user_ids: List[str] = field(default_factory=list)
 
 
 class SignatureVerificationError(RuntimeError):
@@ -38,14 +26,14 @@ def verify_signature(channel_secret: str, body: str, signature: Optional[str]) -
         raise SignatureVerificationError("Invalid signature")
 
 
-def parse_events(body: str) -> List[LineEvent]:
+def parse_events(body: str) -> List[models.BaseEvent]:
     try:
         payload = json.loads(body)
     except json.JSONDecodeError as exc:
         raise ValueError("Invalid JSON body") from exc
 
     events_raw = payload.get("events", [])
-    events: List[LineEvent] = []
+    events: List[models.BaseEvent] = []
 
     for event in events_raw:
         event_type = event.get("type")
@@ -59,13 +47,10 @@ def parse_events(body: str) -> List[LineEvent]:
             message = event.get("message", {})
             if message.get("type") != "text":
                 continue
-            if not group_id:
-                logger.debug("Skipping text event without group/user id", extra={"event": event})
-                continue
-            if not reply_token:
+            if not group_id or not reply_token:
                 continue
             events.append(
-                LineEvent(
+                models.MessageEvent(
                     event_type="message",
                     reply_token=reply_token,
                     group_id=group_id,
@@ -76,18 +61,17 @@ def parse_events(body: str) -> List[LineEvent]:
                 )
             )
         elif event_type == "postback":
-            postback = event.get("postback", {})
-            data = postback.get("data")
+            data = event.get("postback", {}).get("data")
             if not data or not reply_token or not group_id:
                 continue
             events.append(
-                LineEvent(
+                models.PostbackEvent(
                     event_type="postback",
                     reply_token=reply_token,
                     group_id=group_id,
                     user_id=user_id,
                     sender_type=sender_type,
-                    postback_data=data,
+                    data=data,
                     timestamp=event.get("timestamp", 0),
                 )
             )
@@ -95,7 +79,7 @@ def parse_events(body: str) -> List[LineEvent]:
             if not reply_token or not group_id:
                 continue
             events.append(
-                LineEvent(
+                models.JoinEvent(
                     event_type="join",
                     reply_token=reply_token,
                     group_id=group_id,
@@ -110,7 +94,7 @@ def parse_events(body: str) -> List[LineEvent]:
             if not reply_token or not group_id or not joined_ids:
                 continue
             events.append(
-                LineEvent(
+                models.MemberJoinedEvent(
                     event_type="memberJoined",
                     reply_token=reply_token,
                     group_id=group_id,
@@ -124,7 +108,7 @@ def parse_events(body: str) -> List[LineEvent]:
             if not reply_token:
                 continue
             events.append(
-                LineEvent(
+                models.FollowEvent(
                     event_type="follow",
                     reply_token=reply_token,
                     group_id=group_id,
@@ -133,7 +117,6 @@ def parse_events(body: str) -> List[LineEvent]:
                     timestamp=event.get("timestamp", 0),
                 )
             )
-
     return events
 
 

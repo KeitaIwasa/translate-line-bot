@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 class NeonClient:
-    """Thin wrapper around psycopg ConnectionPool for Neon."""
+    """psycopg ConnectionPool の薄いラッパー（既存実装をそのまま転写）。"""
 
     def __init__(self, dsn: str, min_size: int = 1, max_size: int = 4) -> None:
         self._pool = ConnectionPool(conninfo=dsn, min_size=min_size, max_size=max_size)

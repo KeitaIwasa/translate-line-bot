@@ -1,120 +1,112 @@
 import os
-import sys
-import types
 
-from language_preferences.service import LanguageOption, LanguagePreferenceResult, TextSet
-from line_webhook import LineEvent
+from src.app.handlers.message_handler import MessageHandler
+from src.domain import models
+from src.domain.services.translation_service import TranslationService
 
-# --- bootstrap test environment before importing lambda_handler ---
+
 os.environ.setdefault("LINE_CHANNEL_SECRET", "dummy")
 os.environ.setdefault("LINE_CHANNEL_ACCESS_TOKEN", "dummy")
 os.environ.setdefault("GEMINI_API_KEY", "dummy")
 os.environ.setdefault("NEON_DATABASE_URL", "postgres://dummy")
 
-fake_sql_mod = types.ModuleType("psycopg.sql")
-fake_sql_mod.SQL = lambda query: query
 
-fake_psycopg_mod = types.ModuleType("psycopg")
-fake_psycopg_mod.sql = fake_sql_mod
-sys.modules.setdefault("psycopg", fake_psycopg_mod)
-sys.modules.setdefault("psycopg.sql", fake_sql_mod)
+class DummyLineClient:
+    def __init__(self):
+        self.sent = {}
 
-fake_pool_mod = types.ModuleType("psycopg_pool")
+    def reply_messages(self, reply_token, messages):
+        self.sent["reply_token"] = reply_token
+        self.sent["messages"] = messages
+
+    def reply_text(self, reply_token, text):
+        self.sent["reply_token"] = reply_token
+        self.sent["messages"] = [{"type": "text", "text": text}]
+
+    def get_display_name(self, *_args, **_kwargs):
+        return None
 
 
-class _DummyPool:
-    def __init__(self, *_, **__):
+class DummyTranslationService(TranslationService):
+    def __init__(self):
         pass
 
-    def connection(self):
-        raise RuntimeError("Dummy pool has no connections")
+    def translate(self, *args, **kwargs):
+        return []
 
 
-fake_pool_mod.ConnectionPool = _DummyPool
-sys.modules.setdefault("psycopg_pool", fake_pool_mod)
+class DummyRepo:
+    def __init__(self):
+        self.recorded = False
 
-fake_langdetect_mod = types.ModuleType("langdetect")
+    def ensure_group_member(self, *args, **kwargs):
+        return None
+
+    def fetch_group_languages(self, *_args, **_kwargs):
+        return []
+
+    def fetch_recent_messages(self, *_args, **_kwargs):
+        return []
+
+    def insert_message(self, *_args, **_kwargs):
+        return None
+
+    def record_language_prompt(self, *args, **kwargs):
+        self.recorded = True
+
+    def try_complete_group_languages(self, *args, **kwargs):
+        return False
+
+    def try_cancel_language_prompt(self, *args, **kwargs):
+        return False
+
+    def reset_group_language_settings(self, *args, **kwargs):
+        return None
+
+    def record_bot_joined_at(self, *args, **kwargs):
+        return None
+
+    def fetch_bot_joined_at(self, *args, **kwargs):
+        return None
 
 
-class _DummyLangDetectException(Exception):
-    pass
+class DummyLangPrefService:
+    def __init__(self, result):
+        self.result = result
+
+    def analyze(self, _text: str):
+        return self.result
 
 
-def _dummy_detect(_text: str) -> str:
-    return "en"
-
-
-fake_langdetect_mod.detect = _dummy_detect
-fake_langdetect_mod.LangDetectException = _DummyLangDetectException
-sys.modules.setdefault("langdetect", fake_langdetect_mod)
-
-from src import lambda_handler
-
-
-def test_language_enrollment_ignores_unsupported_in_confirm(monkeypatch):
-    sent = {}
-
-    class FakeLineClient:
-        def reply_messages(self, reply_token, messages):
-            sent["reply_token"] = reply_token
-            sent["messages"] = messages
-
-        def reply_text(self, reply_token, text):
-            sent["reply_token"] = reply_token
-            sent["messages"] = [{"type": "text", "text": text}]
-
-        def get_display_name(self, *_args, **_kwargs):
-            return None
-
+def test_language_enrollment_ignores_unsupported_in_confirm():
     fake_supported = [
-        LanguageOption(
-            code="ja",
-            primary_name="日本語",
-            english_name="Japanese",
-            thai_name="ญี่ปุ่น",
-            supported=True,
-        ),
-        LanguageOption(
-            code="ar",
-            primary_name="アラビア語",
-            english_name="Arabic",
-            thai_name="อาหรับ",
-            supported=True,
-        ),
+        models.LanguageChoice(code="ja", name="日本語"),
+        models.LanguageChoice(code="ar", name="アラビア語"),
     ]
-    fake_unsupported = [
-        LanguageOption(
-            code="sa",
-            primary_name="संस्कृतम्",
-            english_name="Sanskrit",
-            thai_name="สันสกฤต",
-            supported=False,
-        ),
-    ]
+    fake_unsupported = [models.LanguageChoice(code="sa", name="サンスクリット語")]
 
-    fake_result = LanguagePreferenceResult(
-        primary_language="ja",
-        languages=fake_supported + fake_unsupported,
-        confirm_text=TextSet(
-            primary="日本語、アラビア語、サンスクリット語の翻訳を有効にしますか？",
-            english="Japanese, Arabic, Sanskrit?",
-            thai="ญี่ปุ่น อาหรับ สันสกฤต ใช่ไหม",
-        ),
-        completed_text=TextSet(primary="", english="", thai=""),
-        cancel_text=TextSet(primary="", english="", thai=""),
+    fake_result = models.LanguagePreference(
+        supported=fake_supported,
+        unsupported=fake_unsupported,
         confirm_label="OK",
         cancel_label="Cancel",
+        confirm_text="",
+        cancel_text="",
+        completion_text="",
     )
 
-    monkeypatch.setattr(lambda_handler, "line_client", FakeLineClient())
-    monkeypatch.setattr(
-        lambda_handler,
-        "language_pref_service",
-        type("FakeLangService", (), {"analyze": lambda _self, _text: fake_result})(),
+    line = DummyLineClient()
+    repo = DummyRepo()
+    handler = MessageHandler(
+        line_client=line,
+        translation_service=DummyTranslationService(),
+        language_pref_service=DummyLangPrefService(fake_result),
+        repo=repo,
+        max_context_messages=1,
+        translation_retry=1,
     )
-    monkeypatch.setattr(lambda_handler.repositories, "record_language_prompt", lambda *args, **kwargs: None)
 
-    event = LineEvent(
+    event = models.MessageEvent(
         event_type="message",
         reply_token="reply-token",
         timestamp=0,
@@ -122,22 +114,32 @@ def test_language_enrollment_ignores_unsupported_in_confirm(monkeypatch):
         user_id="U",
         group_id="G",
         sender_type="group",
-        joined_user_ids=[],
-        postback_data=None,
     )
 
-    lambda_handler._attempt_language_enrollment(event)
+    handler._attempt_language_enrollment(event)
 
-    messages = sent["messages"]
-    # 1. 未対応メッセージが先に送られる
+    messages = line.sent["messages"]
     assert messages[0]["type"] == "text"
-    assert "Sanskrit" in messages[0]["text"]
+    assert "サンスクリット" in messages[0]["text"]
 
-    # 2. 確認テンプレートには対応言語のみが含まれる
     template = messages[1]["template"]
     assert template["type"] == "confirm"
     assert template["text"] == "日本語、アラビア語の翻訳を有効にしますか？"
 
-    confirm_payload = lambda_handler._decode_postback_payload(template["actions"][0]["data"])
+    confirm_payload = _decode_payload(template["actions"][0]["data"])
     langs = [item["code"] for item in confirm_payload["languages"]]
     assert langs == ["ja", "ar"]
+    assert repo.recorded is True
+
+
+def _decode_payload(data: str):
+    import base64
+    import json
+    import zlib
+
+    assert data.startswith("langpref2=")
+    raw = data.split("=", 1)[1]
+    padding = "=" * (-len(raw) % 4)
+    decoded = base64.urlsafe_b64decode(raw + padding)
+    decompressed = zlib.decompress(decoded)
+    return json.loads(decompressed)

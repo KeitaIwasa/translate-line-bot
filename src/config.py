@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -13,7 +12,7 @@ class Settings:
     gemini_api_key: str
     neon_database_url: str
     gemini_model: str = "gemini-2.5-flash"
-    max_context_messages: int = 20
+    max_context_messages: int = 8
     gemini_timeout_seconds: int = 15
     translation_retry: int = 3
     log_level: str = "INFO"
@@ -21,10 +20,9 @@ class Settings:
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Load strongly typed settings from environment variables."""
+    """環境変数から設定を読み込む薄いラッパー（既存実装と同等）。"""
 
     env = os.environ
-
     required = {
         "LINE_CHANNEL_SECRET": env.get("LINE_CHANNEL_SECRET"),
         "LINE_CHANNEL_ACCESS_TOKEN": env.get("LINE_CHANNEL_ACCESS_TOKEN"),
@@ -42,7 +40,7 @@ def get_settings() -> Settings:
         gemini_api_key=required["GEMINI_API_KEY"],
         neon_database_url=required["NEON_DATABASE_URL"],
         gemini_model=env.get("GEMINI_MODEL", "gemini-2.5-flash"),
-        max_context_messages=int(env.get("MAX_CONTEXT_MESSAGES", "20")),
+        max_context_messages=int(env.get("MAX_CONTEXT_MESSAGES", "8")),
         gemini_timeout_seconds=int(env.get("GEMINI_TIMEOUT_SECONDS", "15")),
         translation_retry=int(env.get("TRANSLATION_RETRY", "3")),
         log_level=env.get("LOG_LEVEL", "INFO"),

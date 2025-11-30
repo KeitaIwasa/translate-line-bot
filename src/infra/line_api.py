@@ -5,6 +5,8 @@ from typing import Optional
 
 import requests
 
+from ..domain.ports import LinePort
+
 logger = logging.getLogger(__name__)
 
 
@@ -12,7 +14,7 @@ class LineApiError(RuntimeError):
     pass
 
 
-class LineApiClient:
+class LineApiAdapter(LinePort):
     BASE_URL = "https://api.line.me"
 
     def __init__(self, channel_access_token: str) -> None:
@@ -44,14 +46,6 @@ class LineApiClient:
                 },
             )
             raise LineApiError(f"LINE reply failed with status {response.status_code}")
-
-    def push_messages(self, to: str, messages):  # type: ignore[override]
-        url = f"{self.BASE_URL}/v2/bot/message/push"
-        payload = {"to": to, "messages": [self._sanitize_message(msg) for msg in messages[:5]]}
-        response = self._session.post(url, json=payload, timeout=5)
-        if not response.ok:
-            logger.error("LINE push failed", extra={"status": response.status_code, "body": response.text})
-            raise LineApiError(f"LINE push failed with status {response.status_code}")
 
     def get_display_name(
         self,

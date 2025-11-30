@@ -1,17 +1,20 @@
-from __future__ import annotations
+"""Compatibility shim for the legacy `reply_formatter` import path.
 
-from typing import List
+The implementation now lives in `presentation.reply_formatter`, but tests and
+deployed code still import `reply_formatter` directly. This module re-exports
+the public API to keep those imports working.
+"""
 
-from .translator.gemini_client import Translation
+from src.presentation.reply_formatter import (
+    MAX_REPLY_LENGTH,
+    build_translation_reply,
+    format_translations,
+    strip_source_echo,
+)
 
-MAX_REPLY_LENGTH = 5000
-
-
-def format_translations(translations: List[Translation]) -> str:
-    lines: List[str] = []
-    for item in translations:
-        text = (item.text or "").strip()
-        if text:
-            lines.append(text)
-    joined = "\n\n".join(lines)
-    return joined[:MAX_REPLY_LENGTH]
+__all__ = [
+    "MAX_REPLY_LENGTH",
+    "build_translation_reply",
+    "format_translations",
+    "strip_source_echo",
+]
