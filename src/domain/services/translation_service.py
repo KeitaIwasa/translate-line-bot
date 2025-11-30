@@ -4,7 +4,14 @@ import logging
 from datetime import datetime
 from typing import Iterable, List, Sequence
 
-from langdetect import LangDetectException, detect
+try:
+    from langdetect import LangDetectException, detect
+except Exception:  # pragma: no cover - optional dependency fallback
+    class LangDetectException(Exception):
+        pass
+
+    def detect(_text: str) -> str:
+        return ""
 
 from ..models import ContextMessage, TranslationRequest, TranslationResult
 from ..ports import TranslationPort

@@ -83,9 +83,12 @@ src/
 ├─ lambda_handler.py          # 旧エントリポイント（ロジック内包）
 ├─ line_webhook.py            # Webhook パース＆署名検証
 ├─ line_api.py                # LINE Messaging API
-├─ translator/                # Gemini クライアント
-├─ db/                        # Neon リポジトリ
-└─ reply_formatter.py         # 翻訳整形
+├─ domain/                    # ドメインモデル＆サービス
+├─ infra/                     # LINE/Gemini/Neon アダプタ
+├─ presentation/              # パーサと整形
+├─ app/                       # DI / ブートストラップ
+├─ utils/                     # 共通ユーティリティ
+└─ reply_formatter.py         # 翻訳整形（互換 shim）
 ```
 
 > 注: `src_new` を Handler で参照するか、CodeUri を合わせて指定してください（下記参照）。

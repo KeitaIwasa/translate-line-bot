@@ -30,7 +30,7 @@ Parameters:
     Description: Gemini model name
   MaxContextMessages:
     Type: Number
-    Default: 20
+    Default: 8
     MinValue: 1
     MaxValue: 50
     Description: Maximum number of context messages sent to Gemini
