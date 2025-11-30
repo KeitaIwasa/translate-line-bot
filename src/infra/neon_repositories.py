@@ -182,6 +182,58 @@ class NeonMessageRepository(MessageRepositoryPort):
                 )
         return True
 
+    def add_group_languages(self, group_id: str, languages: Sequence[Tuple[str, str]]) -> None:
+        if not languages:
+            return
+        with self._client.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO group_languages (group_id, lang_code, lang_name)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (group_id, lang_code) DO UPDATE SET lang_name = EXCLUDED.lang_name
+                """,
+                [(group_id, code.lower(), name) for code, name in languages],
+            )
+
+    def remove_group_languages(self, group_id: str, lang_codes: Sequence[str]) -> None:
+        if not lang_codes:
+            return
+        with self._client.cursor() as cur:
+            cur.execute(
+                "DELETE FROM group_languages WHERE group_id = %s AND lang_code = ANY(%s)",
+                (group_id, list({code.lower() for code in lang_codes})),
+            )
+
+    def set_translation_enabled(self, group_id: str, enabled: bool) -> None:
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO group_settings (group_id, translation_enabled)
+                    VALUES (%s, %s)
+                    ON CONFLICT (group_id)
+                    DO UPDATE SET translation_enabled = EXCLUDED.translation_enabled, updated_at = NOW()
+                    """,
+                    (group_id, enabled),
+                )
+        except Exception:
+            # 後方互換: group_settings が未作成でも致命的エラーにしない
+            return
+
+    def is_translation_enabled(self, group_id: str) -> bool:
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    "SELECT translation_enabled FROM group_settings WHERE group_id = %s",
+                    (group_id,),
+                )
+                row = cur.fetchone()
+            if row is None:
+                return True
+            return bool(row[0])
+        except Exception:
+            return True
+
     def reset_group_language_settings(self, group_id: str) -> None:
         with self._client.cursor() as cur:
             cur.execute("DELETE FROM group_languages WHERE group_id = %s", (group_id,))

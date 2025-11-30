@@ -69,6 +69,23 @@ class DummyRepo:
     def fetch_bot_joined_at(self, *args, **kwargs):
         return None
 
+    def add_group_languages(self, *args, **kwargs):
+        return None
+
+    def remove_group_languages(self, *args, **kwargs):
+        return None
+
+    def set_translation_enabled(self, *args, **kwargs):
+        return None
+
+    def is_translation_enabled(self, *args, **kwargs):
+        return True
+
+
+class DummyCommandRouter:
+    def decide(self, text: str):
+        return models.CommandDecision(action="unknown", instruction_language="ja", ack_text="")
+
 
 class DummyLangPrefService:
     def __init__(self, result):
@@ -101,9 +118,11 @@ def test_language_enrollment_ignores_unsupported_in_confirm():
         line_client=line,
         translation_service=DummyTranslationService(),
         language_pref_service=DummyLangPrefService(fake_result),
+        command_router=DummyCommandRouter(),
         repo=repo,
         max_context_messages=1,
         translation_retry=1,
+        bot_mention_name="bot",
     )
 
     event = models.MessageEvent(

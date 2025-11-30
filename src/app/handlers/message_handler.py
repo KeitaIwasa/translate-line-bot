@@ -3,13 +3,19 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 import time
 import zlib
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from ...domain import models
-from ...domain.ports import LanguagePreferencePort, LinePort, MessageRepositoryPort
+from ...domain.ports import (
+    CommandRouterPort,
+    LanguagePreferencePort,
+    LinePort,
+    MessageRepositoryPort,
+)
 from ...domain.services.translation_service import TranslationService
 from ...infra.gemini_translation import GeminiRateLimitError
 from ...presentation.reply_formatter import build_translation_reply
@@ -18,6 +24,12 @@ logger = logging.getLogger(__name__)
 
 RATE_LIMIT_MESSAGE = "You have reached the rate limit. Please try again later."
 _last_rate_limit_message: Dict[str, str] = {}
+
+USAGE_MESSAGE_JA = "言語設定をしたあと、任意の言語でメッセージでやり取りをしてください。その都度このボットが各言語に翻訳した文章を送信します。"
+UNKNOWN_INSTRUCTION_JA = (
+    "このボットをメンションして操作を行いたい場合は、再びメンションして、以下のうちのいずれかを指示してください。\n"
+    "- 言語設定の変更\n- 使い方説明\n- 翻訳停止"
+)
 
 GROUP_PROMPT_MESSAGE = (
     "I'm a multilingual translation bot. Please tell me the languages you want to translate to.\n\n"
@@ -44,16 +56,20 @@ class MessageHandler:
         line_client: LinePort,
         translation_service: TranslationService,
         language_pref_service: LanguagePreferencePort,
+        command_router: CommandRouterPort,
         repo: MessageRepositoryPort,
         max_context_messages: int,
         translation_retry: int,
+        bot_mention_name: str,
     ) -> None:
         self._line = line_client
         self._translation = translation_service
         self._lang_pref = language_pref_service
+        self._command_router = command_router
         self._repo = repo
         self._max_context = max_context_messages
         self._translation_retry = translation_retry
+        self._bot_mention_name = bot_mention_name
 
     def handle(self, event: models.MessageEvent) -> None:
         if not event.reply_token:
@@ -62,6 +78,7 @@ class MessageHandler:
         # 1: 個チャットではグループ招待を案内
         if event.sender_type == "user" and (not event.group_id or event.group_id == event.user_id):
             self._line.reply_text(event.reply_token, DIRECT_GREETING)
+            self._record_message(event, sender_name=event.user_id or "Unknown")
             return
 
         if not event.group_id or not event.user_id:
@@ -72,47 +89,30 @@ class MessageHandler:
         timestamp = datetime.fromtimestamp(event.timestamp / 1000, tz=timezone.utc)
         sender_name = self._resolve_sender_name(event)
 
-        group_languages = self._repo.fetch_group_languages(event.group_id)
-        candidate_languages = list(dict.fromkeys(lang for lang in group_languages if lang))
-
-        if not candidate_languages:
-            logger.info(
-                "group has no language preferences yet; attempting enrollment",
-                extra={"group_id": event.group_id, "user_id": event.user_id},
-            )
-            if self._attempt_language_enrollment(event):
-                return
-
-        context_messages = self._repo.fetch_recent_messages(event.group_id, self._max_context)
-
-        record = models.StoredMessage(
-            group_id=event.group_id,
-            user_id=event.user_id,
-            sender_name=sender_name,
-            text=event.text,
-            timestamp=timestamp,
-        )
+        handled = False
         try:
-            translations = self._invoke_translation_with_retry(
-                sender_name=sender_name,
-                message_text=event.text,
-                timestamp=timestamp,
-                context=context_messages,
-                candidate_languages=candidate_languages,
-            )
-            if translations:
-                reply_text = build_translation_reply(event.text, translations)
-                self._line.reply_text(event.reply_token, reply_text)
+            command_text = self._extract_command_text(event.text)
+            if command_text:
+                handled = self._handle_command(event, command_text)
+            else:
+                handled = self._handle_translation_flow(
+                    event,
+                    sender_name,
+                    translation_enabled=self._repo.is_translation_enabled(event.group_id),
+                )
         except GeminiRateLimitError:
             logger.warning("Gemini rate limited; notifying user")
             self._send_rate_limit_notice(event)
+            handled = True
         except Exception:
-            logger.exception("Translation pipeline failed")
+            logger.exception("Message handling failed")
         finally:
             try:
-                self._repo.insert_message(record)
+                self._record_message(event, sender_name=sender_name, timestamp=timestamp)
             except Exception:
                 logger.exception("Failed to persist message")
+
+        return None if handled else None
 
     # --- internal helpers ---
     def _attempt_language_enrollment(self, event: models.MessageEvent) -> bool:
@@ -184,11 +184,209 @@ class MessageHandler:
         if event.reply_token:
             self._line.reply_messages(event.reply_token, messages)
         self._repo.record_language_prompt(event.group_id)
+        self._repo.set_translation_enabled(event.group_id, False)
         logger.info(
             "Language enrollment prompt sent",
             extra={"group_id": event.group_id, "user_id": event.user_id, "prompted_langs": [lang.code for lang in supported]},
         )
         return True
+
+    # --- command mode helpers ---
+    def _extract_command_text(self, text: str) -> Optional[str]:
+        if not text:
+            return None
+        name = self._bot_mention_name
+        if not name:
+            return None
+        pattern = rf"@?\s*{re.escape(name)}"
+        if not re.search(pattern, text, flags=re.IGNORECASE):
+            return None
+        stripped = re.sub(pattern, "", text, count=1, flags=re.IGNORECASE).strip()
+        stripped = stripped.lstrip("-—–:：、，,。.!！?？ ")
+        return stripped or ""
+
+    def _handle_command(self, event: models.MessageEvent, command_text: str) -> bool:
+        decision = self._command_router.decide(command_text)
+        action = decision.action
+
+        if not action:
+            action = "unknown"
+
+        if action == "language_settings":
+            return self._handle_language_settings(event, decision)
+
+        if action == "howto":
+            message = self._build_usage_response(decision.instruction_language, event.group_id)
+            if event.reply_token and message:
+                self._line.reply_text(event.reply_token, message)
+            # 説明後は翻訳を再開
+            self._repo.set_translation_enabled(event.group_id, True)
+            return True
+
+        if action == "pause":
+            self._repo.set_translation_enabled(event.group_id, False)
+            ack = decision.ack_text or self._translate_template(
+                "翻訳を一時停止します。再開するときはもう一度メンションしてください。",
+                decision.instruction_language,
+            )
+            if event.reply_token:
+                self._line.reply_text(event.reply_token, ack[:5000])
+            return True
+
+        if action == "resume":
+            self._repo.set_translation_enabled(event.group_id, True)
+            ack = decision.ack_text or self._translate_template("翻訳を再開します。", decision.instruction_language)
+            if event.reply_token:
+                self._line.reply_text(event.reply_token, ack[:5000])
+            return True
+
+        # unknown
+        fallback = self._build_unknown_response(decision.instruction_language)
+        self._repo.set_translation_enabled(event.group_id, True)
+        if event.reply_token and fallback:
+            self._line.reply_text(event.reply_token, fallback)
+        return True
+
+    def _handle_language_settings(self, event: models.MessageEvent, decision: models.CommandDecision) -> bool:
+        op = decision.operation or "reset_all"
+        add_langs = [(lang.code, lang.name) for lang in decision.languages_to_add]
+        remove_codes = [lang.code for lang in decision.languages_to_remove]
+
+        if op == "reset_all":
+            self._repo.reset_group_language_settings(event.group_id)
+            # 言語設定モード中は翻訳停止
+            self._repo.set_translation_enabled(event.group_id, False)
+            if event.reply_token:
+                ack = decision.ack_text or self._translate_template(
+                    "言語設定をリセットしました。通訳したい言語をすべて教えてください。",
+                    decision.instruction_language,
+                )
+                self._line.reply_text(event.reply_token, ack[:5000])
+            return True
+
+        if op == "add_and_remove":
+            if remove_codes:
+                self._repo.remove_group_languages(event.group_id, remove_codes)
+            if add_langs:
+                self._repo.add_group_languages(event.group_id, add_langs)
+        elif op == "add":
+            if add_langs:
+                self._repo.add_group_languages(event.group_id, add_langs)
+        elif op == "remove":
+            if remove_codes:
+                self._repo.remove_group_languages(event.group_id, remove_codes)
+        else:
+            logger.info("Unknown language op; treated as reset", extra={"op": op})
+            self._repo.reset_group_language_settings(event.group_id)
+
+        # 言語変更後は翻訳再開
+        self._repo.set_translation_enabled(event.group_id, True)
+
+        if event.reply_token:
+            ack = decision.ack_text or self._translate_template("言語設定を更新しました。", decision.instruction_language)
+            self._line.reply_text(event.reply_token, ack[:5000])
+        return True
+
+    def _handle_translation_flow(self, event: models.MessageEvent, sender_name: str, translation_enabled: bool) -> bool:
+        group_languages = self._repo.fetch_group_languages(event.group_id)
+        candidate_languages = list(dict.fromkeys(lang for lang in group_languages if lang))
+
+        if not candidate_languages:
+            logger.info(
+                "group has no language preferences yet; attempting enrollment",
+                extra={"group_id": event.group_id, "user_id": event.user_id},
+            )
+            if self._attempt_language_enrollment(event):
+                return True
+
+        # 翻訳停止中はここで終了（メッセージは記録のみ）
+        if not translation_enabled:
+            return True
+
+        context_messages = self._repo.fetch_recent_messages(event.group_id, self._max_context)
+        timestamp = datetime.fromtimestamp(event.timestamp / 1000, tz=timezone.utc)
+
+        translations = self._invoke_translation_with_retry(
+            sender_name=sender_name,
+            message_text=event.text,
+            timestamp=timestamp,
+            context=context_messages,
+            candidate_languages=candidate_languages,
+        )
+        if translations:
+            reply_text = build_translation_reply(event.text, translations)
+            if event.reply_token:
+                self._line.reply_text(event.reply_token, reply_text)
+        return True
+
+    def _build_usage_response(self, instruction_lang: str, group_id: str) -> str:
+        targets = set(self._repo.fetch_group_languages(group_id))
+        if instruction_lang:
+            targets.add(instruction_lang)
+        targets_list = list(filter(None, targets))
+
+        translations = self._invoke_translation_with_retry(
+            sender_name="System",
+            message_text=USAGE_MESSAGE_JA,
+            timestamp=datetime.now(timezone.utc),
+            context=[],
+            candidate_languages=targets_list,
+        )
+
+        # 依頼言語が日本語の場合、元テキストを先頭に置く
+        lines: List[str] = []
+        if instruction_lang.lower().startswith("ja"):
+            lines.append(USAGE_MESSAGE_JA)
+
+        seen_langs = set()
+        for item in translations:
+            if item.lang.lower() in seen_langs:
+                continue
+            seen_langs.add(item.lang.lower())
+            prefix = f"[{item.lang}] "
+            lines.append(prefix + strip_source_echo(USAGE_MESSAGE_JA, item.text))
+
+        return "\n\n".join(lines)[:MAX_REPLY_LENGTH]
+
+    def _build_unknown_response(self, instruction_lang: str) -> str:
+        translations = self._invoke_translation_with_retry(
+            sender_name="System",
+            message_text=UNKNOWN_INSTRUCTION_JA,
+            timestamp=datetime.now(timezone.utc),
+            context=[],
+            candidate_languages=[instruction_lang] if instruction_lang else [],
+        )
+        if not translations:
+            return UNKNOWN_INSTRUCTION_JA
+        text = strip_source_echo(UNKNOWN_INSTRUCTION_JA, translations[0].text)
+        return text or UNKNOWN_INSTRUCTION_JA
+
+    def _translate_template(self, base_text: str, instruction_lang: str) -> str:
+        if not instruction_lang or instruction_lang.lower().startswith("ja"):
+            return base_text
+        translations = self._invoke_translation_with_retry(
+            sender_name="System",
+            message_text=base_text,
+            timestamp=datetime.now(timezone.utc),
+            context=[],
+            candidate_languages=[instruction_lang],
+        )
+        if translations:
+            return strip_source_echo(base_text, translations[0].text)
+        return base_text
+
+    def _record_message(self, event: models.MessageEvent, sender_name: str, timestamp: Optional[datetime] = None) -> None:
+        if not event.group_id or not event.user_id:
+            return
+        ts = timestamp or datetime.fromtimestamp(event.timestamp / 1000, tz=timezone.utc)
+        record = models.StoredMessage(
+            group_id=event.group_id,
+            user_id=event.user_id,
+            sender_name=sender_name,
+            text=event.text,
+            timestamp=ts,
+        )
+        self._repo.insert_message(record)
 
     def _invoke_translation_with_retry(
         self,

@@ -12,3 +12,8 @@
 - 2025-11-26: 新アーキテクチャ案を `src_new/` 配下に実装（Dispatcher/Handlers/Domain/Infra 分離）。切り替える場合は Handler 指定を `src_new.lambda_handler::lambda_handler` に変更し、CodeUri を合わせてデプロイする（現行 `src/` は無変更）。
 - 2025-11-26: ステージング `translate-line-bot-stg` を `src_new.lambda_handler` ハンドラ構成でデプロイ済み（scripts/deploy.sh）。HttpApiEndpoint=`https://cbvko1l0ml.execute-api.ap-northeast-1.amazonaws.com/stg`。
 - 2025-11-26: `scripts/deploy.sh` が STAGE に応じて Secrets Manager の名前を自動選択（prod→`prod/line-translate-bot-secrets`, その他→`stg/line-translate-bot-secrets`）。`RUNTIME_SECRET_ARN` を環境変数で渡せば上書き可能。
+- 2025-11-30: メンション経由の機能コマンドを追加。環境変数 `BOT_MENTION_NAME` は Secrets Manager (`stg/prod line-translate-bot-secrets`) から取得する。Gemini で「言語設定変更/使い方説明/翻訳停止/翻訳再開/その他」を判定し、Lambda で実行。
+  - 翻訳停止フラグを保持する `group_settings` テーブルを追加（`translation_enabled` boolean, PK: group_id）。未作成の場合はコード上で既定 true になるが、本番はテーブル追加が必要。
+    - SQL: `sql/20251130_add_group_settings.sql`
+  - 部分的な言語追加・削除に対応（Neon リポジトリに add/remove）。リセット時は既存フロー同様に再設定プロンプトを返す。
+  - 使い方説明・未知指示は指示言語で返答。usage 文言は `USAGE_MESSAGE_JA` を設定済み。
