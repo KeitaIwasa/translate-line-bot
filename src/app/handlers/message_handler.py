@@ -518,7 +518,7 @@ class MessageHandler:
             lowered = lang.lower()
             text = text_by_lang.get(lowered, base_text)
             text = (text or base_text).strip()
-            lines.append(f"[{lang}] {text}")
+            lines.append(text)
 
         return "\n\n".join(lines)[:MAX_REPLY_LENGTH]
 
