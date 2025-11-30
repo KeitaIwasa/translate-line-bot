@@ -159,6 +159,7 @@ class GeminiTranslationAdapter(TranslationPort):
                 "temperature": 0.2,
                 "responseMimeType": "application/json",
                 "responseSchema": TRANSLATION_SCHEMA,
+                "thinkingConfig": {"thinkingBudget": 0},
             },
         }
         return payload

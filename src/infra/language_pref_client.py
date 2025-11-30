@@ -202,6 +202,7 @@ class LanguagePreferenceAdapter(LanguagePreferencePort):
                 "temperature": 0.2,
                 "responseMimeType": "application/json",
                 "responseSchema": LANGUAGE_PREF_SCHEMA,
+                "thinkingConfig": {"thinkingBudget": 0},
             },
         }
 

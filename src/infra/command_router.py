@@ -178,5 +178,6 @@ class GeminiCommandRouter(CommandRouterPort):
                 "temperature": 0.2,
                 "responseMimeType": "application/json",
                 "responseSchema": SCHEMA,
+                "thinkingConfig": {"thinkingBudget": 0},
             },
         }
