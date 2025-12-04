@@ -113,6 +113,7 @@ def test_unknown_instruction_translated_to_detected_language(gemini_adapter):
         command_router=DummyCommandRouter(),
         repo=DummyRepo(),
         max_context_messages=1,
+        max_group_languages=5,
         translation_retry=2,
         bot_mention_name="bot",
     )
@@ -154,6 +155,7 @@ def test_language_settings_invalid_operation_returns_unknown_instruction():
         command_router=InvalidOpCommandRouter(),
         repo=DummyRepo(),
         max_context_messages=1,
+        max_group_languages=5,
         translation_retry=1,
         bot_mention_name="bot",
     )

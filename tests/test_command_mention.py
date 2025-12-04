@@ -15,6 +15,7 @@ def _build_handler(bot_name: str = "bot") -> MessageHandler:
         command_router=_Dummy(),
         repo=_Dummy(),
         max_context_messages=1,
+        max_group_languages=5,
         translation_retry=1,
         bot_mention_name=bot_name,
     )

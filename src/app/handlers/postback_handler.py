@@ -13,9 +13,10 @@ logger = logging.getLogger(__name__)
 
 
 class PostbackHandler:
-    def __init__(self, line_client: LinePort, repo: MessageRepositoryPort) -> None:
+    def __init__(self, line_client: LinePort, repo: MessageRepositoryPort, max_group_languages: int = 5) -> None:
         self._line = line_client
         self._repo = repo
+        self._max_group_languages = max_group_languages
 
     def handle(self, event: models.PostbackEvent) -> None:
         if not event.data or not event.reply_token or not event.group_id:
@@ -29,9 +30,16 @@ class PostbackHandler:
         action = payload.get("action")
         if action == "confirm":
             langs = payload.get("languages") or []
-            tuples: List[Tuple[str, str]] = [
-                (item.get("code", ""), item.get("name", "")) for item in langs if item.get("code")
-            ]
+            tuples: List[Tuple[str, str]] = _dedup_languages(
+                [(item.get("code", ""), item.get("name", "")) for item in langs if item.get("code")]
+            )
+            if len(tuples) > self._max_group_languages:
+                warning = payload.get("limit_text") or (
+                    f"翻訳対象に設定できる言語は最大{self._max_group_languages}件です。"
+                    f"{self._max_group_languages}件以内で再度指定してください。"
+                )
+                self._line.reply_text(event.reply_token, warning)
+                return
             completed = self._repo.try_complete_group_languages(event.group_id, tuples)
             if not completed:
                 logger.info(
@@ -86,3 +94,15 @@ def _build_completion_message(languages) -> str:
 
 def _build_cancel_message() -> str:
     return "設定を取り消しました。再度、翻訳したい言語をすべて教えてください。"
+
+
+def _dedup_languages(languages: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+    seen = set()
+    results: List[Tuple[str, str]] = []
+    for code, name in languages:
+        lowered = (code or "").lower()
+        if not lowered or lowered in seen:
+            continue
+        seen.add(lowered)
+        results.append((lowered, name))
+    return results

@@ -174,7 +174,7 @@ class LanguagePreferenceAdapter(LanguagePreferencePort):
                                 {
                                     "message": message_text,
                                     "requirements": {
-                                        "languages": "Extract ISO codes and primary display name only.",
+                                        "languages": "Extract ISO codes and primary display name only (max 5).",
                                         "texts": "Provide confirm/completed/cancel strings in primary only.",
                                     },
                                 }

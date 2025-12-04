@@ -40,6 +40,12 @@ Parameters:
     MinValue: 1
     MaxValue: 5
     Description: Number of Gemini retries
+  MaxGroupLanguages:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    MaxValue: 10
+    Description: Maximum number of translation target languages per group
 
 Globals:
   Function:
@@ -57,6 +63,7 @@ Globals:
         GEMINI_MODEL: !Ref GeminiModel
         COMMAND_MODEL: !Ref GeminiModel
         MAX_CONTEXT_MESSAGES: !Ref MaxContextMessages
+        MAX_GROUP_LANGUAGES: !Ref MaxGroupLanguages
         TRANSLATION_RETRY: !Ref TranslationRetry
         BOT_MENTION_NAME: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:BOT_MENTION_NAME}}"
 

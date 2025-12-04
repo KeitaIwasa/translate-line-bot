@@ -5,6 +5,7 @@ from src.domain import models
 from src.domain.services.translation_service import TranslationService
 from src.domain.services.interface_translation_service import InterfaceTranslationService
 from src.domain.services.language_detection_service import LanguageDetectionService
+from src.app.handlers.postback_handler import PostbackHandler
 
 
 os.environ.setdefault("LINE_CHANNEL_SECRET", "dummy")
@@ -138,6 +139,7 @@ def test_language_enrollment_ignores_unsupported_in_confirm():
         command_router=DummyCommandRouter(),
         repo=repo,
         max_context_messages=1,
+        max_group_languages=5,
         translation_retry=1,
         bot_mention_name="bot",
     )
@@ -198,6 +200,7 @@ def test_language_enrollment_uses_instruction_language_texts():
         command_router=DummyCommandRouter(),
         repo=repo,
         max_context_messages=1,
+        max_group_languages=5,
         translation_retry=1,
         bot_mention_name="bot",
     )
@@ -234,3 +237,179 @@ def _decode_payload(data: str):
     decoded = base64.urlsafe_b64decode(raw + padding)
     decompressed = zlib.decompress(decoded)
     return json.loads(decompressed)
+
+
+def test_language_enrollment_rejects_over_five():
+    fake_supported = [
+        models.LanguageChoice(code="en", name="English"),
+        models.LanguageChoice(code="ja", name="Japanese"),
+        models.LanguageChoice(code="fr", name="French"),
+        models.LanguageChoice(code="de", name="German"),
+        models.LanguageChoice(code="th", name="Thai"),
+        models.LanguageChoice(code="es", name="Spanish"),
+    ]
+    fake_result = models.LanguagePreference(
+        supported=fake_supported,
+        unsupported=[],
+        confirm_label="OK",
+        cancel_label="Cancel",
+        confirm_text="",
+        cancel_text="",
+        completion_text="",
+        primary_language="ja",
+    )
+
+    line = DummyLineClient()
+    repo = DummyRepo()
+    handler = MessageHandler(
+        line_client=line,
+        translation_service=DummyTranslationService(),
+        interface_translation=DummyInterfaceTranslation(),
+        language_detector=LanguageDetectionService(),
+        language_pref_service=DummyLangPrefService(fake_result),
+        command_router=DummyCommandRouter(),
+        repo=repo,
+        max_context_messages=1,
+        max_group_languages=5,
+        translation_retry=1,
+        bot_mention_name="bot",
+    )
+
+    event = models.MessageEvent(
+        event_type="message",
+        reply_token="reply-token",
+        timestamp=0,
+        text="lots of languages",
+        user_id="U",
+        group_id="G",
+        sender_type="group",
+    )
+
+    handler._attempt_language_enrollment(event)
+
+    messages = line.sent["messages"]
+    assert len(messages) == 1
+    assert messages[0]["type"] == "text"
+    assert "5件" in messages[0]["text"]
+
+
+class RecordingRepo(DummyRepo):
+    def __init__(self, initial):
+        super().__init__()
+        self.languages = list(initial)
+        self.translation_enabled = True
+
+    def fetch_group_languages(self, *_args, **_kwargs):
+        return list(self.languages)
+
+    def add_group_languages(self, _group_id, languages):
+        for code, _name in languages:
+            if code not in self.languages:
+                self.languages.append(code)
+
+    def remove_group_languages(self, _group_id, lang_codes):
+        lowered = {code.lower() for code in lang_codes}
+        self.languages = [lang for lang in self.languages if lang.lower() not in lowered]
+
+    def set_translation_enabled(self, _group_id, enabled: bool):
+        self.translation_enabled = enabled
+
+
+class RecordingLineClient(DummyLineClient):
+    def __init__(self):
+        super().__init__()
+        self.last_text = None
+
+    def reply_text(self, reply_token, text):
+        self.last_text = text
+        super().reply_text(reply_token, text)
+
+
+def test_language_settings_add_rejects_when_exceeding_limit():
+    line = RecordingLineClient()
+    repo = RecordingRepo(initial=["en", "ja", "fr", "de", "th"])
+    handler = MessageHandler(
+        line_client=line,
+        translation_service=DummyTranslationService(),
+        interface_translation=DummyInterfaceTranslation(),
+        language_detector=LanguageDetectionService(),
+        language_pref_service=DummyLangPrefService(models.LanguagePreference(supported=[])),
+        command_router=DummyCommandRouter(),
+        repo=repo,
+        max_context_messages=1,
+        max_group_languages=5,
+        translation_retry=1,
+        bot_mention_name="bot",
+    )
+
+    decision = models.CommandDecision(
+        action="language_settings",
+        operation="add",
+        languages_to_add=[
+            models.LanguageChoice(code="es", name="Spanish"),
+            models.LanguageChoice(code="it", name="Italian"),
+        ],
+        instruction_language="ja",
+        ack_text="",
+    )
+    event = models.MessageEvent(
+        event_type="message",
+        reply_token="token",
+        timestamp=0,
+        text="@bot add languages",
+        user_id="U",
+        group_id="G",
+        sender_type="group",
+    )
+
+    handler._handle_language_settings(event, decision, event.text)
+
+    assert repo.languages == ["en", "ja", "fr", "de", "th"]
+    assert "5件" in (line.last_text or "")
+
+
+def test_postback_rejects_over_limit():
+    class _Line:
+        def __init__(self):
+            self.last = None
+
+        def reply_text(self, _token, text):
+            self.last = text
+
+    class _Repo(DummyRepo):
+        def __init__(self):
+            super().__init__()
+            self.saved = False
+
+        def try_complete_group_languages(self, *_args, **_kwargs):
+            self.saved = True
+            return True
+
+    line = _Line()
+    repo = _Repo()
+    handler = PostbackHandler(line, repo, max_group_languages=5)
+
+    payload = {
+        "kind": "language_confirm",
+        "action": "confirm",
+        "languages": [
+            {"code": c, "name": c.upper()}
+            for c in ["en", "ja", "fr", "de", "th", "es"]
+        ],
+    }
+    data = MessageHandler._encode_postback_payload(payload)  # type: ignore[attr-defined]
+
+    event = models.PostbackEvent(
+        event_type="postback",
+        reply_token="token",
+        timestamp=0,
+        data=data,
+        user_id="U",
+        group_id="G",
+        sender_type="group",
+    )
+
+    handler.handle(event)
+
+    assert repo.saved is False
+    assert line.last and "5件" in line.last
