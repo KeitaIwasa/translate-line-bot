@@ -159,6 +159,24 @@ class MessageHandler:
             },
         )
 
+        detected_total = len(supported) + len(unsupported)
+        if detected_total > self._max_group_languages:
+            logger.info(
+                "Language selection exceeds max allowed (by detected count)",
+                extra={
+                    "user_id": event.user_id,
+                    "group_id": event.group_id,
+                    "detected_total": detected_total,
+                    "max": self._max_group_languages,
+                },
+            )
+            message = self._build_language_limit_message(result.primary_language)
+            if event.reply_token:
+                self._line.reply_text(event.reply_token, message[:5000])
+            # 翻訳は停止したままにする
+            self._repo.set_translation_enabled(event.group_id, False)
+            return True
+
         messages: List[Dict] = []
         limited_supported, dropped = self._limit_language_choices(supported)
         if unsupported:
@@ -709,7 +727,7 @@ class MessageHandler:
         return normalized
 
     @staticmethod
-    def _encode_postback_payload(payload: Dict, max_bytes: int = 320) -> str:
+    def _encode_postback_payload(payload: Dict, max_bytes: int = 280) -> str:
         """Encode payload for LINE postback with size guard (LINE上限≈300 bytes)."""
         def _encode(data: Dict) -> str:
             raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
@@ -724,7 +742,7 @@ class MessageHandler:
         def _shrink_text(key: str, factor: float = 0.6) -> bool:
             if key in payload and payload[key]:
                 text = payload[key]
-                new_len = max(int(len(text) * factor), 40)
+                new_len = max(int(len(text) * factor), 32)
                 payload[key] = text[:new_len]
                 return True
             return False

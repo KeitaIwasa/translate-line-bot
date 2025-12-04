@@ -293,6 +293,63 @@ def test_language_enrollment_rejects_over_five():
     assert "5件" in messages[0]["text"]
 
 
+def test_language_enrollment_rejects_when_total_detected_exceeds_even_with_unsupported():
+    fake_supported = [
+        models.LanguageChoice(code="ja", name="Japanese"),
+        models.LanguageChoice(code="ru", name="Russian"),
+        models.LanguageChoice(code="zh-hans", name="Simplified Chinese"),
+        models.LanguageChoice(code="th", name="Thai"),
+    ]
+    fake_unsupported = [
+        models.LanguageChoice(code="en", name="English"),
+        models.LanguageChoice(code="zh-hant", name="Traditional Chinese"),
+    ]
+
+    fake_result = models.LanguagePreference(
+        supported=fake_supported,
+        unsupported=fake_unsupported,
+        confirm_label="OK",
+        cancel_label="Cancel",
+        confirm_text="",
+        cancel_text="",
+        completion_text="",
+        primary_language="ja",
+    )
+
+    line = DummyLineClient()
+    repo = DummyRepo()
+    handler = MessageHandler(
+        line_client=line,
+        translation_service=DummyTranslationService(),
+        interface_translation=DummyInterfaceTranslation(),
+        language_detector=LanguageDetectionService(),
+        language_pref_service=DummyLangPrefService(fake_result),
+        command_router=DummyCommandRouter(),
+        repo=repo,
+        max_context_messages=1,
+        max_group_languages=5,
+        translation_retry=1,
+        bot_mention_name="bot",
+    )
+
+    event = models.MessageEvent(
+        event_type="message",
+        reply_token="reply-token",
+        timestamp=0,
+        text="ja ru zh-hans th en zh-hant",
+        user_id="U",
+        group_id="G",
+        sender_type="group",
+    )
+
+    handler._attempt_language_enrollment(event)
+
+    messages = line.sent["messages"]
+    assert len(messages) == 1
+    assert messages[0]["type"] == "text"
+    assert "5件" in messages[0]["text"]
+
+
 class RecordingRepo(DummyRepo):
     def __init__(self, initial):
         super().__init__()
