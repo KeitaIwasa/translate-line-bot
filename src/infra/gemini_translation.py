@@ -122,8 +122,16 @@ class GeminiTranslationAdapter(TranslationPort):
         context_messages: Iterable[_ContextMessage],
         target_languages: List[str],
     ) -> dict:
+        def _truncate_with_ellipsis(text: str, limit: int) -> str:
+            if len(text) <= limit:
+                return text
+            # オーバー分を省き、末尾に省略記号を付与して上限を守る
+            return text[: max(limit - 3, 0)] + "..."
+
         def _format_timestamp(dt: datetime) -> str:
             return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        truncated_source_text = _truncate_with_ellipsis(source_message.text, 800)
 
         payload = {
             "systemInstruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]},
@@ -136,13 +144,13 @@ class GeminiTranslationAdapter(TranslationPort):
                                 {
                                     "source_message": {
                                         "sender_name": source_message.sender_name,
-                                        "text": source_message.text,
+                                        "text": truncated_source_text,
                                         "timestamp": _format_timestamp(source_message.timestamp),
                                     },
                                     "context_messages": [
                                         {
                                             "sender_name": msg.sender_name,
-                                            "text": msg.text,
+                                            "text": _truncate_with_ellipsis(msg.text, 250),
                                             "timestamp": _format_timestamp(msg.timestamp),
                                         }
                                         for msg in context_messages

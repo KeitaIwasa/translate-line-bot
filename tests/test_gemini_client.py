@@ -114,3 +114,32 @@ def test_translate_skips_request_when_no_targets(monkeypatch, fixed_datetime):
 
     assert translations == []
     assert session.calls == []
+
+
+def test_translate_truncates_long_texts(monkeypatch, fixed_datetime):
+    session = DummySession(response_data=_build_default_response())
+    monkeypatch.setattr("infra.gemini_translation.requests.Session", lambda: session)
+
+    client = GeminiTranslationAdapter(api_key="api-key", model="gemini-pro", timeout_seconds=7)
+
+    long_source = "S" * 810
+    long_context = "C" * 260
+
+    request = TranslationRequest(
+        sender_name="Bob",
+        message_text=long_source,
+        timestamp=fixed_datetime,
+        candidate_languages=["ja"],
+        context_messages=[ContextMessage(sender_name="Alice", text=long_context, timestamp=fixed_datetime)],
+    )
+
+    client.translate(request)
+
+    payload = session.calls[0]["json"]
+    body = json.loads(payload["contents"][0]["parts"][0]["text"])
+
+    assert len(body["source_message"]["text"]) == 800
+    assert body["source_message"]["text"].endswith("...")
+
+    assert len(body["context_messages"][0]["text"]) == 250
+    assert body["context_messages"][0]["text"].endswith("...")
