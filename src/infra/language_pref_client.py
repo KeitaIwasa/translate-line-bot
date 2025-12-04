@@ -14,16 +14,13 @@ from ..domain.ports import LanguagePreferencePort
 logger = logging.getLogger(__name__)
 
 LANGUAGE_PREF_SYSTEM_PROMPT = """
-You analyze chat messages from LINE groups to determine which languages the user wants to enable for translation.
-Return a structured JSON payload only.
-For each detected language you must:
-- Provide an ISO language code (ISO 639-1 preferred, fall back to BCP-47).
-- Provide display names in the detected primary language, English, and Thai.
-- Indicate if the language is supported for translation (supported=true/false).
-Also craft multi-lingual sentences that will appear inside confirm/completion/cancel prompts.
-The primary text should be written in the language that dominated the input message.
-The English and Thai text should always be provided even if the user never mentioned those languages.
-Use concise natural sentences.
+You analyze a LINE group message to decide which languages the user wants to enable.
+Return JSON only.
+For each language:
+- Give an ISO code (prefer 639-1, else BCP-47).
+- Give a display name in the primary language only.
+- Mark supported=true/false.
+Provide confirm/completed/cancel sentences in the primary language only.
 """.strip()
 
 LANGUAGE_PREF_SCHEMA = {
@@ -41,10 +38,8 @@ LANGUAGE_PREF_SCHEMA = {
                         "type": "object",
                         "properties": {
                             "primary": {"type": "string"},
-                            "english": {"type": "string"},
-                            "thai": {"type": "string"},
                         },
-                        "required": ["primary", "english", "thai"],
+                        "required": ["primary"],
                     },
                 },
                 "required": ["code", "supported", "display"],
@@ -57,28 +52,22 @@ LANGUAGE_PREF_SCHEMA = {
                     "type": "object",
                     "properties": {
                         "primary": {"type": "string"},
-                        "english": {"type": "string"},
-                        "thai": {"type": "string"},
                     },
-                    "required": ["primary", "english", "thai"],
+                    "required": ["primary"],
                 },
                 "completed": {
                     "type": "object",
                     "properties": {
                         "primary": {"type": "string"},
-                        "english": {"type": "string"},
-                        "thai": {"type": "string"},
                     },
-                    "required": ["primary", "english", "thai"],
+                    "required": ["primary"],
                 },
                 "cancel": {
                     "type": "object",
                     "properties": {
                         "primary": {"type": "string"},
-                        "english": {"type": "string"},
-                        "thai": {"type": "string"},
                     },
-                    "required": ["primary", "english", "thai"],
+                    "required": ["primary"],
                 },
             },
             "required": ["confirm", "completed", "cancel"],
@@ -109,22 +98,17 @@ class LanguagePreferenceAdapter(LanguagePreferencePort):
         if not text or not text.strip():
             return None
 
-        start = time.monotonic()
         max_attempts = 2
         last_error: Exception | None = None
 
         for attempt in range(max_attempts):
-            remaining = self._timeout - (time.monotonic() - start)
-            if remaining <= 1:
-                break
-
             payload = self._build_payload(text)
             try:
                 response = self._session.post(
                     f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent",
                     params={"key": self._api_key},
                     json=payload,
-                    timeout=remaining,
+                    timeout=self._timeout,
                 )
                 response.raise_for_status()
                 body = response.json()
@@ -171,7 +155,8 @@ class LanguagePreferenceAdapter(LanguagePreferencePort):
                     max_attempts,
                     exc_info=exc,
                 )
-                time.sleep(0.2 * (attempt + 1))
+                if attempt + 1 < max_attempts:
+                    time.sleep(0.2 * (attempt + 1))
 
         if last_error:
             raise last_error
@@ -189,8 +174,8 @@ class LanguagePreferenceAdapter(LanguagePreferencePort):
                                 {
                                     "message": message_text,
                                     "requirements": {
-                                        "languages": "Extract ISO codes and native names.",
-                                        "texts": "Provide confirm/completed/cancel strings in primary, English, Thai.",
+                                        "languages": "Extract ISO codes and primary display name only.",
+                                        "texts": "Provide confirm/completed/cancel strings in primary only.",
                                     },
                                 }
                             )

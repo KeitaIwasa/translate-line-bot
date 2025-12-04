@@ -215,10 +215,10 @@ def test_language_enrollment_uses_instruction_language_texts():
     handler._attempt_language_enrollment(event)
 
     template = line.sent["messages"][0]["template"]
-    assert template["text"] == "Enable translation for English, Japanese, and Simplified Chinese?"
+    assert template["text"] == "English、Japanese、Simplified Chineseの翻訳を有効にしますか？"
     confirm_payload = _decode_payload(template["actions"][0]["data"])
     assert confirm_payload["primary_language"] == "en"
-    assert confirm_payload["completion_text"] == "Enabled translation for your selected languages."
+    assert confirm_payload["completion_text"] == "English、Japanese、Simplified Chineseの翻訳を有効にしました。"
     cancel_payload = _decode_payload(template["actions"][1]["data"])
     assert cancel_payload["cancel_text"] == "Canceled. Please tell me all languages again."
 

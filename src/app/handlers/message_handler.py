@@ -558,22 +558,17 @@ class MessageHandler:
         primary_lang = (preference.primary_language or "").lower()
 
         base_confirm = self._build_simple_confirm_text(supported)
-        confirm_text = preference.confirm_text or self._translate_template(base_confirm, primary_lang)
-        if not confirm_text:
-            confirm_text = base_confirm
-        confirm_text = self._truncate(confirm_text, 240)
+        # モデル生成文言が汎用的すぎて言語名を含まないことがあるため、常にベース文言（言語列挙）を使用
+        confirm_text = self._translate_template(base_confirm, primary_lang)
+        confirm_text = self._truncate(confirm_text or base_confirm, 240)
 
         base_completion = _build_completion_message([(lang.code, lang.name) for lang in supported])
-        completion_text = preference.completion_text or self._translate_template(base_completion, primary_lang)
-        if not completion_text:
-            completion_text = base_completion
-        completion_text = self._truncate(completion_text, 240)
+        completion_text = self._translate_template(base_completion, primary_lang)
+        completion_text = self._truncate(completion_text or base_completion, 240)
 
         base_cancel = _build_cancel_message()
         cancel_text = preference.cancel_text or self._translate_template(base_cancel, primary_lang)
-        if not cancel_text:
-            cancel_text = base_cancel
-        cancel_text = self._truncate(cancel_text, 240)
+        cancel_text = self._truncate(cancel_text or base_cancel, 240)
 
         return {
             "primary_language": primary_lang,
