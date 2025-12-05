@@ -40,6 +40,22 @@ class DummyTranslationService:
         return []
 
 
+class CollapsingTranslationService:
+    """改行が失われた翻訳結果を返すスタブ。"""
+
+    def translate(self, request: models.TranslationRequest, *_args, **_kwargs):
+        return [
+            models.TranslationResult(
+                lang=request.candidate_languages[0],
+                text=(
+                    "If you want to interact with this bot by mentioning it, "
+                    "please mention it again and instruct one of the following: "
+                    "- Change language settings - Usage instructions - Stop translation"
+                ),
+            )
+        ]
+
+
 class DummyRepo:
     def ensure_group_member(self, *_args, **_kwargs):
         return None
@@ -113,6 +129,7 @@ def test_unknown_instruction_translated_to_detected_language(gemini_adapter):
         command_router=DummyCommandRouter(),
         repo=DummyRepo(),
         max_context_messages=1,
+        max_group_languages=5,
         translation_retry=2,
         bot_mention_name="bot",
     )
@@ -124,6 +141,30 @@ def test_unknown_instruction_translated_to_detected_language(gemini_adapter):
     assert result != UNKNOWN_INSTRUCTION_JA
     # Heuristic: translated text should contain ASCII letters predominantly (avoid original Japanese)
     assert any(ch.isascii() and ch.isalpha() for ch in result)
+
+
+def test_unknown_instruction_keeps_bullet_newlines():
+    line_client = DummyLineClient()
+    collapsing_translator = CollapsingTranslationService()
+
+    handler = MessageHandler(
+        line_client=line_client,
+        translation_service=TranslationService(collapsing_translator),
+        interface_translation=InterfaceTranslationService(collapsing_translator),
+        language_detector=LanguageDetectionService(),
+        language_pref_service=DummyLangPrefService(),
+        command_router=DummyCommandRouter(),
+        repo=DummyRepo(),
+        max_context_messages=1,
+        max_group_languages=5,
+        translation_retry=1,
+        bot_mention_name="bot",
+    )
+
+    result = handler._build_unknown_response("en")
+
+    assert result.split("\n- ")[0].strip().endswith("following:")
+    assert result.count("\n- ") == 3
 
 
 def test_language_settings_invalid_operation_returns_unknown_instruction():
@@ -154,6 +195,7 @@ def test_language_settings_invalid_operation_returns_unknown_instruction():
         command_router=InvalidOpCommandRouter(),
         repo=DummyRepo(),
         max_context_messages=1,
+        max_group_languages=5,
         translation_retry=1,
         bot_mention_name="bot",
     )

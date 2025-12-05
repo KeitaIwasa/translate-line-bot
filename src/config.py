@@ -15,6 +15,7 @@ class Settings:
     command_model: str = "gemini-2.5-flash"
     bot_mention_name: str = "通訳AI"
     max_context_messages: int = 8
+    max_group_languages: int = 5
     gemini_timeout_seconds: int = 10
     translation_retry: int = 2
     log_level: str = "INFO"
@@ -45,6 +46,7 @@ def get_settings() -> Settings:
         command_model=env.get("COMMAND_MODEL", env.get("GEMINI_MODEL", "gemini-2.5-flash")),
         bot_mention_name=env.get("BOT_MENTION_NAME", "通訳AI"),
         max_context_messages=int(env.get("MAX_CONTEXT_MESSAGES", "8")),
+        max_group_languages=int(env.get("MAX_GROUP_LANGUAGES", "5")),
         gemini_timeout_seconds=int(env.get("GEMINI_TIMEOUT_SECONDS", "10")),
         translation_retry=int(env.get("TRANSLATION_RETRY", "2")),
         log_level=env.get("LOG_LEVEL", "INFO"),

@@ -4,7 +4,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import requests
 
@@ -18,9 +18,8 @@ You analyze a LINE group message to decide which languages the user wants to ena
 Return JSON only.
 For each language:
 - Give an ISO code (prefer 639-1, else BCP-47).
-- Give a display name in the primary language only.
+- Give a display name in ENGLISH ONLY (e.g., "Japanese", "Thai", "Spanish").
 - Mark supported=true/false.
-Provide confirm/completed/cancel sentences in the primary language only.
 """.strip()
 
 LANGUAGE_PREF_SCHEMA = {
@@ -45,33 +44,6 @@ LANGUAGE_PREF_SCHEMA = {
                 "required": ["code", "supported", "display"],
             },
         },
-        "textBlocks": {
-            "type": "object",
-            "properties": {
-                "confirm": {
-                    "type": "object",
-                    "properties": {
-                        "primary": {"type": "string"},
-                    },
-                    "required": ["primary"],
-                },
-                "completed": {
-                    "type": "object",
-                    "properties": {
-                        "primary": {"type": "string"},
-                    },
-                    "required": ["primary"],
-                },
-                "cancel": {
-                    "type": "object",
-                    "properties": {
-                        "primary": {"type": "string"},
-                    },
-                    "required": ["primary"],
-                },
-            },
-            "required": ["confirm", "completed", "cancel"],
-        },
         "buttonLabels": {
             "type": "object",
             "properties": {
@@ -81,7 +53,7 @@ LANGUAGE_PREF_SCHEMA = {
             "required": ["confirm", "cancel"],
         },
     },
-    "required": ["primaryLanguage", "languages", "textBlocks", "buttonLabels"],
+    "required": ["primaryLanguage", "languages", "buttonLabels"],
 }
 
 
@@ -102,51 +74,9 @@ class LanguagePreferenceAdapter(LanguagePreferencePort):
         last_error: Exception | None = None
 
         for attempt in range(max_attempts):
-            payload = self._build_payload(text)
             try:
-                response = self._session.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent",
-                    params={"key": self._api_key},
-                    json=payload,
-                    timeout=self._timeout,
-                )
-                response.raise_for_status()
-                body = response.json()
-                logger.debug("Gemini language preference raw response", extra={"body": body})
-
-                try:
-                    candidate = body["candidates"][0]
-                    part_text = candidate["content"]["parts"][0]["text"]
-                except (KeyError, IndexError) as exc:
-                    raise ValueError(f"Unexpected Gemini response format: {body}") from exc
-
-                data = json.loads(part_text)
-                languages = [
-                    LanguageChoice(
-                        code=item.get("code", "").lower(),
-                        name=item.get("display", {}).get("primary", "") or item.get("code", ""),
-                    )
-                    for item in data.get("languages", [])
-                    if item.get("code")
-                ]
-                if not languages:
-                    return None
-
-                supported = [lang for lang, raw in zip(languages, data.get("languages", [])) if raw.get("supported", True)]
-                unsupported = [lang for lang, raw in zip(languages, data.get("languages", [])) if not raw.get("supported", True)]
-
-                text_blocks = data.get("textBlocks", {})
-                buttons = data.get("buttonLabels", {})
-                return LanguagePreference(
-                    supported=supported,
-                    unsupported=unsupported,
-                    confirm_label=buttons.get("confirm", "完了"),
-                    cancel_label=buttons.get("cancel", "変更する"),
-                    confirm_text=_pick_primary(text_blocks.get("confirm")),
-                    cancel_text=_pick_primary(text_blocks.get("cancel")),
-                    completion_text=_pick_primary(text_blocks.get("completed")),
-                    primary_language=data.get("primaryLanguage", "").lower(),
-                )
+                body = self._request_language_preference(text)
+                return self._parse_response(body)
             except Exception as exc:  # pylint: disable=broad-except
                 last_error = exc
                 logger.warning(
@@ -174,8 +104,7 @@ class LanguagePreferenceAdapter(LanguagePreferencePort):
                                 {
                                     "message": message_text,
                                     "requirements": {
-                                        "languages": "Extract ISO codes and primary display name only.",
-                                        "texts": "Provide confirm/completed/cancel strings in primary only.",
+                                        "languages": "Extract all ISO codes you detect and primary display name only.",
                                     },
                                 }
                             )
@@ -191,7 +120,47 @@ class LanguagePreferenceAdapter(LanguagePreferencePort):
             },
         }
 
+    def _request_language_preference(self, text: str) -> Dict:
+        payload = self._build_payload(text)
+        response = self._session.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent",
+            params={"key": self._api_key},
+            json=payload,
+            timeout=self._timeout,
+        )
+        response.raise_for_status()
+        body = response.json()
+        logger.debug("Gemini language preference raw response", extra={"body": body})
+        return body
 
-def _pick_primary(block: Optional[Dict]) -> str:
-    block = block or {}
-    return block.get("primary", "") or block.get("english", "") or block.get("thai", "")
+    @staticmethod
+    def _parse_response(body: Dict) -> LanguagePreference | None:
+        try:
+            candidate = body["candidates"][0]
+            part_text = candidate["content"]["parts"][0]["text"]
+        except (KeyError, IndexError) as exc:
+            raise ValueError(f"Unexpected Gemini response format: {body}") from exc
+
+        data = json.loads(part_text)
+        languages = [
+            LanguageChoice(
+                code=item.get("code", "").lower(),
+                name=item.get("display", {}).get("primary", "") or item.get("code", ""),
+            )
+            for item in data.get("languages", [])
+            if item.get("code")
+        ]
+        if not languages:
+            return None
+
+        supported = [lang for lang, raw in zip(languages, data.get("languages", [])) if raw.get("supported", True)]
+        unsupported = [lang for lang, raw in zip(languages, data.get("languages", [])) if not raw.get("supported", True)]
+
+        buttons = data.get("buttonLabels", {})
+        return LanguagePreference(
+            supported=supported,
+            unsupported=unsupported,
+            confirm_label=buttons.get("confirm", "完了"),
+            cancel_label=buttons.get("cancel", "変更する"),
+            primary_language=data.get("primaryLanguage", "").lower(),
+        )

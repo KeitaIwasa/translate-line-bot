@@ -5,9 +5,11 @@ import json
 import logging
 import re
 import time
+from functools import partial
 import zlib
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Sequence, Tuple
+from concurrent.futures import ThreadPoolExecutor, Future
 
 import requests
 
@@ -55,6 +57,7 @@ LANGUAGE_ANALYSIS_FALLBACK = (
     "Sorry, I couldn't detect your languages. Please resend after a few seconds (e.g., English, 日本語, 中文, ไทย).\n"
     "ขออภัย ไม่สามารถระบุภาษาได้ กรุณาลองส่งมาใหม่อีกครั้ง (ตัวอย่าง: English, 日本語, 中文, ไทย)"
 )
+LANGUAGE_LIMIT_MESSAGE_EN = "You can set up to {limit} translation languages. Please specify {limit} or fewer."
 
 
 class MessageHandler:
@@ -70,8 +73,10 @@ class MessageHandler:
         command_router: CommandRouterPort,
         repo: MessageRepositoryPort,
         max_context_messages: int,
+        max_group_languages: int,
         translation_retry: int,
         bot_mention_name: str,
+        executor: ThreadPoolExecutor | None = None,
     ) -> None:
         self._line = line_client
         self._translation = translation_service
@@ -81,8 +86,10 @@ class MessageHandler:
         self._command_router = command_router
         self._repo = repo
         self._max_context = max_context_messages
+        self._max_group_languages = max_group_languages
         self._translation_retry = translation_retry
         self._bot_mention_name = bot_mention_name
+        self._executor = executor or ThreadPoolExecutor(max_workers=4)
 
     def handle(self, event: models.MessageEvent) -> None:
         if not event.reply_token:
@@ -104,15 +111,7 @@ class MessageHandler:
 
         handled = False
         try:
-            command_text = self._extract_command_text(event.text)
-            if command_text:
-                handled = self._handle_command(event, command_text)
-            else:
-                handled = self._handle_translation_flow(
-                    event,
-                    sender_name,
-                    translation_enabled=self._repo.is_translation_enabled(event.group_id),
-                )
+            handled = self._process_group_message(event, sender_name)
         except GeminiRateLimitError:
             logger.warning("Gemini rate limited; notifying user")
             self._send_rate_limit_notice(event)
@@ -124,6 +123,18 @@ class MessageHandler:
                 self._record_message(event, sender_name=sender_name, timestamp=timestamp)
             except Exception:
                 logger.exception("Failed to persist message")
+        
+    def _process_group_message(self, event: models.MessageEvent, sender_name: str) -> bool:
+        """グループ向けメッセージのディスパッチを担当。"""
+        command_text = self._extract_command_text(event.text)
+        if command_text:
+            return self._handle_command(event, command_text)
+
+        return self._handle_translation_flow(
+            event,
+            sender_name,
+            translation_enabled=self._repo.is_translation_enabled(event.group_id),
+        )
 
     # --- internal helpers ---
     def _attempt_language_enrollment(self, event: models.MessageEvent) -> bool:
@@ -156,24 +167,57 @@ class MessageHandler:
             },
         )
 
+        detected_total = len(supported) + len(unsupported)
+        if detected_total > self._max_group_languages:
+            logger.info(
+                "Language selection exceeds max allowed (by detected count)",
+                extra={
+                    "user_id": event.user_id,
+                    "group_id": event.group_id,
+                    "detected_total": detected_total,
+                    "max": self._max_group_languages,
+                },
+            )
+            message = self._build_language_limit_message(result.primary_language)
+            if event.reply_token:
+                self._line.reply_text(event.reply_token, message[:5000])
+            # 翻訳は停止したままにする
+            self._repo.set_translation_enabled(event.group_id, False)
+            return True
+
         messages: List[Dict] = []
+        limited_supported, dropped = self._limit_language_choices(supported)
         if unsupported:
-            messages.append({"type": "text", "text": self._format_unsupported_message(unsupported)})
+            messages.append(
+                {
+                    "type": "text",
+                    "text": self._format_unsupported_message(unsupported, result.primary_language),
+                }
+            )
+        if dropped:
+            notice = self._build_language_limit_message(result.primary_language)
+            messages.append({"type": "text", "text": notice})
+            if event.reply_token:
+                self._line.reply_messages(event.reply_token, messages)
+            # 翻訳を一時停止し、再指定を促す
+            self._repo.set_translation_enabled(event.group_id, False)
+            return True
 
         # 対応言語がなければ未対応メッセージだけ返して終了
-        if not supported:
+        if not limited_supported:
             if messages and event.reply_token:
                 self._line.reply_messages(event.reply_token, messages)
             return True
 
-        prompt_texts = self._prepare_language_prompt_texts(supported, result)
+        prompt_texts = self._prepare_language_prompt_texts(limited_supported, result)
         confirm_payload = self._encode_postback_payload(
             {
                 "kind": "language_confirm",
                 "action": "confirm",
-                "languages": [{"code": lang.code, "name": lang.name} for lang in supported],
+                "languages": [{"code": lang.code, "name": lang.name} for lang in limited_supported],
                 "primary_language": prompt_texts["primary_language"],
                 "completion_text": prompt_texts["completion_text"],
+                "limit_text": self._build_language_limit_message(result.primary_language),
             }
         )
         cancel_payload = self._encode_postback_payload(
@@ -227,14 +271,35 @@ class MessageHandler:
         return stripped or ""
 
     def _handle_command(self, event: models.MessageEvent, command_text: str) -> bool:
+        lang_future: Future[List[str]] | None = None
+        instr_future: Future[str] | None = None
+        try:
+            lang_future = self._executor.submit(self._fetch_and_limit_languages, event.group_id)
+            instr_future = self._executor.submit(self._lang_detector.detect, command_text)
+        except Exception:
+            logger.debug("Executor submission failed; fallback to sync", exc_info=True)
+
         decision = self._command_router.decide(command_text)
         action = decision.action or "unknown"
+        instruction_lang = decision.instruction_language
+        if not instruction_lang and instr_future:
+            try:
+                instruction_lang = instr_future.result()
+            except Exception:
+                logger.debug("Instruction language detect failed", exc_info=True)
+                instruction_lang = decision.instruction_language
 
         if action == "language_settings":
             return self._handle_language_settings(event, decision, command_text)
 
         if action == "howto":
-            message = self._build_usage_response(decision.instruction_language, event.group_id)
+            langs: Optional[List[str]] = None
+            if lang_future:
+                try:
+                    langs = lang_future.result()
+                except Exception:
+                    logger.debug("Language fetch future failed", exc_info=True)
+            message = self._build_usage_response(instruction_lang or decision.instruction_language, event.group_id, precomputed_languages=langs)
             if event.reply_token and message:
                 self._line.reply_text(event.reply_token, message)
             # 説明後は翻訳を再開
@@ -257,7 +322,7 @@ class MessageHandler:
                 self._line.reply_text(event.reply_token, ack[:5000])
             return True
 
-        return self._respond_unknown_instruction(event, decision.instruction_language, command_text)
+        return self._respond_unknown_instruction(event, instruction_lang or decision.instruction_language, command_text)
 
     def _handle_language_settings(
         self,
@@ -273,6 +338,23 @@ class MessageHandler:
         add_langs = [(lang.code, lang.name) for lang in decision.languages_to_add]
         remove_codes = [lang.code for lang in decision.languages_to_remove]
 
+        current_langs = self._dedup_language_codes(self._repo.fetch_group_languages(event.group_id))
+        if op in {"add", "add_and_remove"}:
+            if self._would_exceed_language_limit(current_langs, add_langs, remove_codes):
+                logger.info(
+                    "Language update rejected: exceeds max",
+                    extra={
+                        "group_id": event.group_id,
+                        "current": current_langs,
+                        "add": [code for code, _ in add_langs],
+                        "remove": remove_codes,
+                    },
+                )
+                if event.reply_token:
+                    msg = self._build_language_limit_message(decision.instruction_language)
+                    self._line.reply_text(event.reply_token, msg[:5000])
+                return True
+
         if op == "reset_all":
             self._repo.reset_group_language_settings(event.group_id)
             # 言語設定モード中は翻訳停止
@@ -280,20 +362,24 @@ class MessageHandler:
             if event.reply_token:
                 # リセット時は必ずガイダンス文言を返す（LLM 生成のあいまいな承諾メッセージを避ける）
                 ack = self._translate_template(
-                    "言語設定をリセットしました。通訳したい言語をすべて教えてください。",
+                    "Your language settings have been reset. Please tell us all the languages ​​you would like to translate.",
                     decision.instruction_language,
                 )
                 self._line.reply_text(event.reply_token, ack[:5000])
             return True
 
         if op == "add_and_remove":
+            remove_set = {code.lower() for code in remove_codes if code}
+            after_remove = [lang for lang in current_langs if lang not in remove_set]
+            normalized_add = self._normalize_new_languages(add_langs, set(after_remove))
             if remove_codes:
                 self._repo.remove_group_languages(event.group_id, remove_codes)
-            if add_langs:
-                self._repo.add_group_languages(event.group_id, add_langs)
+            if normalized_add:
+                self._repo.add_group_languages(event.group_id, normalized_add)
         elif op == "add":
-            if add_langs:
-                self._repo.add_group_languages(event.group_id, add_langs)
+            normalized_add = self._normalize_new_languages(add_langs, set(current_langs))
+            if normalized_add:
+                self._repo.add_group_languages(event.group_id, normalized_add)
         elif op == "remove":
             if remove_codes:
                 self._repo.remove_group_languages(event.group_id, remove_codes)
@@ -321,7 +407,7 @@ class MessageHandler:
 
     def _handle_translation_flow(self, event: models.MessageEvent, sender_name: str, translation_enabled: bool) -> bool:
         group_languages = self._repo.fetch_group_languages(event.group_id)
-        candidate_languages = list(dict.fromkeys(lang for lang in group_languages if lang))
+        candidate_languages = self._limit_language_codes(group_languages)
 
         if not candidate_languages:
             logger.info(
@@ -351,11 +437,16 @@ class MessageHandler:
                 self._line.reply_text(event.reply_token, reply_text)
         return True
 
-    def _build_usage_response(self, instruction_lang: str, group_id: str) -> str:
-        targets = set(self._repo.fetch_group_languages(group_id))
+    def _build_usage_response(
+        self,
+        instruction_lang: str,
+        group_id: str,
+        precomputed_languages: Optional[List[str]] = None,
+    ) -> str:
+        base_targets = list(precomputed_languages or self._repo.fetch_group_languages(group_id))
         if instruction_lang:
-            targets.add(instruction_lang)
-        targets_list = list(filter(None, targets))
+            base_targets.append(instruction_lang)
+        targets_list = self._limit_language_codes(base_targets)
 
         translations = self._invoke_translation_with_retry(
             sender_name="System",
@@ -391,12 +482,32 @@ class MessageHandler:
             candidate_languages=[instruction_lang] if instruction_lang else [],
         )
         if not translations:
-            return UNKNOWN_INSTRUCTION_JA
+            return self._normalize_bullet_newlines(UNKNOWN_INSTRUCTION_JA)
         text = strip_source_echo(UNKNOWN_INSTRUCTION_JA, translations[0].text)
-        return text or UNKNOWN_INSTRUCTION_JA
+        normalized = self._normalize_bullet_newlines(text or UNKNOWN_INSTRUCTION_JA)
+        return normalized
 
-    def _translate_template(self, base_text: str, instruction_lang: str) -> str:
-        if not instruction_lang or instruction_lang.lower().startswith("ja"):
+    def _normalize_bullet_newlines(self, text: str) -> str:
+        """箇条書きのハイフンの前に改行を強制して読みやすくする。"""
+        return re.sub(r"(?<!\n)(- )", "\n- ", text)
+
+    def _build_language_limit_message(self, instruction_lang: str) -> str:
+        base = LANGUAGE_LIMIT_MESSAGE_EN.format(limit=self._max_group_languages)
+        if not instruction_lang or instruction_lang.lower().startswith("en"):
+            return base
+
+        manual = None
+        lowered = instruction_lang.lower()
+        translated = self._translate_template(base, instruction_lang, force=True)
+        if translated and translated != base:
+            return translated
+        return manual or translated or base
+
+    def _translate_template(self, base_text: str, instruction_lang: str, *, force: bool = False) -> str:
+        if not instruction_lang:
+            return base_text
+        lowered = instruction_lang.lower()
+        if lowered.startswith("en"):
             return base_text
         translations = self._invoke_translation_with_retry(
             sender_name="System",
@@ -433,42 +544,18 @@ class MessageHandler:
         if not candidate_languages:
             return []
 
-        last_error: Exception | None = None
-        for attempt in range(self._translation_retry):
-            try:
-                return self._translation.translate(
-                    sender_name=sender_name,
-                    message_text=message_text,
-                    timestamp=timestamp,
-                    context_messages=context,
-                    candidate_languages=candidate_languages,
-                )
-            except requests.exceptions.Timeout as exc:
-                logger.warning(
-                    "Gemini translation timeout",
-                    extra={
-                        "attempt": attempt + 1,
-                        "timeout_seconds": getattr(getattr(self._translation, "_translator", None), "_timeout", None),
-                    },
-                )
-                last_error = exc
-                time.sleep(0.5 * (attempt + 1))
-                continue
-            except Exception as exc:  # pylint: disable=broad-except
-                if isinstance(exc, GeminiRateLimitError):
-                    last_error = exc
-                    break
-                logger.warning(
-                    "Gemini translation failed (attempt %s/%s)",
-                    attempt + 1,
-                    self._translation_retry,
-                )
-                last_error = exc
-                time.sleep(0.5 * (attempt + 1))
-        logger.error("Gemini translation failed after retries")
-        if last_error:
-            raise last_error
-        return []
+        return self._run_with_retry(
+            label="Gemini translation",
+            func=partial(
+                self._translation.translate,
+                sender_name=sender_name,
+                message_text=message_text,
+                timestamp=timestamp,
+                context_messages=context,
+                candidate_languages=candidate_languages,
+            ),
+            timeout_seconds=getattr(getattr(self._translation, "_translator", None), "_timeout", None),
+        )
 
     def _invoke_interface_translation_with_retry(
         self,
@@ -478,56 +565,49 @@ class MessageHandler:
         if not target_languages:
             return []
 
+        return self._run_with_retry(
+            label="Gemini interface translation",
+            func=partial(self._interface_translation.translate, base_text, target_languages),
+            timeout_seconds=getattr(getattr(self._interface_translation, "_translator", None), "_timeout", None),
+        )
+
+    def _run_with_retry(self, label: str, func, timeout_seconds: int | None = None):
+        """翻訳系リトライ共通処理。"""
         last_error: Exception | None = None
         for attempt in range(self._translation_retry):
             try:
-                return self._interface_translation.translate(base_text, target_languages)
+                return func()
             except requests.exceptions.Timeout as exc:
                 logger.warning(
-                    "Gemini interface translation timeout",
-                    extra={
-                        "attempt": attempt + 1,
-                        "timeout_seconds": getattr(
-                            getattr(self._interface_translation, "_translator", None), "_timeout", None
-                        ),
-                    },
+                    "%s timeout",
+                    label,
+                    extra={"attempt": attempt + 1, "timeout_seconds": timeout_seconds},
                 )
                 last_error = exc
-                time.sleep(0.5 * (attempt + 1))
-                continue
             except Exception as exc:  # pylint: disable=broad-except
                 if isinstance(exc, GeminiRateLimitError):
                     last_error = exc
                     break
                 logger.warning(
-                    "Gemini interface translation failed (attempt %s/%s)",
+                    "%s failed (attempt %s/%s)",
+                    label,
                     attempt + 1,
                     self._translation_retry,
                 )
                 last_error = exc
-                time.sleep(0.5 * (attempt + 1))
-        logger.error("Gemini interface translation failed after retries")
+            time.sleep(0.5 * (attempt + 1))
+
+        logger.error("%s failed after retries", label)
         if last_error:
             raise last_error
         return []
 
     def _build_multilingual_interface_message(self, base_text: str, group_id: str) -> str:
-        languages = self._repo.fetch_group_languages(group_id)
+        languages = self._limit_language_codes(self._repo.fetch_group_languages(group_id))
         translations = self._invoke_interface_translation_with_retry(base_text, languages)
 
         if not translations:
             return base_text
-
-        ordered_langs: List[str] = []
-        seen_order = set()
-        for lang in languages:
-            if not lang:
-                continue
-            lowered = lang.lower()
-            if lowered in seen_order:
-                continue
-            seen_order.add(lowered)
-            ordered_langs.append(lang)
 
         text_by_lang = {}
         for item in translations:
@@ -538,7 +618,7 @@ class MessageHandler:
             text_by_lang[lowered] = cleaned or item.text or base_text
 
         lines: List[str] = []
-        for lang in ordered_langs:
+        for lang in languages:
             lowered = lang.lower()
             text = text_by_lang.get(lowered, base_text)
             text = (text or base_text).strip()
@@ -559,15 +639,26 @@ class MessageHandler:
 
         base_confirm = self._build_simple_confirm_text(supported)
         # モデル生成文言が汎用的すぎて言語名を含まないことがあるため、常にベース文言（言語列挙）を使用
-        confirm_text = self._translate_template(base_confirm, primary_lang)
+        if primary_lang.startswith("en"):
+            confirm_text = base_confirm
+        else:
+            confirm_text = self._translate_template(base_confirm, primary_lang, force=True)
+        confirm_text = self._normalize_template_text(confirm_text or base_confirm)
         confirm_text = self._truncate(confirm_text or base_confirm, 240)
 
         base_completion = _build_completion_message([(lang.code, lang.name) for lang in supported])
-        completion_text = self._translate_template(base_completion, primary_lang)
+        if primary_lang.startswith("en"):
+            completion_text = base_completion
+        else:
+            completion_text = self._translate_template(base_completion, primary_lang, force=True)
+        completion_text = self._normalize_template_text(completion_text or base_completion)
         completion_text = self._truncate(completion_text or base_completion, 240)
 
         base_cancel = _build_cancel_message()
-        cancel_text = preference.cancel_text or self._translate_template(base_cancel, primary_lang)
+        cancel_text = self._translate_template(base_cancel, primary_lang, force=True)
+        if primary_lang.startswith("en") and not cancel_text:
+            cancel_text = base_cancel
+        cancel_text = self._normalize_template_text(cancel_text or base_cancel)
         cancel_text = self._truncate(cancel_text or base_cancel, 240)
 
         return {
@@ -576,6 +667,15 @@ class MessageHandler:
             "completion_text": completion_text,
             "cancel_text": cancel_text,
         }
+
+    @staticmethod
+    def _normalize_template_text(text: str) -> str:
+        """軽微な生成ゆらぎで先頭に挿入される余白を除去し、空行を詰める。"""
+        if not text:
+            return ""
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+        return normalized
 
     @staticmethod
     def _truncate(text: str, limit: int) -> str:
@@ -592,30 +692,103 @@ class MessageHandler:
                 return name
         return event.user_id or "Unknown"
 
-    @staticmethod
-    def _format_unsupported_message(languages) -> str:
-        messages = []
+    def _format_unsupported_message(self, languages, instruction_lang: Optional[str] = None) -> str:
+        base_messages = []
         for lang in languages:
-            primary = lang.name or lang.code
-            english = lang.code
-            thai = lang.code
-            messages.append(
-                f"{primary}には通訳対応できません。\n"
-                f"I cannot provide interpretation for {english}.\n"
-                f"ฉันไม่สามารถให้บริการล่ามสำหรับ{thai}ได้"
-            )
-        return "\n\n".join(messages)
+            name = lang.name or lang.code
+            base_messages.append(f"I cannot provide interpretation for {name}.")
+
+        combined = "\n\n".join(base_messages)
+        if not instruction_lang or instruction_lang.lower().startswith("en"):
+            return combined
+
+        translated = self._translate_template(combined, instruction_lang, force=True)
+        normalized = self._normalize_template_text(translated or combined)
+        return self._truncate(normalized or combined, 5000)
 
     @staticmethod
     def _build_simple_confirm_text(languages) -> str:
         names = [lang.name or lang.code for lang in languages]
-        joined = "、".join(filter(None, names))
-        if joined:
-            return f"{joined}の翻訳を有効にしますか？"
-        return "翻訳したい言語を確認してもよろしいですか？"
+        filtered = [name for name in names if name]
+        if not filtered:
+            return "Do you want to enable translation?"
+        if len(filtered) == 1:
+            joined = filtered[0]
+        elif len(filtered) == 2:
+            joined = " and ".join(filtered)
+        else:
+            joined = ", ".join(filtered[:-1]) + ", and " + filtered[-1]
+        return f"Do you want to enable translation for {joined}?"
+
+    def _fetch_and_limit_languages(self, group_id: str) -> List[str]:
+        return self._limit_language_codes(self._repo.fetch_group_languages(group_id))
+
+    def _would_exceed_language_limit(
+        self,
+        current_langs: Sequence[str],
+        add_langs: Sequence[Tuple[str, str]],
+        remove_codes: Sequence[str],
+    ) -> bool:
+        remove_set = {code.lower() for code in remove_codes if code}
+        remaining = [code.lower() for code in current_langs if code and code.lower() not in remove_set]
+
+        to_add: list[str] = []
+        seen = set(remaining)
+        for code, _name in add_langs:
+            if not code:
+                continue
+            lowered = code.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            to_add.append(lowered)
+
+        final_count = len(remaining) + len(to_add)
+        return final_count > self._max_group_languages
+
+    def _limit_language_choices(self, languages: Sequence[models.LanguageChoice]) -> Tuple[List[models.LanguageChoice], List[models.LanguageChoice]]:
+        limited: List[models.LanguageChoice] = []
+        dropped: List[models.LanguageChoice] = []
+        seen = set()
+        for lang in languages:
+            code = (lang.code or "").lower()
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            if len(limited) < self._max_group_languages:
+                limited.append(models.LanguageChoice(code=code, name=lang.name))
+            else:
+                dropped.append(models.LanguageChoice(code=code, name=lang.name))
+        return limited, dropped
+
+    def _dedup_language_codes(self, languages: Sequence[str]) -> List[str]:
+        deduped: List[str] = []
+        seen = set()
+        for code in languages:
+            lowered = (code or "").lower()
+            if not lowered or lowered in seen:
+                continue
+            seen.add(lowered)
+            deduped.append(lowered)
+        return deduped
+
+    def _limit_language_codes(self, languages: Sequence[str]) -> List[str]:
+        deduped = self._dedup_language_codes(languages)
+        return deduped[: self._max_group_languages]
+
+    def _normalize_new_languages(self, languages: Sequence[Tuple[str, str]], existing_set: set[str]) -> List[Tuple[str, str]]:
+        normalized: List[Tuple[str, str]] = []
+        seen = set(existing_set)
+        for code, name in languages:
+            lowered = (code or "").lower()
+            if not lowered or lowered in seen:
+                continue
+            seen.add(lowered)
+            normalized.append((lowered, name))
+        return normalized
 
     @staticmethod
-    def _encode_postback_payload(payload: Dict, max_bytes: int = 320) -> str:
+    def _encode_postback_payload(payload: Dict, max_bytes: int = 280) -> str:
         """Encode payload for LINE postback with size guard (LINE上限≈300 bytes)."""
         def _encode(data: Dict) -> str:
             raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
@@ -630,23 +803,27 @@ class MessageHandler:
         def _shrink_text(key: str, factor: float = 0.6) -> bool:
             if key in payload and payload[key]:
                 text = payload[key]
-                new_len = max(int(len(text) * factor), 40)
+                new_len = max(int(len(text) * factor), 32)
                 payload[key] = text[:new_len]
                 return True
             return False
 
-        for _ in range(3):
-            changed = False
-            for key in ("completion_text", "cancel_text"):
-                changed |= _shrink_text(key)
-            encoded = _encode(payload)
-            if len(encoded.encode("utf-8")) <= max_bytes:
-                return encoded
-            if not changed:
-                break
+        optional_keys = ("limit_text", "cancel_text", "completion_text")
+        for key in optional_keys:
+            # try shrinking this key up to 3 times before moving on
+            for _ in range(3):
+                changed = _shrink_text(key)
+                encoded = _encode(payload)
+                if len(encoded.encode("utf-8")) <= max_bytes:
+                    return encoded
+                if not changed:
+                    break
+            # drop the key entirely if still too large
+            if key in payload:
+                payload.pop(key, None)
+                encoded = _encode(payload)
+                if len(encoded.encode("utf-8")) <= max_bytes:
+                    return encoded
 
-        # last resort: drop optional texts
-        payload.pop("completion_text", None)
-        payload.pop("cancel_text", None)
         encoded = _encode(payload)
         return encoded[:max_bytes]
