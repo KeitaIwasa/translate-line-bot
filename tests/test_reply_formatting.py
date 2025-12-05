@@ -10,4 +10,4 @@ def test_format_reply_drops_original_and_language_codes():
 
     result = format_translations(translations)
 
-    assert result == "Я люблю тебя\n\nI love you"
+    assert result == "\u202AЯ люблю тебя\u202C\u200E\n\n\u202AI love you\u202C\u200E"
