@@ -8,6 +8,7 @@ import time
 import zlib
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Sequence, Tuple
+from concurrent.futures import ThreadPoolExecutor, Future
 
 import requests
 
@@ -74,6 +75,7 @@ class MessageHandler:
         max_group_languages: int,
         translation_retry: int,
         bot_mention_name: str,
+        executor: ThreadPoolExecutor | None = None,
     ) -> None:
         self._line = line_client
         self._translation = translation_service
@@ -86,6 +88,7 @@ class MessageHandler:
         self._max_group_languages = max_group_languages
         self._translation_retry = translation_retry
         self._bot_mention_name = bot_mention_name
+        self._executor = executor or ThreadPoolExecutor(max_workers=4)
 
     def handle(self, event: models.MessageEvent) -> None:
         if not event.reply_token:
@@ -180,7 +183,12 @@ class MessageHandler:
         messages: List[Dict] = []
         limited_supported, dropped = self._limit_language_choices(supported)
         if unsupported:
-            messages.append({"type": "text", "text": self._format_unsupported_message(unsupported)})
+            messages.append(
+                {
+                    "type": "text",
+                    "text": self._format_unsupported_message(unsupported, result.primary_language),
+                }
+            )
         if dropped:
             notice = self._build_language_limit_message(result.primary_language)
             messages.append({"type": "text", "text": notice})
@@ -258,14 +266,35 @@ class MessageHandler:
         return stripped or ""
 
     def _handle_command(self, event: models.MessageEvent, command_text: str) -> bool:
+        lang_future: Future[List[str]] | None = None
+        instr_future: Future[str] | None = None
+        try:
+            lang_future = self._executor.submit(self._fetch_and_limit_languages, event.group_id)
+            instr_future = self._executor.submit(self._lang_detector.detect, command_text)
+        except Exception:
+            logger.debug("Executor submission failed; fallback to sync", exc_info=True)
+
         decision = self._command_router.decide(command_text)
         action = decision.action or "unknown"
+        instruction_lang = decision.instruction_language
+        if not instruction_lang and instr_future:
+            try:
+                instruction_lang = instr_future.result()
+            except Exception:
+                logger.debug("Instruction language detect failed", exc_info=True)
+                instruction_lang = decision.instruction_language
 
         if action == "language_settings":
             return self._handle_language_settings(event, decision, command_text)
 
         if action == "howto":
-            message = self._build_usage_response(decision.instruction_language, event.group_id)
+            langs: Optional[List[str]] = None
+            if lang_future:
+                try:
+                    langs = lang_future.result()
+                except Exception:
+                    logger.debug("Language fetch future failed", exc_info=True)
+            message = self._build_usage_response(instruction_lang or decision.instruction_language, event.group_id, precomputed_languages=langs)
             if event.reply_token and message:
                 self._line.reply_text(event.reply_token, message)
             # 説明後は翻訳を再開
@@ -288,7 +317,7 @@ class MessageHandler:
                 self._line.reply_text(event.reply_token, ack[:5000])
             return True
 
-        return self._respond_unknown_instruction(event, decision.instruction_language, command_text)
+        return self._respond_unknown_instruction(event, instruction_lang or decision.instruction_language, command_text)
 
     def _handle_language_settings(
         self,
@@ -403,8 +432,13 @@ class MessageHandler:
                 self._line.reply_text(event.reply_token, reply_text)
         return True
 
-    def _build_usage_response(self, instruction_lang: str, group_id: str) -> str:
-        base_targets = list(self._repo.fetch_group_languages(group_id))
+    def _build_usage_response(
+        self,
+        instruction_lang: str,
+        group_id: str,
+        precomputed_languages: Optional[List[str]] = None,
+    ) -> str:
+        base_targets = list(precomputed_languages or self._repo.fetch_group_languages(group_id))
         if instruction_lang:
             base_targets.append(instruction_lang)
         targets_list = self._limit_language_codes(base_targets)
@@ -457,7 +491,10 @@ class MessageHandler:
     def _translate_template(self, base_text: str, instruction_lang: str, *, force: bool = False) -> str:
         if not instruction_lang:
             return base_text
-        if not force and instruction_lang.lower().startswith("ja"):
+        lowered = instruction_lang.lower()
+        if lowered.startswith("en"):
+            return base_text
+        if not force and lowered.startswith("ja"):
             return base_text
         translations = self._invoke_translation_with_retry(
             sender_name="System",
@@ -610,14 +647,17 @@ class MessageHandler:
         base_confirm = self._build_simple_confirm_text(supported)
         # モデル生成文言が汎用的すぎて言語名を含まないことがあるため、常にベース文言（言語列挙）を使用
         confirm_text = self._translate_template(base_confirm, primary_lang, force=True)
+        confirm_text = self._normalize_template_text(confirm_text or base_confirm)
         confirm_text = self._truncate(confirm_text or base_confirm, 240)
 
         base_completion = _build_completion_message([(lang.code, lang.name) for lang in supported])
         completion_text = self._translate_template(base_completion, primary_lang, force=True)
+        completion_text = self._normalize_template_text(completion_text or base_completion)
         completion_text = self._truncate(completion_text or base_completion, 240)
 
         base_cancel = _build_cancel_message()
         cancel_text = preference.cancel_text or self._translate_template(base_cancel, primary_lang, force=True)
+        cancel_text = self._normalize_template_text(cancel_text or base_cancel)
         cancel_text = self._truncate(cancel_text or base_cancel, 240)
 
         return {
@@ -626,6 +666,15 @@ class MessageHandler:
             "completion_text": completion_text,
             "cancel_text": cancel_text,
         }
+
+    @staticmethod
+    def _normalize_template_text(text: str) -> str:
+        """軽微な生成ゆらぎで先頭に挿入される余白を除去し、空行を詰める。"""
+        if not text:
+            return ""
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+        return normalized
 
     @staticmethod
     def _truncate(text: str, limit: int) -> str:
@@ -642,19 +691,19 @@ class MessageHandler:
                 return name
         return event.user_id or "Unknown"
 
-    @staticmethod
-    def _format_unsupported_message(languages) -> str:
-        messages = []
+    def _format_unsupported_message(self, languages, instruction_lang: Optional[str] = None) -> str:
+        base_messages = []
         for lang in languages:
-            primary = lang.name or lang.code
-            english = lang.code
-            thai = lang.code
-            messages.append(
-                f"{primary}には通訳対応できません。\n"
-                f"I cannot provide interpretation for {english}.\n"
-                f"ฉันไม่สามารถให้บริการล่ามสำหรับ{thai}ได้"
-            )
-        return "\n\n".join(messages)
+            name = lang.name or lang.code
+            base_messages.append(f"I cannot provide interpretation for {name}.")
+
+        combined = "\n\n".join(base_messages)
+        if not instruction_lang:
+            return combined
+
+        translated = self._translate_template(combined, instruction_lang, force=True)
+        normalized = self._normalize_template_text(translated or combined)
+        return self._truncate(normalized or combined, 5000)
 
     @staticmethod
     def _build_simple_confirm_text(languages) -> str:
@@ -669,6 +718,9 @@ class MessageHandler:
         else:
             joined = ", ".join(filtered[:-1]) + ", and " + filtered[-1]
         return f"Do you want to enable translation for {joined}?"
+
+    def _fetch_and_limit_languages(self, group_id: str) -> List[str]:
+        return self._limit_language_codes(self._repo.fetch_group_languages(group_id))
 
     def _would_exceed_language_limit(
         self,
