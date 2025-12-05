@@ -482,9 +482,14 @@ class MessageHandler:
             candidate_languages=[instruction_lang] if instruction_lang else [],
         )
         if not translations:
-            return UNKNOWN_INSTRUCTION_JA
+            return self._normalize_bullet_newlines(UNKNOWN_INSTRUCTION_JA)
         text = strip_source_echo(UNKNOWN_INSTRUCTION_JA, translations[0].text)
-        return text or UNKNOWN_INSTRUCTION_JA
+        normalized = self._normalize_bullet_newlines(text or UNKNOWN_INSTRUCTION_JA)
+        return normalized
+
+    def _normalize_bullet_newlines(self, text: str) -> str:
+        """箇条書きのハイフンの前に改行を強制して読みやすくする。"""
+        return re.sub(r"(?<!\n)(- )", "\n- ", text)
 
     def _build_language_limit_message(self, instruction_lang: str) -> str:
         base = LANGUAGE_LIMIT_MESSAGE_JA.format(limit=self._max_group_languages)
