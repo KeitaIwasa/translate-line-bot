@@ -646,17 +646,25 @@ class MessageHandler:
 
         base_confirm = self._build_simple_confirm_text(supported)
         # モデル生成文言が汎用的すぎて言語名を含まないことがあるため、常にベース文言（言語列挙）を使用
-        confirm_text = self._translate_template(base_confirm, primary_lang, force=True)
+        if primary_lang.startswith("en"):
+            confirm_text = base_confirm
+        else:
+            confirm_text = self._translate_template(base_confirm, primary_lang, force=True)
         confirm_text = self._normalize_template_text(confirm_text or base_confirm)
         confirm_text = self._truncate(confirm_text or base_confirm, 240)
 
         base_completion = _build_completion_message([(lang.code, lang.name) for lang in supported])
-        completion_text = self._translate_template(base_completion, primary_lang, force=True)
+        if primary_lang.startswith("en"):
+            completion_text = base_completion
+        else:
+            completion_text = self._translate_template(base_completion, primary_lang, force=True)
         completion_text = self._normalize_template_text(completion_text or base_completion)
         completion_text = self._truncate(completion_text or base_completion, 240)
 
         base_cancel = _build_cancel_message()
-        cancel_text = preference.cancel_text or self._translate_template(base_cancel, primary_lang, force=True)
+        cancel_text = self._translate_template(base_cancel, primary_lang, force=True)
+        if primary_lang.startswith("en") and not cancel_text:
+            cancel_text = base_cancel
         cancel_text = self._normalize_template_text(cancel_text or base_cancel)
         cancel_text = self._truncate(cancel_text or base_cancel, 240)
 
@@ -698,7 +706,7 @@ class MessageHandler:
             base_messages.append(f"I cannot provide interpretation for {name}.")
 
         combined = "\n\n".join(base_messages)
-        if not instruction_lang:
+        if not instruction_lang or instruction_lang.lower().startswith("en"):
             return combined
 
         translated = self._translate_template(combined, instruction_lang, force=True)

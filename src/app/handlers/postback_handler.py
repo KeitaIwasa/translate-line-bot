@@ -99,7 +99,7 @@ def _build_completion_message(languages) -> str:
 
 
 def _build_cancel_message() -> str:
-    return "Cancelled. Please tell me all the languages you want to translate again."
+    return "Language update has been cancelled. Please tell me all languages again."
 
 
 def _dedup_languages(languages: List[Tuple[str, str]]) -> List[Tuple[str, str]]:

@@ -4,7 +4,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import requests
 
@@ -20,7 +20,6 @@ For each language:
 - Give an ISO code (prefer 639-1, else BCP-47).
 - Give a display name in ENGLISH ONLY (e.g., "Japanese", "Thai", "Spanish").
 - Mark supported=true/false.
-Provide confirm/completed/cancel sentences in the primary language only.
 """.strip()
 
 LANGUAGE_PREF_SCHEMA = {
@@ -45,33 +44,6 @@ LANGUAGE_PREF_SCHEMA = {
                 "required": ["code", "supported", "display"],
             },
         },
-        "textBlocks": {
-            "type": "object",
-            "properties": {
-                "confirm": {
-                    "type": "object",
-                    "properties": {
-                        "primary": {"type": "string"},
-                    },
-                    "required": ["primary"],
-                },
-                "completed": {
-                    "type": "object",
-                    "properties": {
-                        "primary": {"type": "string"},
-                    },
-                    "required": ["primary"],
-                },
-                "cancel": {
-                    "type": "object",
-                    "properties": {
-                        "primary": {"type": "string"},
-                    },
-                    "required": ["primary"],
-                },
-            },
-            "required": ["confirm", "completed", "cancel"],
-        },
         "buttonLabels": {
             "type": "object",
             "properties": {
@@ -81,7 +53,7 @@ LANGUAGE_PREF_SCHEMA = {
             "required": ["confirm", "cancel"],
         },
     },
-    "required": ["primaryLanguage", "languages", "textBlocks", "buttonLabels"],
+    "required": ["primaryLanguage", "languages", "buttonLabels"],
 }
 
 
@@ -135,16 +107,12 @@ class LanguagePreferenceAdapter(LanguagePreferencePort):
                 supported = [lang for lang, raw in zip(languages, data.get("languages", [])) if raw.get("supported", True)]
                 unsupported = [lang for lang, raw in zip(languages, data.get("languages", [])) if not raw.get("supported", True)]
 
-                text_blocks = data.get("textBlocks", {})
                 buttons = data.get("buttonLabels", {})
                 return LanguagePreference(
                     supported=supported,
                     unsupported=unsupported,
                     confirm_label=buttons.get("confirm", "完了"),
                     cancel_label=buttons.get("cancel", "変更する"),
-                    confirm_text=_pick_primary(text_blocks.get("confirm")),
-                    cancel_text=_pick_primary(text_blocks.get("cancel")),
-                    completion_text=_pick_primary(text_blocks.get("completed")),
                     primary_language=data.get("primaryLanguage", "").lower(),
                 )
             except Exception as exc:  # pylint: disable=broad-except
@@ -175,7 +143,6 @@ class LanguagePreferenceAdapter(LanguagePreferencePort):
                                     "message": message_text,
                                     "requirements": {
                                         "languages": "Extract all ISO codes you detect and primary display name only.",
-                                        "texts": "Provide confirm/completed/cancel strings in primary only.",
                                     },
                                 }
                             )
@@ -190,8 +157,3 @@ class LanguagePreferenceAdapter(LanguagePreferencePort):
                 "thinkingConfig": {"thinkingBudget": 0},
             },
         }
-
-
-def _pick_primary(block: Optional[Dict]) -> str:
-    block = block or {}
-    return block.get("primary", "") or block.get("english", "") or block.get("thai", "")

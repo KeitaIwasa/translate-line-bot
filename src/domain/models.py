@@ -88,9 +88,6 @@ class LanguagePreference:
     unsupported: List[LanguageChoice] = field(default_factory=list)
     confirm_label: str = "OK"
     cancel_label: str = "Cancel"
-    confirm_text: str = ""
-    cancel_text: str = ""
-    completion_text: str = ""
     primary_language: str = ""
 
 

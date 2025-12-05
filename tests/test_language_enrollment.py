@@ -122,9 +122,6 @@ def test_language_enrollment_ignores_unsupported_in_confirm():
         unsupported=fake_unsupported,
         confirm_label="OK",
         cancel_label="Cancel",
-        confirm_text="",
-        cancel_text="",
-        completion_text="",
         primary_language="ja",
     )
 
@@ -183,9 +180,6 @@ def test_language_enrollment_uses_instruction_language_texts():
         unsupported=[],
         confirm_label="Confirm",
         cancel_label="Cancel",
-        confirm_text="Enable translation for English, Japanese, and Simplified Chinese?",
-        cancel_text="Canceled. Please tell me all languages again.",
-        completion_text="Enabled translation for your selected languages.",
         primary_language="en",
     )
 
@@ -226,7 +220,10 @@ def test_language_enrollment_uses_instruction_language_texts():
         == "Enabled translation for English, Japanese, and Simplified Chinese."
     )
     cancel_payload = _decode_payload(template["actions"][1]["data"])
-    assert cancel_payload["cancel_text"] == "Canceled. Please tell me all languages again."
+    assert (
+        cancel_payload["cancel_text"]
+        == "Language update has been cancelled. Please tell me all languages again."
+    )
 
 
 def _decode_payload(data: str):
@@ -256,9 +253,6 @@ def test_language_enrollment_rejects_over_five():
         unsupported=[],
         confirm_label="OK",
         cancel_label="Cancel",
-        confirm_text="",
-        cancel_text="",
-        completion_text="",
         primary_language="ja",
     )
 
@@ -313,9 +307,6 @@ def test_language_enrollment_rejects_when_total_detected_exceeds_even_with_unsup
         unsupported=fake_unsupported,
         confirm_label="OK",
         cancel_label="Cancel",
-        confirm_text="",
-        cancel_text="",
-        completion_text="",
         primary_language="ja",
     )
 
