@@ -28,16 +28,19 @@ class PostbackHandler:
             return
 
         action = payload.get("action")
+        primary_language = (payload.get("primary_language") or "").lower()
         if action == "confirm":
             langs = payload.get("languages") or []
             tuples: List[Tuple[str, str]] = _dedup_languages(
                 [(item.get("code", ""), item.get("name", "")) for item in langs if item.get("code")]
             )
             if len(tuples) > self._max_group_languages:
-                warning = payload.get("limit_text") or (
-                    f"翻訳対象に設定できる言語は最大{self._max_group_languages}件です。"
-                    f"{self._max_group_languages}件以内で再度指定してください。"
-                )
+                warning = payload.get("limit_text")
+                if not warning:
+                    warning = (
+                        f"You can set up to {self._max_group_languages} translation languages. "
+                        f"Please specify {self._max_group_languages} or fewer."
+                    )
                 self._line.reply_text(event.reply_token, warning)
                 return
             completed = self._repo.try_complete_group_languages(event.group_id, tuples)

@@ -447,6 +447,7 @@ def test_postback_rejects_over_limit():
             {"code": c, "name": c.upper()}
             for c in ["en", "ja", "fr", "de", "th", "es"]
         ],
+        "primary_language": "ja",
     }
     data = MessageHandler._encode_postback_payload(payload)  # type: ignore[attr-defined]
 

@@ -57,7 +57,7 @@ LANGUAGE_ANALYSIS_FALLBACK = (
     "Sorry, I couldn't detect your languages. Please resend after a few seconds (e.g., English, 日本語, 中文, ไทย).\n"
     "ขออภัย ไม่สามารถระบุภาษาได้ กรุณาลองส่งมาใหม่อีกครั้ง (ตัวอย่าง: English, 日本語, 中文, ไทย)"
 )
-LANGUAGE_LIMIT_MESSAGE_JA = "翻訳対象に設定できる言語は最大{limit}件です。{limit}件以内で再度指定してください。"
+LANGUAGE_LIMIT_MESSAGE_EN = "You can set up to {limit} translation languages. Please specify {limit} or fewer."
 
 
 class MessageHandler:
@@ -492,19 +492,22 @@ class MessageHandler:
         return re.sub(r"(?<!\n)(- )", "\n- ", text)
 
     def _build_language_limit_message(self, instruction_lang: str) -> str:
-        base = LANGUAGE_LIMIT_MESSAGE_JA.format(limit=self._max_group_languages)
-        if not instruction_lang or instruction_lang.lower().startswith("ja"):
+        base = LANGUAGE_LIMIT_MESSAGE_EN.format(limit=self._max_group_languages)
+        if not instruction_lang or instruction_lang.lower().startswith("en"):
             return base
-        translated = self._translate_template(base, instruction_lang)
-        return translated or base
+
+        manual = None
+        lowered = instruction_lang.lower()
+        translated = self._translate_template(base, instruction_lang, force=True)
+        if translated and translated != base:
+            return translated
+        return manual or translated or base
 
     def _translate_template(self, base_text: str, instruction_lang: str, *, force: bool = False) -> str:
         if not instruction_lang:
             return base_text
         lowered = instruction_lang.lower()
         if lowered.startswith("en"):
-            return base_text
-        if not force and lowered.startswith("ja"):
             return base_text
         translations = self._invoke_translation_with_retry(
             sender_name="System",
