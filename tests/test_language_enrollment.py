@@ -287,7 +287,7 @@ def test_language_enrollment_rejects_over_five():
     messages = line.sent["messages"]
     assert len(messages) == 1
     assert messages[0]["type"] == "text"
-    assert "5件" in messages[0]["text"]
+    assert "You can set up to 5 translation languages" in messages[0]["text"]
 
 
 def test_language_enrollment_rejects_when_total_detected_exceeds_even_with_unsupported():
@@ -341,7 +341,7 @@ def test_language_enrollment_rejects_when_total_detected_exceeds_even_with_unsup
     messages = line.sent["messages"]
     assert len(messages) == 1
     assert messages[0]["type"] == "text"
-    assert "5件" in messages[0]["text"]
+    assert "You can set up to 5 translation languages" in messages[0]["text"]
 
 
 class RecordingRepo(DummyRepo):
@@ -416,7 +416,7 @@ def test_language_settings_add_rejects_when_exceeding_limit():
     handler._handle_language_settings(event, decision, event.text)
 
     assert repo.languages == ["en", "ja", "fr", "de", "th"]
-    assert "5件" in (line.last_text or "")
+    assert "You can set up to 5 translation languages" in (line.last_text or "")
 
 
 def test_postback_rejects_over_limit():
@@ -464,4 +464,4 @@ def test_postback_rejects_over_limit():
     handler.handle(event)
 
     assert repo.saved is False
-    assert line.last and "5件" in line.last
+    assert line.last and "You can set up to 5 translation languages" in line.last
