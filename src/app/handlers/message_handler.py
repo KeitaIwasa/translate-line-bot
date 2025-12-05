@@ -454,8 +454,10 @@ class MessageHandler:
         translated = self._translate_template(base, instruction_lang)
         return translated or base
 
-    def _translate_template(self, base_text: str, instruction_lang: str) -> str:
-        if not instruction_lang or instruction_lang.lower().startswith("ja"):
+    def _translate_template(self, base_text: str, instruction_lang: str, *, force: bool = False) -> str:
+        if not instruction_lang:
+            return base_text
+        if not force and instruction_lang.lower().startswith("ja"):
             return base_text
         translations = self._invoke_translation_with_retry(
             sender_name="System",
@@ -607,15 +609,15 @@ class MessageHandler:
 
         base_confirm = self._build_simple_confirm_text(supported)
         # モデル生成文言が汎用的すぎて言語名を含まないことがあるため、常にベース文言（言語列挙）を使用
-        confirm_text = self._translate_template(base_confirm, primary_lang)
+        confirm_text = self._translate_template(base_confirm, primary_lang, force=True)
         confirm_text = self._truncate(confirm_text or base_confirm, 240)
 
         base_completion = _build_completion_message([(lang.code, lang.name) for lang in supported])
-        completion_text = self._translate_template(base_completion, primary_lang)
+        completion_text = self._translate_template(base_completion, primary_lang, force=True)
         completion_text = self._truncate(completion_text or base_completion, 240)
 
         base_cancel = _build_cancel_message()
-        cancel_text = preference.cancel_text or self._translate_template(base_cancel, primary_lang)
+        cancel_text = preference.cancel_text or self._translate_template(base_cancel, primary_lang, force=True)
         cancel_text = self._truncate(cancel_text or base_cancel, 240)
 
         return {
@@ -657,10 +659,16 @@ class MessageHandler:
     @staticmethod
     def _build_simple_confirm_text(languages) -> str:
         names = [lang.name or lang.code for lang in languages]
-        joined = "、".join(filter(None, names))
-        if joined:
-            return f"{joined}の翻訳を有効にしますか？"
-        return "翻訳したい言語を確認してもよろしいですか？"
+        filtered = [name for name in names if name]
+        if not filtered:
+            return "Do you want to enable translation?"
+        if len(filtered) == 1:
+            joined = filtered[0]
+        elif len(filtered) == 2:
+            joined = " and ".join(filtered)
+        else:
+            joined = ", ".join(filtered[:-1]) + ", and " + filtered[-1]
+        return f"Do you want to enable translation for {joined}?"
 
     def _would_exceed_language_limit(
         self,

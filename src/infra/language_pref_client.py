@@ -18,7 +18,7 @@ You analyze a LINE group message to decide which languages the user wants to ena
 Return JSON only.
 For each language:
 - Give an ISO code (prefer 639-1, else BCP-47).
-- Give a display name in the primary language only.
+- Give a display name in ENGLISH ONLY (e.g., "Japanese", "Thai", "Spanish").
 - Mark supported=true/false.
 Provide confirm/completed/cancel sentences in the primary language only.
 """.strip()

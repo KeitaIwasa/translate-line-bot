@@ -162,12 +162,12 @@ def test_language_enrollment_ignores_unsupported_in_confirm():
 
     template = messages[1]["template"]
     assert template["type"] == "confirm"
-    assert template["text"] == "日本語、アラビア語の翻訳を有効にしますか？"
+    assert template["text"] == "Do you want to enable translation for 日本語 and アラビア語?"
 
     confirm_payload = _decode_payload(template["actions"][0]["data"])
     langs = [item["code"] for item in confirm_payload["languages"]]
     assert langs == ["ja", "ar"]
-    assert confirm_payload["completion_text"].startswith("日本語、アラビア語")
+    assert confirm_payload["completion_text"].startswith("Enabled translation for 日本語 and アラビア語")
     assert confirm_payload["primary_language"] == "ja"
     assert repo.recorded is True
 
@@ -218,10 +218,13 @@ def test_language_enrollment_uses_instruction_language_texts():
     handler._attempt_language_enrollment(event)
 
     template = line.sent["messages"][0]["template"]
-    assert template["text"] == "English、Japanese、Simplified Chineseの翻訳を有効にしますか？"
+    assert template["text"] == "Do you want to enable translation for English, Japanese, and Simplified Chinese?"
     confirm_payload = _decode_payload(template["actions"][0]["data"])
     assert confirm_payload["primary_language"] == "en"
-    assert confirm_payload["completion_text"] == "English、Japanese、Simplified Chineseの翻訳を有効にしました。"
+    assert (
+        confirm_payload["completion_text"]
+        == "Enabled translation for English, Japanese, and Simplified Chinese."
+    )
     cancel_payload = _decode_payload(template["actions"][1]["data"])
     assert cancel_payload["cancel_text"] == "Canceled. Please tell me all languages again."
 

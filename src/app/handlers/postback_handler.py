@@ -86,14 +86,20 @@ def _decode_postback_payload(data: str) -> Dict | None:
 
 def _build_completion_message(languages) -> str:
     names = [name for _, name in languages if name]
-    joined = "、".join(filter(None, names))
-    if joined:
-        return f"{joined}の翻訳を有効にしました。"
-    return "翻訳設定を保存しました。"
+    filtered = [name for name in names if name]
+    if not filtered:
+        return "Translation preferences have been saved."
+    if len(filtered) == 1:
+        joined = filtered[0]
+    elif len(filtered) == 2:
+        joined = " and ".join(filtered)
+    else:
+        joined = ", ".join(filtered[:-1]) + ", and " + filtered[-1]
+    return f"Enabled translation for {joined}."
 
 
 def _build_cancel_message() -> str:
-    return "設定を取り消しました。再度、翻訳したい言語をすべて教えてください。"
+    return "Cancelled. Please tell me all the languages you want to translate again."
 
 
 def _dedup_languages(languages: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
