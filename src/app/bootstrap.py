@@ -46,7 +46,7 @@ def build_dispatcher() -> Dispatcher:
         timeout_seconds=settings.gemini_timeout_seconds,
     )
     db_client = get_client(settings.neon_database_url)
-    repo = NeonMessageRepository(db_client)
+    repo = NeonMessageRepository(db_client, max_group_languages=settings.max_group_languages)
 
     message_handler = MessageHandler(
         line_client=line_client,
@@ -55,12 +55,13 @@ def build_dispatcher() -> Dispatcher:
         command_router=command_router,
         repo=repo,
         max_context_messages=settings.max_context_messages,
+        max_group_languages=settings.max_group_languages,
         translation_retry=settings.translation_retry,
         bot_mention_name=settings.bot_mention_name,
         interface_translation=interface_translation,
         language_detector=language_detector,
     )
-    postback_handler = PostbackHandler(line_client, repo)
+    postback_handler = PostbackHandler(line_client, repo, max_group_languages=settings.max_group_languages)
     join_handler = JoinHandler(line_client, repo)
     member_joined_handler = MemberJoinedHandler(line_client, repo)
     follow_handler = FollowHandler(line_client)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from typing import Optional
 
@@ -35,15 +36,15 @@ class LineApiAdapter(LinePort):
         payload = {"replyToken": reply_token, "messages": sanitized}
         response = self._session.post(url, json=payload, timeout=5)
         if not response.ok:
+            body_excerpt = (response.text or "")[:500]
+            payload_excerpt = json.dumps(payload, ensure_ascii=False)[:500]
             logger.error(
-                "LINE reply failed",
-                extra={
-                    "status": response.status_code,
-                    "body": response.text,
-                    "reply_token": reply_token,
-                    "message_types": [msg.get("type") for msg in sanitized],
-                    "message_count": len(sanitized),
-                },
+                "LINE reply failed: status=%s body=%s payload=%s types=%s count=%s",
+                response.status_code,
+                body_excerpt,
+                payload_excerpt,
+                [msg.get("type") for msg in sanitized],
+                len(sanitized),
             )
             raise LineApiError(f"LINE reply failed with status {response.status_code}")
 

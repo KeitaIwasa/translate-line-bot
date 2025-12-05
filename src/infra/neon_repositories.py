@@ -26,8 +26,9 @@ class _MessageRow:
 class NeonMessageRepository(MessageRepositoryPort):
     """Neon(PostgreSQL) への永続化を担うリポジトリ実装。"""
 
-    def __init__(self, client: NeonClient) -> None:
+    def __init__(self, client: NeonClient, max_group_languages: int = 5) -> None:
         self._client = client
+        self._max_group_languages = max_group_languages
 
     def ensure_group_member(self, group_id: str, user_id: str) -> None:
         query = sql.SQL(
@@ -107,6 +108,8 @@ class NeonMessageRepository(MessageRepositoryPort):
         group_id: str,
         languages: Sequence[Tuple[str, str]],
     ) -> bool:
+        normalized = self._normalize_languages(languages)
+        limited = normalized[: self._max_group_languages]
         with self._client.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -131,14 +134,14 @@ class NeonMessageRepository(MessageRepositoryPort):
                     return False
 
                 cur.execute("DELETE FROM group_languages WHERE group_id = %s", (group_id,))
-                if languages:
+                if limited:
                     cur.executemany(
                         """
                         INSERT INTO group_languages (group_id, lang_code, lang_name)
                         VALUES (%s, %s, %s)
                         ON CONFLICT (group_id, lang_code) DO UPDATE SET lang_name = EXCLUDED.lang_name
                         """,
-                        [(group_id, code.lower(), name) for code, name in languages],
+                        [(group_id, code, name) for code, name in limited],
                     )
 
                 cur.execute(
@@ -187,6 +190,16 @@ class NeonMessageRepository(MessageRepositoryPort):
     def add_group_languages(self, group_id: str, languages: Sequence[Tuple[str, str]]) -> None:
         if not languages:
             return
+        existing = self.fetch_group_languages(group_id)
+        remaining = max(self._max_group_languages - len(existing), 0)
+        normalized = self._normalize_languages(languages, existing)
+        limited = normalized[:remaining]
+        if not limited:
+            logger.info(
+                "Language add skipped due to limit",
+                extra={"group_id": group_id, "requested": [code for code, _ in languages]},
+            )
+            return
         with self._client.cursor() as cur:
             cur.executemany(
                 """
@@ -194,7 +207,7 @@ class NeonMessageRepository(MessageRepositoryPort):
                 VALUES (%s, %s, %s)
                 ON CONFLICT (group_id, lang_code) DO UPDATE SET lang_name = EXCLUDED.lang_name
                 """,
-                [(group_id, code.lower(), name) for code, name in languages],
+                [(group_id, code, name) for code, name in limited],
             )
 
     def remove_group_languages(self, group_id: str, lang_codes: Sequence[str]) -> None:
@@ -257,6 +270,21 @@ class NeonMessageRepository(MessageRepositoryPort):
                 "UPDATE group_members SET last_prompted_at = NULL, last_completed_at = NULL WHERE group_id = %s",
                 (group_id,),
             )
+
+    def _normalize_languages(
+        self, languages: Sequence[Tuple[str, str]], existing: Optional[Sequence[str]] = None
+    ) -> List[Tuple[str, str]]:
+        """Lowercase + 重複除去 + 空コード除去。既存言語を除外するオプション付き。"""
+        existing_set = {code.lower() for code in existing or [] if code}
+        seen = set(existing_set)
+        normalized: List[Tuple[str, str]] = []
+        for code, name in languages:
+            lowered = (code or "").lower()
+            if not lowered or lowered in seen:
+                continue
+            seen.add(lowered)
+            normalized.append((lowered, name))
+        return normalized
 
     def record_bot_joined_at(self, group_id: str, joined_at: datetime) -> None:
         ts = joined_at
