@@ -74,47 +74,9 @@ class LanguagePreferenceAdapter(LanguagePreferencePort):
         last_error: Exception | None = None
 
         for attempt in range(max_attempts):
-            payload = self._build_payload(text)
             try:
-                response = self._session.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent",
-                    params={"key": self._api_key},
-                    json=payload,
-                    timeout=self._timeout,
-                )
-                response.raise_for_status()
-                body = response.json()
-                logger.debug("Gemini language preference raw response", extra={"body": body})
-
-                try:
-                    candidate = body["candidates"][0]
-                    part_text = candidate["content"]["parts"][0]["text"]
-                except (KeyError, IndexError) as exc:
-                    raise ValueError(f"Unexpected Gemini response format: {body}") from exc
-
-                data = json.loads(part_text)
-                languages = [
-                    LanguageChoice(
-                        code=item.get("code", "").lower(),
-                        name=item.get("display", {}).get("primary", "") or item.get("code", ""),
-                    )
-                    for item in data.get("languages", [])
-                    if item.get("code")
-                ]
-                if not languages:
-                    return None
-
-                supported = [lang for lang, raw in zip(languages, data.get("languages", [])) if raw.get("supported", True)]
-                unsupported = [lang for lang, raw in zip(languages, data.get("languages", [])) if not raw.get("supported", True)]
-
-                buttons = data.get("buttonLabels", {})
-                return LanguagePreference(
-                    supported=supported,
-                    unsupported=unsupported,
-                    confirm_label=buttons.get("confirm", "完了"),
-                    cancel_label=buttons.get("cancel", "変更する"),
-                    primary_language=data.get("primaryLanguage", "").lower(),
-                )
+                body = self._request_language_preference(text)
+                return self._parse_response(body)
             except Exception as exc:  # pylint: disable=broad-except
                 last_error = exc
                 logger.warning(
@@ -157,3 +119,48 @@ class LanguagePreferenceAdapter(LanguagePreferencePort):
                 "thinkingConfig": {"thinkingBudget": 0},
             },
         }
+
+    def _request_language_preference(self, text: str) -> Dict:
+        payload = self._build_payload(text)
+        response = self._session.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent",
+            params={"key": self._api_key},
+            json=payload,
+            timeout=self._timeout,
+        )
+        response.raise_for_status()
+        body = response.json()
+        logger.debug("Gemini language preference raw response", extra={"body": body})
+        return body
+
+    @staticmethod
+    def _parse_response(body: Dict) -> LanguagePreference | None:
+        try:
+            candidate = body["candidates"][0]
+            part_text = candidate["content"]["parts"][0]["text"]
+        except (KeyError, IndexError) as exc:
+            raise ValueError(f"Unexpected Gemini response format: {body}") from exc
+
+        data = json.loads(part_text)
+        languages = [
+            LanguageChoice(
+                code=item.get("code", "").lower(),
+                name=item.get("display", {}).get("primary", "") or item.get("code", ""),
+            )
+            for item in data.get("languages", [])
+            if item.get("code")
+        ]
+        if not languages:
+            return None
+
+        supported = [lang for lang, raw in zip(languages, data.get("languages", [])) if raw.get("supported", True)]
+        unsupported = [lang for lang, raw in zip(languages, data.get("languages", [])) if not raw.get("supported", True)]
+
+        buttons = data.get("buttonLabels", {})
+        return LanguagePreference(
+            supported=supported,
+            unsupported=unsupported,
+            confirm_label=buttons.get("confirm", "完了"),
+            cancel_label=buttons.get("cancel", "変更する"),
+            primary_language=data.get("primaryLanguage", "").lower(),
+        )

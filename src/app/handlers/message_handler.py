@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import time
+from functools import partial
 import zlib
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -110,15 +111,7 @@ class MessageHandler:
 
         handled = False
         try:
-            command_text = self._extract_command_text(event.text)
-            if command_text:
-                handled = self._handle_command(event, command_text)
-            else:
-                handled = self._handle_translation_flow(
-                    event,
-                    sender_name,
-                    translation_enabled=self._repo.is_translation_enabled(event.group_id),
-                )
+            handled = self._process_group_message(event, sender_name)
         except GeminiRateLimitError:
             logger.warning("Gemini rate limited; notifying user")
             self._send_rate_limit_notice(event)
@@ -130,6 +123,18 @@ class MessageHandler:
                 self._record_message(event, sender_name=sender_name, timestamp=timestamp)
             except Exception:
                 logger.exception("Failed to persist message")
+        
+    def _process_group_message(self, event: models.MessageEvent, sender_name: str) -> bool:
+        """グループ向けメッセージのディスパッチを担当。"""
+        command_text = self._extract_command_text(event.text)
+        if command_text:
+            return self._handle_command(event, command_text)
+
+        return self._handle_translation_flow(
+            event,
+            sender_name,
+            translation_enabled=self._repo.is_translation_enabled(event.group_id),
+        )
 
     # --- internal helpers ---
     def _attempt_language_enrollment(self, event: models.MessageEvent) -> bool:
@@ -357,7 +362,7 @@ class MessageHandler:
             if event.reply_token:
                 # リセット時は必ずガイダンス文言を返す（LLM 生成のあいまいな承諾メッセージを避ける）
                 ack = self._translate_template(
-                    "言語設定をリセットしました。通訳したい言語をすべて教えてください。",
+                    "Your language settings have been reset. Please tell us all the languages ​​you would like to translate.",
                     decision.instruction_language,
                 )
                 self._line.reply_text(event.reply_token, ack[:5000])
@@ -531,42 +536,18 @@ class MessageHandler:
         if not candidate_languages:
             return []
 
-        last_error: Exception | None = None
-        for attempt in range(self._translation_retry):
-            try:
-                return self._translation.translate(
-                    sender_name=sender_name,
-                    message_text=message_text,
-                    timestamp=timestamp,
-                    context_messages=context,
-                    candidate_languages=candidate_languages,
-                )
-            except requests.exceptions.Timeout as exc:
-                logger.warning(
-                    "Gemini translation timeout",
-                    extra={
-                        "attempt": attempt + 1,
-                        "timeout_seconds": getattr(getattr(self._translation, "_translator", None), "_timeout", None),
-                    },
-                )
-                last_error = exc
-                time.sleep(0.5 * (attempt + 1))
-                continue
-            except Exception as exc:  # pylint: disable=broad-except
-                if isinstance(exc, GeminiRateLimitError):
-                    last_error = exc
-                    break
-                logger.warning(
-                    "Gemini translation failed (attempt %s/%s)",
-                    attempt + 1,
-                    self._translation_retry,
-                )
-                last_error = exc
-                time.sleep(0.5 * (attempt + 1))
-        logger.error("Gemini translation failed after retries")
-        if last_error:
-            raise last_error
-        return []
+        return self._run_with_retry(
+            label="Gemini translation",
+            func=partial(
+                self._translation.translate,
+                sender_name=sender_name,
+                message_text=message_text,
+                timestamp=timestamp,
+                context_messages=context,
+                candidate_languages=candidate_languages,
+            ),
+            timeout_seconds=getattr(getattr(self._translation, "_translator", None), "_timeout", None),
+        )
 
     def _invoke_interface_translation_with_retry(
         self,
@@ -576,35 +557,39 @@ class MessageHandler:
         if not target_languages:
             return []
 
+        return self._run_with_retry(
+            label="Gemini interface translation",
+            func=partial(self._interface_translation.translate, base_text, target_languages),
+            timeout_seconds=getattr(getattr(self._interface_translation, "_translator", None), "_timeout", None),
+        )
+
+    def _run_with_retry(self, label: str, func, timeout_seconds: int | None = None):
+        """翻訳系リトライ共通処理。"""
         last_error: Exception | None = None
         for attempt in range(self._translation_retry):
             try:
-                return self._interface_translation.translate(base_text, target_languages)
+                return func()
             except requests.exceptions.Timeout as exc:
                 logger.warning(
-                    "Gemini interface translation timeout",
-                    extra={
-                        "attempt": attempt + 1,
-                        "timeout_seconds": getattr(
-                            getattr(self._interface_translation, "_translator", None), "_timeout", None
-                        ),
-                    },
+                    "%s timeout",
+                    label,
+                    extra={"attempt": attempt + 1, "timeout_seconds": timeout_seconds},
                 )
                 last_error = exc
-                time.sleep(0.5 * (attempt + 1))
-                continue
             except Exception as exc:  # pylint: disable=broad-except
                 if isinstance(exc, GeminiRateLimitError):
                     last_error = exc
                     break
                 logger.warning(
-                    "Gemini interface translation failed (attempt %s/%s)",
+                    "%s failed (attempt %s/%s)",
+                    label,
                     attempt + 1,
                     self._translation_retry,
                 )
                 last_error = exc
-                time.sleep(0.5 * (attempt + 1))
-        logger.error("Gemini interface translation failed after retries")
+            time.sleep(0.5 * (attempt + 1))
+
+        logger.error("%s failed after retries", label)
         if last_error:
             raise last_error
         return []
