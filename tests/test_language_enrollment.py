@@ -164,7 +164,10 @@ def test_language_enrollment_ignores_unsupported_in_confirm():
     confirm_payload = _decode_payload(template["actions"][0]["data"])
     langs = [item["code"] for item in confirm_payload["languages"]]
     assert langs == ["ja", "ar"]
-    assert confirm_payload["completion_text"].startswith("Enabled translation for 日本語 and アラビア語")
+    assert (
+        confirm_payload["completion_text"]
+        == "日本語 and アラビア語 have been set as the translation languages."
+    )
     assert confirm_payload["primary_language"] == "ja"
     assert repo.recorded is True
 
@@ -217,7 +220,7 @@ def test_language_enrollment_uses_instruction_language_texts():
     assert confirm_payload["primary_language"] == "en"
     assert (
         confirm_payload["completion_text"]
-        == "Enabled translation for English, Japanese, and Simplified Chinese."
+        == "English, Japanese, and Simplified Chinese have been set as the translation languages."
     )
     cancel_payload = _decode_payload(template["actions"][1]["data"])
     assert (
@@ -287,7 +290,7 @@ def test_language_enrollment_rejects_over_five():
     messages = line.sent["messages"]
     assert len(messages) == 1
     assert messages[0]["type"] == "text"
-    assert "5件" in messages[0]["text"]
+    assert "You can set up to 5 translation languages" in messages[0]["text"]
 
 
 def test_language_enrollment_rejects_when_total_detected_exceeds_even_with_unsupported():
@@ -341,7 +344,7 @@ def test_language_enrollment_rejects_when_total_detected_exceeds_even_with_unsup
     messages = line.sent["messages"]
     assert len(messages) == 1
     assert messages[0]["type"] == "text"
-    assert "5件" in messages[0]["text"]
+    assert "You can set up to 5 translation languages" in messages[0]["text"]
 
 
 class RecordingRepo(DummyRepo):
@@ -416,7 +419,7 @@ def test_language_settings_add_rejects_when_exceeding_limit():
     handler._handle_language_settings(event, decision, event.text)
 
     assert repo.languages == ["en", "ja", "fr", "de", "th"]
-    assert "5件" in (line.last_text or "")
+    assert "You can set up to 5 translation languages" in (line.last_text or "")
 
 
 def test_postback_rejects_over_limit():
@@ -464,4 +467,70 @@ def test_postback_rejects_over_limit():
     handler.handle(event)
 
     assert repo.saved is False
-    assert line.last and "5件" in line.last
+    assert line.last and "You can set up to 5 translation languages" in line.last
+
+
+def test_postback_sends_multilingual_completion():
+    class _Line:
+        def __init__(self):
+            self.last = None
+
+        def reply_text(self, _token, text):
+            self.last = text
+
+    class _Translator:
+        def translate(self, request):
+            return [
+                models.TranslationResult(lang=lang, text=f"{request.message_text} ({lang})")
+                for lang in request.candidate_languages
+            ]
+
+    class _Repo(DummyRepo):
+        def __init__(self):
+            super().__init__()
+            self.saved = False
+
+        def try_complete_group_languages(self, *_args, **_kwargs):
+            self.saved = True
+            return True
+
+    line = _Line()
+    repo = _Repo()
+    interface_translation = InterfaceTranslationService(_Translator())
+    handler = PostbackHandler(
+        line,
+        repo,
+        max_group_languages=5,
+        interface_translation=interface_translation,
+    )
+
+    payload = {
+        "kind": "language_confirm",
+        "action": "confirm",
+        "languages": [
+            {"code": "en", "name": "English"},
+            {"code": "ja", "name": "Japanese"},
+            {"code": "th", "name": "Thai"},
+        ],
+        "primary_language": "en",
+    }
+    data = MessageHandler._encode_postback_payload(payload)  # type: ignore[attr-defined]
+
+    event = models.PostbackEvent(
+        event_type="postback",
+        reply_token="token",
+        timestamp=0,
+        data=data,
+        user_id="U",
+        group_id="G",
+        sender_type="group",
+    )
+
+    handler.handle(event)
+
+    assert repo.saved is True
+    assert line.last is not None
+    parts = line.last.split("\n\n")
+    assert parts[0] == "English, Japanese, and Thai have been set as the translation languages."
+    assert "(ja)" in parts[1]
+    assert "(th)" in parts[2]

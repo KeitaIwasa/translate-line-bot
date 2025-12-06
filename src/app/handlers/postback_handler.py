@@ -4,19 +4,28 @@ import base64
 import json
 import logging
 import zlib
-from typing import Dict, List, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 from ...domain import models
 from ...domain.ports import LinePort, MessageRepositoryPort
+from ...domain.services.interface_translation_service import InterfaceTranslationService
+from ...presentation.reply_formatter import strip_source_echo
 
 logger = logging.getLogger(__name__)
 
 
 class PostbackHandler:
-    def __init__(self, line_client: LinePort, repo: MessageRepositoryPort, max_group_languages: int = 5) -> None:
+    def __init__(
+        self,
+        line_client: LinePort,
+        repo: MessageRepositoryPort,
+        max_group_languages: int = 5,
+        interface_translation: InterfaceTranslationService | None = None,
+    ) -> None:
         self._line = line_client
         self._repo = repo
         self._max_group_languages = max_group_languages
+        self._interface_translation = interface_translation
 
     def handle(self, event: models.PostbackEvent) -> None:
         if not event.data or not event.reply_token or not event.group_id:
@@ -51,7 +60,8 @@ class PostbackHandler:
                 )
                 return
             self._repo.set_translation_enabled(event.group_id, True)
-            text = payload.get("completion_text") or _build_completion_message(tuples)
+            base_text = payload.get("completion_text") or _build_completion_message(tuples)
+            text = self._build_multilingual_completion_message(base_text, tuples)
             self._line.reply_text(event.reply_token, text)
             logger.info(
                 "Language preferences saved",
@@ -69,6 +79,52 @@ class PostbackHandler:
             cancel_text = payload.get("cancel_text") or _build_cancel_message()
             self._line.reply_text(event.reply_token, cancel_text)
             logger.info("Language enrollment cancelled", extra={"group_id": event.group_id, "user_id": event.user_id})
+
+    def _build_multilingual_completion_message(self, base_text: str, languages: Sequence[Tuple[str, str]]) -> str:
+        if not base_text:
+            return ""
+
+        deduped: List[str] = []
+        seen = set()
+        for code, _name in languages:
+            lowered = (code or "").lower()
+            if not lowered or lowered in seen:
+                continue
+            seen.add(lowered)
+            deduped.append(lowered)
+
+        deduped = [lang for lang in deduped if not lang.startswith("en")]
+
+        if not self._interface_translation or not deduped:
+            return base_text
+
+        translations = []
+        try:
+            translations = self._interface_translation.translate(base_text, deduped)
+        except Exception:  # pylint: disable=broad-except
+            logger.warning("Completion translation failed", exc_info=True)
+
+        text_by_lang = {}
+        for item in translations or []:
+            lowered = (item.lang or "").lower()
+            if not lowered or lowered in text_by_lang:
+                continue
+            cleaned = strip_source_echo(base_text, item.text)
+            text_by_lang[lowered] = (cleaned or item.text or base_text).strip()
+
+        lines: List[str] = [base_text.strip()]
+        for lang in deduped:
+            # 英語はベース文で代用するためスキップ
+            if lang.startswith("en"):
+                continue
+            translated = text_by_lang.get(lang)
+            if not translated:
+                continue
+            if translated in lines:
+                continue
+            lines.append(translated)
+
+        return "\n\n".join(lines)
 
 
 def _decode_postback_payload(data: str) -> Dict | None:
@@ -88,17 +144,18 @@ def _decode_postback_payload(data: str) -> Dict | None:
 
 
 def _build_completion_message(languages) -> str:
-    names = [name for _, name in languages if name]
+    names = [name or code for code, name in languages if code]
     filtered = [name for name in names if name]
     if not filtered:
-        return "Translation preferences have been saved."
+        return "Translation languages have been updated."
     if len(filtered) == 1:
         joined = filtered[0]
-    elif len(filtered) == 2:
+        return f"{joined} has been set as the translation language."
+    if len(filtered) == 2:
         joined = " and ".join(filtered)
     else:
         joined = ", ".join(filtered[:-1]) + ", and " + filtered[-1]
-    return f"Enabled translation for {joined}."
+    return f"{joined} have been set as the translation languages."
 
 
 def _build_cancel_message() -> str:
