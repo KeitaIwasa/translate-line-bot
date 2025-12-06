@@ -237,8 +237,8 @@ class MessageHandler:
                 "type": "confirm",
                 "text": confirm_text,
                 "actions": [
-                    {"type": "postback", "label": f"🆗 {result.confirm_label}", "data": confirm_payload},
-                    {"type": "postback", "label": f"↩️ {result.cancel_label}", "data": cancel_payload},
+                    {"type": "postback", "label": f"🆗 {prompt_texts['confirm_label']}", "data": confirm_payload},
+                    {"type": "postback", "label": f"↩️ {prompt_texts['cancel_label']}", "data": cancel_payload},
                 ],
             },
         }
@@ -503,22 +503,52 @@ class MessageHandler:
             return translated
         return manual or translated or base
 
-    def _translate_template(self, base_text: str, instruction_lang: str, *, force: bool = False) -> str:
+    def _translate_template(
+        self,
+        base_text: str | Sequence[str],
+        instruction_lang: str,
+        *,
+        force: bool = False,
+    ) -> str | List[str]:
+        if isinstance(base_text, str):
+            originals = [base_text]
+            is_sequence = False
+        else:
+            originals = list(base_text)
+            is_sequence = True
+
         if not instruction_lang:
             return base_text
+
         lowered = instruction_lang.lower()
-        if lowered.startswith("en"):
+        if lowered.startswith("en") and not force:
             return base_text
+
+        if not originals:
+            return base_text
+
+        delimiter = "\n---\n"
+        joined = delimiter.join(originals)
+
         translations = self._invoke_translation_with_retry(
             sender_name="System",
-            message_text=base_text,
+            message_text=joined,
             timestamp=datetime.now(timezone.utc),
             context=[],
             candidate_languages=[instruction_lang],
         )
-        if translations:
-            return strip_source_echo(base_text, translations[0].text)
-        return base_text
+        if not translations:
+            return base_text
+
+        translated = strip_source_echo(joined, translations[0].text) or translations[0].text or joined
+        parts = translated.split(delimiter)
+        if len(parts) != len(originals):
+            return base_text
+
+        normalized = [self._normalize_template_text(part or orig) for part, orig in zip(parts, originals)]
+        if is_sequence:
+            return normalized
+        return normalized[0]
 
     def _record_message(self, event: models.MessageEvent, sender_name: str, timestamp: Optional[datetime] = None) -> None:
         if not event.group_id or not event.user_id:
@@ -638,30 +668,43 @@ class MessageHandler:
         primary_lang = (preference.primary_language or "").lower()
 
         base_confirm = self._build_simple_confirm_text(supported)
-        # モデル生成文言が汎用的すぎて言語名を含まないことがあるため、常にベース文言（言語列挙）を使用
-        if primary_lang.startswith("en"):
-            confirm_text = base_confirm
-        else:
-            confirm_text = self._translate_template(base_confirm, primary_lang, force=True)
-        confirm_text = self._normalize_template_text(confirm_text or base_confirm)
+        base_cancel = _build_cancel_message()
+        base_confirm_label = preference.confirm_label or "OK"
+        base_cancel_label = preference.cancel_label or "Cancel"
+
+        # 1リクエストで confirm/cancel 文言とボタンラベルをまとめて翻訳
+        translated = self._translate_template(
+            [base_confirm, base_cancel, base_confirm_label, base_cancel_label],
+            primary_lang,
+            force=True,
+        )
+        (
+            translated_confirm,
+            translated_cancel,
+            translated_confirm_label,
+            translated_cancel_label,
+        ) = translated if isinstance(translated, list) else [base_confirm, base_cancel, base_confirm_label, base_cancel_label]
+
+        confirm_text = self._normalize_template_text(translated_confirm or base_confirm)
         confirm_text = self._truncate(confirm_text or base_confirm, 240)
 
         base_completion = _build_completion_message([(lang.code, lang.name) for lang in supported])
         completion_text = self._normalize_template_text(base_completion)
         completion_text = self._truncate(completion_text or base_completion, 240)
 
-        base_cancel = _build_cancel_message()
-        cancel_text = self._translate_template(base_cancel, primary_lang, force=True)
-        if primary_lang.startswith("en") and not cancel_text:
-            cancel_text = base_cancel
-        cancel_text = self._normalize_template_text(cancel_text or base_cancel)
+        cancel_text = self._normalize_template_text(translated_cancel or base_cancel)
         cancel_text = self._truncate(cancel_text or base_cancel, 240)
+
+        confirm_label = self._truncate(translated_confirm_label or base_confirm_label, 16)
+        cancel_label = self._truncate(translated_cancel_label or base_cancel_label, 16)
 
         return {
             "primary_language": primary_lang,
             "confirm_text": confirm_text,
             "completion_text": completion_text,
             "cancel_text": cancel_text,
+            "confirm_label": confirm_label,
+            "cancel_label": cancel_label,
         }
 
     @staticmethod
@@ -680,6 +723,7 @@ class MessageHandler:
         if len(text) <= limit:
             return text
         return text[: limit - 1] + "…"
+
 
     def _resolve_sender_name(self, event: models.MessageEvent) -> str:
         if event.user_id:
