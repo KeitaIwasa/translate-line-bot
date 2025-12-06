@@ -647,11 +647,7 @@ class MessageHandler:
         confirm_text = self._truncate(confirm_text or base_confirm, 240)
 
         base_completion = _build_completion_message([(lang.code, lang.name) for lang in supported])
-        if primary_lang.startswith("en"):
-            completion_text = base_completion
-        else:
-            completion_text = self._translate_template(base_completion, primary_lang, force=True)
-        completion_text = self._normalize_template_text(completion_text or base_completion)
+        completion_text = self._normalize_template_text(base_completion)
         completion_text = self._truncate(completion_text or base_completion, 240)
 
         base_cancel = _build_cancel_message()

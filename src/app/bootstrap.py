@@ -61,7 +61,12 @@ def build_dispatcher() -> Dispatcher:
         interface_translation=interface_translation,
         language_detector=language_detector,
     )
-    postback_handler = PostbackHandler(line_client, repo, max_group_languages=settings.max_group_languages)
+    postback_handler = PostbackHandler(
+        line_client,
+        repo,
+        max_group_languages=settings.max_group_languages,
+        interface_translation=interface_translation,
+    )
     join_handler = JoinHandler(line_client, repo)
     member_joined_handler = MemberJoinedHandler(line_client, repo)
     follow_handler = FollowHandler(line_client)
