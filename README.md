@@ -156,6 +156,9 @@ GEMINI_API_KEY=your_google_ai_key
 STRIPE_SECRET_KEY=sk_live_or_test
 STRIPE_WEBHOOK_SECRET=whsec_xxx
 STRIPE_PRICE_MONTHLY_ID=price_xxx
+# Optional: override default quotas (Free=50, Pro=8000 messages/month)
+# FREE_QUOTA_PER_MONTH=50
+# PRO_QUOTA_PER_MONTH=8000
 ```
 
 Lambda では **環境変数として設定**してください。

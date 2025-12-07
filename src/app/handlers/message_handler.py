@@ -79,6 +79,7 @@ class MessageHandler:
         stripe_secret_key: str = "",
         stripe_price_monthly_id: str = "",
         free_quota_per_month: int = 50,
+        pro_quota_per_month: int = 8000,
         checkout_base_url: str = "",
         executor: ThreadPoolExecutor | None = None,
     ) -> None:
@@ -96,6 +97,7 @@ class MessageHandler:
         self._stripe_secret_key = stripe_secret_key
         self._stripe_price_monthly_id = stripe_price_monthly_id
         self._free_quota = free_quota_per_month
+        self._pro_quota = pro_quota_per_month
         self._checkout_base_url = checkout_base_url.rstrip("/") if checkout_base_url else ""
         self._executor = executor or ThreadPoolExecutor(max_workers=4)
 
@@ -426,20 +428,32 @@ class MessageHandler:
                 return True
 
         if not translation_enabled:
-            # 無料枠超過で停止している場合は課金案内を再送する
-            self._maybe_send_checkout_prompt(event, sender_name)
+            # 停止理由に応じた案内を返して終了
+            self._send_pause_notice(event)
+            return True
+
+        paid = self._is_subscription_active(event.group_id)
+        limit = self._pro_quota if paid else self._free_quota
+        month_key = self._current_month_key()
+
+        # すでに上限到達済みの場合はカウントを進めずに終了
+        current_usage = self._repo.get_usage(event.group_id, month_key)
+        if current_usage >= limit:
+            if not paid:
+                self._repo.set_translation_enabled(event.group_id, False)
+            self._send_over_quota_message(event, paid, limit)
             return True
 
         # 利用カウントと課金判定
-        usage_count = self._repo.increment_usage(event.group_id, self._current_month_key())
-        paid = self._is_subscription_active(event.group_id)
+        usage_count = self._repo.increment_usage(event.group_id, month_key)
 
-        if not paid and usage_count > self._free_quota:
-            self._repo.set_translation_enabled(event.group_id, False)
-            self._send_over_quota_message(event, sender_name)
+        if usage_count > limit:
+            if not paid:
+                self._repo.set_translation_enabled(event.group_id, False)
+            self._send_over_quota_message(event, paid, limit)
             return True
-        if not paid and usage_count == self._free_quota:
-            self._send_quota_warning(event, sender_name)
+        if usage_count == limit:
+            self._send_quota_warning(event, paid, limit)
 
         context_messages = self._repo.fetch_recent_messages(event.group_id, self._max_context)
         timestamp = datetime.fromtimestamp(event.timestamp / 1000, tz=timezone.utc)
@@ -457,43 +471,97 @@ class MessageHandler:
                 self._line.reply_text(event.reply_token, reply_text)
         return True
 
-    def _send_quota_warning(self, event: models.MessageEvent, sender_name: str) -> None:
-        base = (
-            "You have reached the limit of the free plan (50 messages per month).\n"
-            "Starting with the next message, a paid plan is required. Please complete checkout to continue."
+    def _send_quota_warning(self, event: models.MessageEvent, paid: bool, limit: int) -> None:
+        # 上限到達（ちょうど）の通知
+        if paid:
+            base = (
+                f"You have reached the limit of the Pro plan ({limit:,} messages per month).\n"
+                "Translation will be paused from the next message in this billing cycle."
+            )
+            url = None
+        else:
+            base = (
+                f"You have reached the limit of the free plan ({limit:,} messages per month).\n"
+                "Starting with the next message, a paid plan is required. Please complete checkout to continue."
+            )
+            url = self._build_checkout_url(event.group_id)
+
+        message = self._build_multilingual_notice(
+            base,
+            event.group_id,
+            url,
+            add_missing_link_notice=not paid,
         )
-        url = self._build_checkout_url(event.group_id)
-        message = self._build_multilingual_notice(base, event.group_id, url)
         if event.reply_token:
             self._line.reply_text(event.reply_token, message[:5000])
 
-    def _send_over_quota_message(self, event: models.MessageEvent, sender_name: str) -> None:
-        base = (
-            "Free quota (50 messages per month) is exhausted and translation is paused.\n"
-            "Purchase below to resume the service."
+    def _send_over_quota_message(self, event: models.MessageEvent, paid: bool, limit: int) -> None:
+        # 上限超過後の停止通知
+        if paid:
+            base = (
+                f"The Pro plan monthly limit ({limit:,} messages) has been reached and translation is paused.\n"
+                "Please wait for the next monthly cycle or contact the administrator."
+            )
+            url = None
+        else:
+            base = (
+                f"Free quota ({limit:,} messages per month) is exhausted and translation is paused.\n"
+                "Purchase below to resume the service."
+            )
+            url = self._build_checkout_url(event.group_id)
+
+        message = self._build_multilingual_notice(
+            base,
+            event.group_id,
+            url,
+            add_missing_link_notice=not paid,
         )
-        url = self._build_checkout_url(event.group_id)
-        message = self._build_multilingual_notice(base, event.group_id, url)
         if event.reply_token:
             self._line.reply_text(event.reply_token, message[:5000])
 
-    def _maybe_send_checkout_prompt(self, event: models.MessageEvent, sender_name: str) -> None:
-        # 無料枠超過で translation_enabled が false の場合のみ案内
-        url = self._build_checkout_url(event.group_id)
-        base = (
-            "Translation is currently paused, likely because the free quota was exceeded.\n"
-            "To continue, please complete the checkout below."
+    def _send_pause_notice(self, event: models.MessageEvent) -> None:
+        """translation_enabled=False のときに理由別の案内を返す。"""
+        paid = self._is_subscription_active(event.group_id)
+        limit = self._pro_quota if paid else self._free_quota
+        usage = self._repo.get_usage(event.group_id, self._current_month_key())
+
+        # 上限超過が原因で停止している場合
+        if usage >= limit:
+            self._send_over_quota_message(event, paid, limit)
+            return
+
+        if paid:
+            base = "Translation is currently paused. Please try again later or contact the administrator."
+            url = None
+        else:
+            base = (
+                "Translation is currently paused, likely because the free quota was exceeded.\n"
+                "To continue, please complete the checkout below."
+            )
+            url = self._build_checkout_url(event.group_id)
+
+        message = self._build_multilingual_notice(
+            base,
+            event.group_id,
+            url,
+            add_missing_link_notice=not paid,
         )
-        message = self._build_multilingual_notice(base, event.group_id, url)
         if event.reply_token:
             self._line.reply_text(event.reply_token, message[:5000])
 
-    def _build_multilingual_notice(self, base_text: str, group_id: str, url: Optional[str]) -> str:
+    def _build_multilingual_notice(
+        self,
+        base_text: str,
+        group_id: str,
+        url: Optional[str],
+        *,
+        add_missing_link_notice: bool = True,
+    ) -> str:
         translated_block = self._build_multilingual_interface_message(base_text, group_id)
         lines = [translated_block]
         if url:
             lines.append(url)
-        else:
+        elif add_missing_link_notice:
             lines.append("(Unable to generate purchase link at this time, please contact administrator.)")
         return "\n\n".join(filter(None, lines))
 

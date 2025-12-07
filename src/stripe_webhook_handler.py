@@ -4,14 +4,24 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict
+from functools import lru_cache
+from typing import Any, Dict, List
 
 import psycopg
 import stripe
 import requests
 
+from src.domain.services.interface_translation_service import InterfaceTranslationService
+from src.infra.gemini_translation import GeminiTranslationAdapter
+from src.presentation.reply_formatter import strip_source_echo
+
 logger = logging.getLogger(__name__)
 stripe.default_http_client = stripe.http_client.RequestsClient()
+
+PAYMENT_CONFIRMED_MESSAGE_EN = (
+    "Payment has been confirmed. Translation service has resumed for this group. Thank you!\n"
+    "If you want to change your plan, mention this official account with \"@\" and say \"Change plan\"."
+)
 
 
 def lambda_handler(event: Dict[str, Any], _context: Any):
@@ -88,7 +98,7 @@ def _handle_payment_succeeded(invoice: Dict[str, Any]) -> None:
         current_period_end=period_end,
         enable_translation=True,
     )
-    _push_message(group_id, "Payment has been confirmed. Your translation service has been resumed. Thank you very much.\nIf you would like to change your plan, please mention this official account with “@” and say “Change plan.")
+    _push_payment_confirmation(group_id)
 
 
 def _handle_subscription_deleted(subscription: Dict[str, Any]) -> None:
@@ -169,7 +179,7 @@ def _handle_checkout_session_completed(session: Dict[str, Any]) -> None:
         enable_translation=status in {"active", "trialing"},
     )
     if status in {"active", "trialing"}:
-        _push_message(group_id, "Payment completed. Translation has been re-enabled for this group.")
+        _push_payment_confirmation(group_id)
 
 
 def _extract_group_id(primary_obj: Dict[str, Any], fallback_obj: Dict[str, Any]) -> str | None:
@@ -220,6 +230,108 @@ def _upsert_subscription(
                 (group_id, stripe_customer_id, stripe_subscription_id, status, current_period_end),
             )
             cur.execute(query_settings, (group_id, enable_translation))
+
+
+def _push_payment_confirmation(group_id: str) -> None:
+    """支払い確認後のメッセージを設定言語すべてで通知する。"""
+
+    text = _build_multilingual_message(PAYMENT_CONFIRMED_MESSAGE_EN, group_id)
+    _push_message(group_id, text)
+
+
+def _build_multilingual_message(base_text: str, group_id: str) -> str:
+    """ベース文を設定言語へ翻訳して列挙する。"""
+
+    trimmed = (base_text or "").strip()
+    if not trimmed:
+        return ""
+
+    languages = _dedup_lang_codes(_fetch_group_languages(group_id))
+    translator = _get_interface_translation_service()
+
+    if not languages or not translator:
+        return trimmed
+
+    # 英語はベース文で代用するため除外して翻訳を行う
+    target_langs = [lang for lang in languages if not lang.startswith("en")]
+
+    text_by_lang = {}
+    if target_langs:
+        try:
+            translations = translator.translate(trimmed, target_langs)
+            for item in translations or []:
+                lowered = (item.lang or "").lower()
+                if not lowered or lowered in text_by_lang:
+                    continue
+                cleaned = strip_source_echo(trimmed, item.text)
+                normalized = (cleaned or item.text or "").strip()
+                if not normalized:
+                    continue
+                text_by_lang[lowered] = normalized
+        except Exception:  # pylint: disable=broad-except
+            logger.warning("Payment confirmation translation failed", exc_info=True)
+
+    lines: List[str] = [trimmed]
+    for lang in languages:
+        if lang.startswith("en"):
+            continue
+        translated = text_by_lang.get(lang)
+        if not translated or translated in lines:
+            continue
+        lines.append(translated)
+
+    joined = "\n\n".join(line for line in lines if line)
+    return joined.strip()[:5000]
+
+
+def _fetch_group_languages(group_id: str) -> List[str]:
+    """グループの設定言語をDBから取得する。"""
+
+    dsn = os.getenv("NEON_DATABASE_URL")
+    if not dsn:
+        logger.warning("NEON_DATABASE_URL missing; skip fetching group languages", extra={"group_id": group_id})
+        return []
+
+    query = "SELECT lang_code FROM group_languages WHERE group_id = %s ORDER BY lang_code"
+    try:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (group_id,))
+                rows = cur.fetchall()
+    except Exception:  # pylint: disable=broad-except
+        logger.warning("Failed to fetch group languages", exc_info=True, extra={"group_id": group_id})
+        return []
+
+    return [str(row[0]).lower() for row in rows if row and row[0]]
+
+
+def _dedup_lang_codes(languages: List[str]) -> List[str]:
+    """言語コードの重複と空を取り除く。"""
+
+    seen = set()
+    deduped: List[str] = []
+    for code in languages:
+        lowered = (code or "").lower()
+        if not lowered or lowered in seen:
+            continue
+        seen.add(lowered)
+        deduped.append(lowered)
+    return deduped
+
+
+@lru_cache(maxsize=1)
+def _get_interface_translation_service() -> InterfaceTranslationService | None:
+    """インターフェース文言用の翻訳サービスを生成（シングルトン）。"""
+
+    api_key = os.getenv("GEMINI_API_KEY", "")
+    if not api_key:
+        logger.warning("GEMINI_API_KEY missing; skip interface translation")
+        return None
+
+    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    timeout = int(os.getenv("GEMINI_TIMEOUT_SECONDS", "10"))
+    adapter = GeminiTranslationAdapter(api_key=api_key, model=model, timeout_seconds=timeout)
+    return InterfaceTranslationService(adapter)
 
 
 def _push_message(group_id: str, text: str) -> None:
