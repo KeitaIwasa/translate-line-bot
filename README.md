@@ -153,6 +153,9 @@ LINE_CHANNEL_SECRET=xxx
 LINE_CHANNEL_ACCESS_TOKEN=xxx
 NEON_DATABASE_URL=postgres://...
 GEMINI_API_KEY=your_google_ai_key
+STRIPE_SECRET_KEY=sk_live_or_test
+STRIPE_WEBHOOK_SECRET=whsec_xxx
+STRIPE_PRICE_MONTHLY_ID=price_xxx
 ```
 
 Lambda では **環境変数として設定**してください。

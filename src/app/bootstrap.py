@@ -60,6 +60,9 @@ def build_dispatcher() -> Dispatcher:
         bot_mention_name=settings.bot_mention_name,
         interface_translation=interface_translation,
         language_detector=language_detector,
+        stripe_secret_key=settings.stripe_secret_key,
+        stripe_price_monthly_id=settings.stripe_price_monthly_id,
+        free_quota_per_month=settings.free_quota_per_month,
     )
     postback_handler = PostbackHandler(
         line_client,

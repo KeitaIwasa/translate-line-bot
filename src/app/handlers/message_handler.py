@@ -76,6 +76,9 @@ class MessageHandler:
         max_group_languages: int,
         translation_retry: int,
         bot_mention_name: str,
+        stripe_secret_key: str = "",
+        stripe_price_monthly_id: str = "",
+        free_quota_per_month: int = 50,
         executor: ThreadPoolExecutor | None = None,
     ) -> None:
         self._line = line_client
@@ -89,6 +92,9 @@ class MessageHandler:
         self._max_group_languages = max_group_languages
         self._translation_retry = translation_retry
         self._bot_mention_name = bot_mention_name
+        self._stripe_secret_key = stripe_secret_key
+        self._stripe_price_monthly_id = stripe_price_monthly_id
+        self._free_quota = free_quota_per_month
         self._executor = executor or ThreadPoolExecutor(max_workers=4)
 
     def handle(self, event: models.MessageEvent) -> None:
@@ -417,9 +423,21 @@ class MessageHandler:
             if self._attempt_language_enrollment(event):
                 return True
 
-        # 翻訳停止中はここで終了（メッセージは記録のみ）
         if not translation_enabled:
+            # 無料枠超過で停止している場合は課金案内を再送する
+            self._maybe_send_checkout_prompt(event, sender_name)
             return True
+
+        # 利用カウントと課金判定
+        usage_count = self._repo.increment_usage(event.group_id, self._current_month_key())
+        paid = self._is_subscription_active(event.group_id)
+
+        if not paid and usage_count > self._free_quota:
+            self._repo.set_translation_enabled(event.group_id, False)
+            self._send_over_quota_message(event, sender_name)
+            return True
+        if not paid and usage_count == self._free_quota:
+            self._send_quota_warning(event, sender_name)
 
         context_messages = self._repo.fetch_recent_messages(event.group_id, self._max_context)
         timestamp = datetime.fromtimestamp(event.timestamp / 1000, tz=timezone.utc)
@@ -436,6 +454,80 @@ class MessageHandler:
             if event.reply_token:
                 self._line.reply_text(event.reply_token, reply_text)
         return True
+
+    def _send_quota_warning(self, event: models.MessageEvent, sender_name: str) -> None:
+        message = (
+            "無料枠(50メッセージ/月)の上限に到達しました。次のメッセージから課金が必要になります。\n"
+            "継続利用する場合は決済リンクを押してください。"
+        )
+        url = self._build_checkout_url(event.group_id)
+        if url:
+            message += f"\n\n購入リンク: {url}"
+        if event.reply_token:
+            self._line.reply_text(event.reply_token, message[:5000])
+
+    def _send_over_quota_message(self, event: models.MessageEvent, sender_name: str) -> None:
+        url = self._build_checkout_url(event.group_id)
+        message = (
+            "無料枠(50メッセージ/月)を使い切ったため翻訳を一時停止しました。\n"
+            "以下のリンクからご購入いただくと翻訳が再開します。"
+        )
+        if url:
+            message += f"\n\n購入リンク: {url}"
+        else:
+            message += "\n\n(現在購入リンクを生成できません。管理者に連絡してください。)"
+        if event.reply_token:
+            self._line.reply_text(event.reply_token, message[:5000])
+
+    def _maybe_send_checkout_prompt(self, event: models.MessageEvent, sender_name: str) -> None:
+        # 無料枠超過で translation_enabled が false の場合のみ案内
+        url = self._build_checkout_url(event.group_id)
+        message = (
+            "翻訳は現在停止中です。無料枠を超過した可能性があります。\n"
+            "継続利用するには以下のリンクからご購入ください。"
+        )
+        if url:
+            message += f"\n\n購入リンク: {url}"
+        if event.reply_token:
+            self._line.reply_text(event.reply_token, message[:5000])
+
+    def _build_checkout_url(self, group_id: str) -> Optional[str]:
+        import importlib
+
+        try:
+            stripe = importlib.import_module("stripe")
+        except ModuleNotFoundError:
+            logger.warning("stripe SDK not available; cannot create checkout session")
+            return None
+
+        secret = self._stripe_secret_key
+        price_id = self._stripe_price_monthly_id
+        if not secret or not price_id:
+            return None
+
+        stripe.api_key = secret
+        try:
+            session = stripe.checkout.Session.create(
+                mode="subscription",
+                line_items=[{"price": price_id, "quantity": 1}],
+                success_url="https://line.me",
+                cancel_url="https://line.me",
+                metadata={"group_id": group_id},
+                subscription_data={"metadata": {"group_id": group_id}},
+            )
+            return session.url
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("Failed to create checkout session: %s", exc)
+            return None
+
+    def _is_subscription_active(self, group_id: str) -> bool:
+        status = self._repo.get_subscription_status(group_id)
+        return status in {"active", "trialing"}
+
+    @staticmethod
+    def _current_month_key() -> str:
+        now = datetime.now(timezone.utc)
+        return f"{now.year:04d}-{now.month:02d}"
 
     def _build_usage_response(
         self,

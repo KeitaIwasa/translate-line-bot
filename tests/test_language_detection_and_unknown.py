@@ -99,6 +99,21 @@ class DummyRepo:
     def is_translation_enabled(self, *_args, **_kwargs):
         return True
 
+    def increment_usage(self, *_args, **_kwargs):
+        return 0
+
+    def get_usage(self, *_args, **_kwargs):
+        return 0
+
+    def get_subscription_status(self, *_args, **_kwargs):
+        return "active"
+
+    def upsert_subscription(self, *_args, **_kwargs):
+        return None
+
+    def update_subscription_status(self, *_args, **_kwargs):
+        return None
+
 
 @pytest.fixture(scope="module")
 def gemini_adapter():

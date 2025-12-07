@@ -230,7 +230,7 @@ class NeonMessageRepository(MessageRepositoryPort):
                     DO UPDATE SET translation_enabled = EXCLUDED.translation_enabled, updated_at = NOW()
                     """,
                     (group_id, enabled),
-                )
+            )
         except errors.UndefinedTable:
             # 後方互換: group_settings が未作成でも致命的エラーにしない
             logger.warning(
@@ -238,6 +238,97 @@ class NeonMessageRepository(MessageRepositoryPort):
                 extra={"group_id": group_id},
             )
             return
+
+    # === Stripe usage/subscription helpers ===
+    def increment_usage(self, group_id: str, month_key: str, increment: int = 1) -> int:
+        query = sql.SQL(
+            """
+            INSERT INTO group_usage_counters (group_id, month_key, translation_count, created_at, updated_at)
+            VALUES (%s, %s, %s, NOW(), NOW())
+            ON CONFLICT (group_id, month_key)
+            DO UPDATE SET translation_count = group_usage_counters.translation_count + EXCLUDED.translation_count,
+                          updated_at = NOW()
+            RETURNING translation_count
+            """
+        )
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(query, (group_id, month_key, increment))
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+        except errors.UndefinedTable:
+            logger.warning("group_usage_counters table missing; usage not tracked", extra={"group_id": group_id})
+            return 0
+
+    def get_usage(self, group_id: str, month_key: str) -> int:
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    "SELECT translation_count FROM group_usage_counters WHERE group_id = %s AND month_key = %s",
+                    (group_id, month_key),
+                )
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+        except errors.UndefinedTable:
+            logger.warning("group_usage_counters table missing; usage not tracked", extra={"group_id": group_id})
+            return 0
+
+    def get_subscription_status(self, group_id: str) -> Optional[str]:
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM group_subscriptions WHERE group_id = %s",
+                    (group_id,),
+                )
+                row = cur.fetchone()
+                return row[0] if row else None
+        except errors.UndefinedTable:
+            logger.warning("group_subscriptions table missing; subscription not tracked", extra={"group_id": group_id})
+            return None
+
+    def upsert_subscription(
+        self,
+        group_id: str,
+        stripe_customer_id: str,
+        stripe_subscription_id: str,
+        status: str,
+        current_period_end: Optional[datetime],
+    ) -> None:
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO group_subscriptions (
+                        group_id, stripe_customer_id, stripe_subscription_id, status, current_period_end, created_at, updated_at
+                    ) VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+                    ON CONFLICT (group_id)
+                    DO UPDATE SET
+                        stripe_customer_id = EXCLUDED.stripe_customer_id,
+                        stripe_subscription_id = EXCLUDED.stripe_subscription_id,
+                        status = EXCLUDED.status,
+                        current_period_end = EXCLUDED.current_period_end,
+                        updated_at = NOW()
+                    """,
+                    (group_id, stripe_customer_id, stripe_subscription_id, status, current_period_end),
+                )
+        except errors.UndefinedTable:
+            logger.warning("group_subscriptions table missing; cannot upsert", extra={"group_id": group_id})
+
+    def update_subscription_status(
+        self, group_id: str, status: str, current_period_end: Optional[datetime]
+    ) -> None:
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE group_subscriptions
+                    SET status = %s, current_period_end = %s, updated_at = NOW()
+                    WHERE group_id = %s
+                    """,
+                    (status, current_period_end, group_id),
+                )
+        except errors.UndefinedTable:
+            logger.warning("group_subscriptions table missing; cannot update status", extra={"group_id": group_id})
         except Exception:
             logger.exception("Failed to set translation_enabled", extra={"group_id": group_id})
             raise

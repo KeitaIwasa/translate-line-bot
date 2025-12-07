@@ -62,3 +62,23 @@ class MessageRepositoryPort:
     def record_bot_joined_at(self, group_id: str, joined_at: datetime) -> None: ...
 
     def fetch_bot_joined_at(self, group_id: str) -> Optional[datetime]: ...
+
+    # Stripe 課金/利用カウント
+    def increment_usage(self, group_id: str, month_key: str, increment: int = 1) -> int: ...
+
+    def get_usage(self, group_id: str, month_key: str) -> int: ...
+
+    def get_subscription_status(self, group_id: str) -> Optional[str]: ...
+
+    def upsert_subscription(
+        self,
+        group_id: str,
+        stripe_customer_id: str,
+        stripe_subscription_id: str,
+        status: str,
+        current_period_end: Optional[datetime],
+    ) -> None: ...
+
+    def update_subscription_status(
+        self, group_id: str, status: str, current_period_end: Optional[datetime]
+    ) -> None: ...
