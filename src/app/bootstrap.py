@@ -63,6 +63,7 @@ def build_dispatcher() -> Dispatcher:
         stripe_secret_key=settings.stripe_secret_key,
         stripe_price_monthly_id=settings.stripe_price_monthly_id,
         free_quota_per_month=settings.free_quota_per_month,
+        checkout_base_url=settings.public_api_base_url,
     )
     postback_handler = PostbackHandler(
         line_client,

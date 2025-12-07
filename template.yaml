@@ -53,6 +53,10 @@ Parameters:
       - true
       - false
     Description: Set to true when Stripe secrets/price IDs are provisioned
+  PublicApiBaseUrl:
+    Type: String
+    Default: ""
+    Description: Base URL for the public HTTP API (e.g., custom domain or API Gateway URL with stage)
 
 Conditions:
   UseStripe: !Equals [!Ref EnableStripe, "true"]
@@ -88,6 +92,7 @@ Globals:
           - UseStripe
           - !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:STRIPE_PRICE_MONTHLY_ID}}"
           - ""
+        PUBLIC_API_BASE_URL: !Ref PublicApiBaseUrl
 
 Resources:
   LineWebhookApi:
@@ -126,6 +131,23 @@ Resources:
             ApiId: !Ref LineWebhookApi
             Path: /stripe/webhook
             Method: POST
+
+  StripeCheckoutRedirectFunction:
+    Type: AWS::Serverless::Function
+    Condition: UseStripe
+    Properties:
+      CodeUri: .
+      Handler: src.checkout_redirect_handler.lambda_handler
+      Description: Issues short checkout redirects for Stripe sessions
+      Policies:
+        - AWSLambdaBasicExecutionRole
+      Events:
+        CheckoutRedirect:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LineWebhookApi
+            Path: /checkout
+            Method: GET
 
   GroupUsageMonthlyResetFunction:
     Type: AWS::Serverless::Function

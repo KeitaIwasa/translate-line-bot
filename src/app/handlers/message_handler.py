@@ -79,6 +79,7 @@ class MessageHandler:
         stripe_secret_key: str = "",
         stripe_price_monthly_id: str = "",
         free_quota_per_month: int = 50,
+        checkout_base_url: str = "",
         executor: ThreadPoolExecutor | None = None,
     ) -> None:
         self._line = line_client
@@ -95,6 +96,7 @@ class MessageHandler:
         self._stripe_secret_key = stripe_secret_key
         self._stripe_price_monthly_id = stripe_price_monthly_id
         self._free_quota = free_quota_per_month
+        self._checkout_base_url = checkout_base_url.rstrip("/") if checkout_base_url else ""
         self._executor = executor or ThreadPoolExecutor(max_workers=4)
 
     def handle(self, event: models.MessageEvent) -> None:
@@ -456,40 +458,44 @@ class MessageHandler:
         return True
 
     def _send_quota_warning(self, event: models.MessageEvent, sender_name: str) -> None:
-        message = (
-            "無料枠(50メッセージ/月)の上限に到達しました。次のメッセージから課金が必要になります。\n"
-            "継続利用する場合は決済リンクを押してください。"
+        base = (
+            "You have reached the limit of the free plan (50 messages per month).\n"
+            "Starting with the next message, a paid plan is required. Please complete checkout to continue."
         )
         url = self._build_checkout_url(event.group_id)
-        if url:
-            message += f"\n\n購入リンク: {url}"
+        message = self._build_multilingual_notice(base, event.group_id, url)
         if event.reply_token:
             self._line.reply_text(event.reply_token, message[:5000])
 
     def _send_over_quota_message(self, event: models.MessageEvent, sender_name: str) -> None:
-        url = self._build_checkout_url(event.group_id)
-        message = (
-            "無料枠(50メッセージ/月)を使い切ったため翻訳を一時停止しました。\n"
-            "以下のリンクからご購入いただくと翻訳が再開します。"
+        base = (
+            "Free quota (50 messages per month) is exhausted and translation is paused.\n"
+            "Purchase below to resume the service."
         )
-        if url:
-            message += f"\n\n購入リンク: {url}"
-        else:
-            message += "\n\n(現在購入リンクを生成できません。管理者に連絡してください。)"
+        url = self._build_checkout_url(event.group_id)
+        message = self._build_multilingual_notice(base, event.group_id, url)
         if event.reply_token:
             self._line.reply_text(event.reply_token, message[:5000])
 
     def _maybe_send_checkout_prompt(self, event: models.MessageEvent, sender_name: str) -> None:
         # 無料枠超過で translation_enabled が false の場合のみ案内
         url = self._build_checkout_url(event.group_id)
-        message = (
-            "翻訳は現在停止中です。無料枠を超過した可能性があります。\n"
-            "継続利用するには以下のリンクからご購入ください。"
+        base = (
+            "Translation is currently paused, likely because the free quota was exceeded.\n"
+            "To continue, please complete the checkout below."
         )
-        if url:
-            message += f"\n\n購入リンク: {url}"
+        message = self._build_multilingual_notice(base, event.group_id, url)
         if event.reply_token:
             self._line.reply_text(event.reply_token, message[:5000])
+
+    def _build_multilingual_notice(self, base_text: str, group_id: str, url: Optional[str]) -> str:
+        translated_block = self._build_multilingual_interface_message(base_text, group_id)
+        lines = [translated_block]
+        if url:
+            lines.append(url)
+        else:
+            lines.append("(Unable to generate purchase link at this time, please contact administrator.)")
+        return "\n\n".join(filter(None, lines))
 
     def _build_checkout_url(self, group_id: str) -> Optional[str]:
         import importlib
@@ -515,7 +521,13 @@ class MessageHandler:
                 metadata={"group_id": group_id},
                 subscription_data={"metadata": {"group_id": group_id}},
             )
-            return session.url
+            checkout_url = getattr(session, "url", None)
+            session_id = getattr(session, "id", None)
+
+            if self._checkout_base_url and session_id:
+                return f"{self._checkout_base_url}/checkout?session_id={session_id}"
+
+            return checkout_url
         except Exception as exc:  # pylint: disable=broad-except
             logger.warning("Failed to create checkout session: %s", exc)
             return None

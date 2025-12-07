@@ -23,6 +23,7 @@ class Settings:
     stripe_webhook_secret: str = ""
     stripe_price_monthly_id: str = ""
     free_quota_per_month: int = 50
+    public_api_base_url: str = ""
 
 
 @lru_cache(maxsize=1)
@@ -58,4 +59,5 @@ def get_settings() -> Settings:
         stripe_webhook_secret=env.get("STRIPE_WEBHOOK_SECRET", ""),
         stripe_price_monthly_id=env.get("STRIPE_PRICE_MONTHLY_ID", ""),
         free_quota_per_month=int(env.get("FREE_QUOTA_PER_MONTH", "50")),
+        public_api_base_url=env.get("PUBLIC_API_BASE_URL", ""),
     )

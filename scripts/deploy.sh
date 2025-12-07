@@ -19,12 +19,27 @@ TRANSLATION_RETRY="${TRANSLATION_RETRY:-2}"
 RUNTIME_SECRET_ARN="${RUNTIME_SECRET_ARN:-}"
 S3_BUCKET="${S3_BUCKET:-}"
 ENABLE_STRIPE="${ENABLE_STRIPE:-true}"
+PUBLIC_API_BASE_URL="${PUBLIC_API_BASE_URL:-}"
 
 if [[ -z "$RUNTIME_SECRET_ARN" ]]; then
   if [[ "$STAGE" == "prod" ]]; then
     RUNTIME_SECRET_ARN="prod/line-translate-bot-secrets"
   else
     RUNTIME_SECRET_ARN="stg/line-translate-bot-secrets"
+  fi
+fi
+
+if [[ -z "$PUBLIC_API_BASE_URL" ]]; then
+  existing_base=$(aws cloudformation describe-stacks \
+    --stack-name "$STACK_NAME" \
+    --region "$REGION" \
+    --profile "$PROFILE" \
+    --query "Stacks[0].Outputs[?OutputKey=='HttpApiEndpoint'].OutputValue" \
+    --output text 2>/dev/null || true)
+
+  if [[ -n "$existing_base" && "$existing_base" != "None" ]]; then
+    echo "Resolved API base from existing stack output: $existing_base"
+    PUBLIC_API_BASE_URL="$existing_base"
   fi
 fi
 
@@ -46,6 +61,7 @@ deploy_args=(
     TranslationRetry="$TRANSLATION_RETRY"
     RuntimeSecretArn="$RUNTIME_SECRET_ARN"
     EnableStripe="$ENABLE_STRIPE"
+    PublicApiBaseUrl="$PUBLIC_API_BASE_URL"
 )
 
 if [[ -n "$S3_BUCKET" ]]; then
