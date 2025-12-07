@@ -19,7 +19,7 @@ def lambda_handler(event: Dict[str, Any], _context: Any):
         return {"statusCode": 500, "body": json.dumps({"message": "missing database url"})}
 
     month_key = _current_month_key()
-    with psycopg.connect(dsn) as conn:
+    with psycopg.connect(dsn, autocommit=True) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
