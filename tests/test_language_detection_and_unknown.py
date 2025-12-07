@@ -8,7 +8,7 @@ from src.domain import models
 from src.domain.services.interface_translation_service import InterfaceTranslationService
 from src.domain.services.language_detection_service import LanguageDetectionService
 from src.domain.services.translation_service import TranslationService
-from src.infra.gemini_translation import GeminiTranslationAdapter
+from src.infra.gemini_translation import GeminiTranslationAdapter, GeminiRateLimitError
 
 
 load_dotenv()
@@ -150,7 +150,10 @@ def test_unknown_instruction_translated_to_detected_language(gemini_adapter):
     )
 
     # translate unknown-instruction guidance into English
-    result = handler._build_unknown_response("en")
+    try:
+        result = handler._build_unknown_response("en")
+    except GeminiRateLimitError:
+        pytest.skip("Gemini rate limit hit; skipping live translation test")
 
     assert result
     assert result != UNKNOWN_INSTRUCTION_JA

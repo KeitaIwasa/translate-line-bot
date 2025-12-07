@@ -5,7 +5,7 @@ import pytest
 from dotenv import load_dotenv
 
 from src.domain.models import ContextMessage, TranslationRequest
-from src.infra.gemini_translation import GeminiTranslationAdapter
+from src.infra.gemini_translation import GeminiTranslationAdapter, GeminiRateLimitError
 
 
 load_dotenv(dotenv_path=".env")
@@ -29,7 +29,10 @@ def test_gemini_live_translation():
         context_messages=[ContextMessage(sender_name="Alice", text="This is context", timestamp=timestamp)],
     )
 
-    results = client.translate(request)
+    try:
+        results = client.translate(request)
+    except GeminiRateLimitError:
+        pytest.skip("Gemini rate limit hit; skipping live translation test")
 
     assert results, "Gemini should return translations"
     langs = {item.lang.lower() for item in results}

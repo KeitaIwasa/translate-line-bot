@@ -273,6 +273,39 @@ class NeonMessageRepository(MessageRepositoryPort):
             logger.warning("group_usage_counters table missing; usage not tracked", extra={"group_id": group_id})
             return 0
 
+    def get_limit_notice_plan(self, group_id: str, month_key: str) -> Optional[str]:
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    "SELECT limit_notice_plan FROM group_usage_counters WHERE group_id = %s AND month_key = %s",
+                    (group_id, month_key),
+                )
+                row = cur.fetchone()
+                return row[0] if row else None
+        except errors.UndefinedColumn:
+            logger.warning("limit_notice_plan column missing; treating as no notice", extra={"group_id": group_id})
+            return None
+        except errors.UndefinedTable:
+            logger.warning("group_usage_counters table missing; treating as no notice", extra={"group_id": group_id})
+            return None
+
+    def set_limit_notice_plan(self, group_id: str, month_key: str, plan: str) -> None:
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO group_usage_counters (group_id, month_key, translation_count, limit_notice_plan, created_at, updated_at)
+                    VALUES (%s, %s, 0, %s, NOW(), NOW())
+                    ON CONFLICT (group_id, month_key)
+                    DO UPDATE SET limit_notice_plan = EXCLUDED.limit_notice_plan, updated_at = NOW()
+                    """,
+                    (group_id, month_key, plan),
+                )
+        except errors.UndefinedColumn:
+            logger.warning("limit_notice_plan column missing; skip setting notice plan", extra={"group_id": group_id})
+        except errors.UndefinedTable:
+            logger.warning("group_usage_counters table missing; skip setting notice plan", extra={"group_id": group_id})
+
     def get_subscription_status(self, group_id: str) -> Optional[str]:
         try:
             with self._client.cursor() as cur:

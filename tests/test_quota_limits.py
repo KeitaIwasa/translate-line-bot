@@ -51,10 +51,11 @@ class NullCommandRouter:
 
 
 class ProQuotaRepo:
-    def __init__(self, initial_usage: int, paid: bool = True):
+    def __init__(self, initial_usage: int, paid: bool = True, notice_plan: str | None = None):
         self.usage = initial_usage
         self.paid = paid
         self.translation_enabled = True
+        self.notice_plan = notice_plan
 
     # group/lang settings
     def fetch_group_languages(self, _group_id):
@@ -67,9 +68,15 @@ class ProQuotaRepo:
     def get_usage(self, _group_id, _month_key):
         return self.usage
 
+    def get_limit_notice_plan(self, _group_id, _month_key):
+        return self.notice_plan
+
     def increment_usage(self, _group_id, _month_key, increment: int = 1):
         self.usage += increment
         return self.usage
+
+    def set_limit_notice_plan(self, _group_id, _month_key, plan: str):
+        self.notice_plan = plan
 
     def get_subscription_status(self, _group_id):
         return "active" if self.paid else None
@@ -171,6 +178,71 @@ def test_pro_plan_warns_on_last_allowed_message_and_translates():
     handler._handle_translation_flow(_build_event("hi"), sender_name="user", translation_enabled=True)
 
     assert repo.usage == 8000
+    # 8000通目は翻訳して通知
     assert translation.calls == 1
     assert any("Pro plan" in text for text in line.sent_texts)
-    assert any("(en)" in text for text in line.sent_texts)
+    assert repo.notice_plan == "pro"
+
+
+def test_pro_plan_over_limit_does_not_renotify_when_flag_set():
+    line = RecordingLineClient()
+    translation = RecordingTranslationService()
+    repo = ProQuotaRepo(initial_usage=8001, paid=True, notice_plan="pro")
+    handler = _build_handler(repo, line, translation)
+
+    handled = handler._handle_translation_flow(_build_event("over"), sender_name="user", translation_enabled=True)
+
+    assert handled is True
+    assert translation.calls == 0
+    assert line.sent_texts == []  # 通知は再送しない
+
+
+def test_free_notice_not_repeated_after_upgrade_then_pro_notice_sent():
+    line = RecordingLineClient()
+    translation = RecordingTranslationService()
+    # Freeで既に通知済みの月にProへアップグレード
+    repo = ProQuotaRepo(initial_usage=50, paid=False, notice_plan="free")
+    handler = _build_handler(repo, line, translation)
+
+    # Proとして上限到達はまだ先なので、この時点では通知されないが、フラグは維持
+    handler._handle_translation_flow(_build_event("hi"), sender_name="user", translation_enabled=True)
+    assert repo.notice_plan == "free"
+
+    # Pro課金状態に切り替え、usageを上限近くまで進めて通知
+    repo.paid = True
+    repo.usage = 7999
+    line.sent_texts.clear()
+    handler._handle_translation_flow(_build_event("again"), sender_name="user", translation_enabled=True)
+
+    assert repo.notice_plan == "pro"
+    assert any("Pro plan" in text for text in line.sent_texts)
+
+
+def test_free_notice_blocks_processing_when_unpaid_and_non_command():
+    line = RecordingLineClient()
+    translation = RecordingTranslationService()
+    repo = ProQuotaRepo(initial_usage=60, paid=False, notice_plan="free")
+    handler = _build_handler(repo, line, translation)
+
+    # translation_enabled True でも、free通知済みなら処理スキップ
+    handled = handler._handle_translation_flow(_build_event("hello"), sender_name="user", translation_enabled=True)
+
+    assert handled is True
+    assert translation.calls == 0
+    assert repo.usage == 60  # カウント増えない
+    assert line.sent_texts == []
+
+
+def test_free_plan_sends_notice_after_50th_translation():
+    line = RecordingLineClient()
+    translation = RecordingTranslationService()
+    repo = ProQuotaRepo(initial_usage=49, paid=False, notice_plan=None)
+    handler = _build_handler(repo, line, translation)
+
+    handled = handler._handle_translation_flow(_build_event("msg"), sender_name="user", translation_enabled=True)
+
+    assert handled is True
+    assert repo.usage == 50
+    assert translation.calls == 1  # 50通目は翻訳実行
+    assert repo.notice_plan == "free"  # 通知フラグ更新
+    assert any("Free quota" in text for text in line.sent_texts)

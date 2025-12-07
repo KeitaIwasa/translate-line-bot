@@ -435,25 +435,45 @@ class MessageHandler:
         paid = self._is_subscription_active(event.group_id)
         limit = self._pro_quota if paid else self._free_quota
         month_key = self._current_month_key()
+        plan_key = "pro" if paid else "free"
+        notice_plan = getattr(self._repo, "get_limit_notice_plan", lambda *_: None)(event.group_id, month_key)
+
+        # Free 上限通知済みかつ未課金の場合は静かにスキップ（メンション無しでここに来る）
+        if not paid:
+            if notice_plan == "free":
+                logger.info(
+                    "Skipping processing: free plan limit notice already sent this month",
+                    extra={"group_id": event.group_id, "month_key": month_key},
+                )
+                return True
 
         # すでに上限到達済みの場合はカウントを進めずに終了
         current_usage = self._repo.get_usage(event.group_id, month_key)
         if current_usage >= limit:
             if not paid:
                 self._repo.set_translation_enabled(event.group_id, False)
-            self._send_over_quota_message(event, paid, limit)
+            self._maybe_send_limit_notice(event, paid, limit, plan_key, month_key)
             return True
 
         # 利用カウントと課金判定
         usage_count = self._repo.increment_usage(event.group_id, month_key)
+        send_notice_after_translation = False
 
-        if usage_count > limit:
-            if not paid:
+        if paid:
+            if usage_count > limit:
+                self._maybe_send_limit_notice(event, paid, limit, plan_key, month_key)
+                return True
+            if usage_count == limit:
+                # 8000通目は翻訳してから通知
+                send_notice_after_translation = notice_plan != plan_key
+        else:
+            if usage_count > limit:
                 self._repo.set_translation_enabled(event.group_id, False)
-            self._send_over_quota_message(event, paid, limit)
-            return True
-        if usage_count == limit:
-            self._send_quota_warning(event, paid, limit)
+                self._maybe_send_limit_notice(event, paid, limit, plan_key, month_key)
+                return True
+            if usage_count == limit:
+                # 50通目は翻訳してから通知
+                send_notice_after_translation = notice_plan != plan_key
 
         context_messages = self._repo.fetch_recent_messages(event.group_id, self._max_context)
         timestamp = datetime.fromtimestamp(event.timestamp / 1000, tz=timezone.utc)
@@ -467,36 +487,56 @@ class MessageHandler:
         )
         if translations:
             reply_text = build_translation_reply(event.text, translations)
-            if event.reply_token:
-                self._line.reply_text(event.reply_token, reply_text)
+            if send_notice_after_translation:
+                notice = self._build_limit_reached_notice_text(event.group_id, paid, limit)
+                setter = getattr(self._repo, "set_limit_notice_plan", None)
+                if setter:
+                    setter(event.group_id, month_key, plan_key)
+                if event.reply_token:
+                    self._line.reply_messages(
+                        event.reply_token,
+                        [
+                            {"type": "text", "text": reply_text[:5000]},
+                            {"type": "text", "text": notice[:5000]},
+                        ],
+                    )
+            else:
+                if event.reply_token:
+                    self._line.reply_text(event.reply_token, reply_text)
+
+        if send_notice_after_translation:
+            # 上で送信済み
+            return True
+
         return True
 
-    def _send_quota_warning(self, event: models.MessageEvent, paid: bool, limit: int) -> None:
-        # 上限到達（ちょうど）の通知
-        if paid:
-            base = (
-                f"You have reached the limit of the Pro plan ({limit:,} messages per month).\n"
-                "Translation will be paused from the next message in this billing cycle."
-            )
-            url = None
-        else:
-            base = (
-                f"You have reached the limit of the free plan ({limit:,} messages per month).\n"
-                "Starting with the next message, a paid plan is required. Please complete checkout to continue."
-            )
-            url = self._build_checkout_url(event.group_id)
+    def _maybe_send_limit_notice(
+        self,
+        event: models.MessageEvent,
+        paid: bool,
+        limit: int,
+        plan_key: str,
+        month_key: str,
+    ) -> None:
+        """プラン別に月1回だけ上限通知を送る。"""
+        previous_plan = getattr(self._repo, "get_limit_notice_plan", lambda *_: None)(event.group_id, month_key)
+        if previous_plan == plan_key:
+            # 同一プランで既に通知済み
+            return
 
-        message = self._build_multilingual_notice(
-            base,
-            event.group_id,
-            url,
-            add_missing_link_notice=not paid,
-        )
+        self._send_limit_reached_notice(event, paid, limit)
+
+        setter = getattr(self._repo, "set_limit_notice_plan", None)
+        if setter:
+            setter(event.group_id, month_key, plan_key)
+
+    def _send_limit_reached_notice(self, event: models.MessageEvent, paid: bool, limit: int) -> None:
+        """上限到達/超過時の統一通知。"""
+        message = self._build_limit_reached_notice_text(event.group_id, paid, limit)
         if event.reply_token:
             self._line.reply_text(event.reply_token, message[:5000])
 
-    def _send_over_quota_message(self, event: models.MessageEvent, paid: bool, limit: int) -> None:
-        # 上限超過後の停止通知
+    def _build_limit_reached_notice_text(self, group_id: str, paid: bool, limit: int) -> str:
         if paid:
             base = (
                 f"The Pro plan monthly limit ({limit:,} messages) has been reached and translation is paused.\n"
@@ -505,19 +545,17 @@ class MessageHandler:
             url = None
         else:
             base = (
-                f"Free quota ({limit:,} messages per month) is exhausted and translation is paused.\n"
-                "Purchase below to resume the service."
+                f"Free quota ({limit:,} messages per month) is exhausted and translation will stop.\n"
+                "To continue using the service, please purchase a subscription from the link below."
             )
-            url = self._build_checkout_url(event.group_id)
+            url = self._build_checkout_url(group_id)
 
-        message = self._build_multilingual_notice(
+        return self._build_multilingual_notice(
             base,
-            event.group_id,
+            group_id,
             url,
             add_missing_link_notice=not paid,
         )
-        if event.reply_token:
-            self._line.reply_text(event.reply_token, message[:5000])
 
     def _send_pause_notice(self, event: models.MessageEvent) -> None:
         """translation_enabled=False のときに理由別の案内を返す。"""
@@ -806,7 +844,8 @@ class MessageHandler:
 
     def _build_multilingual_interface_message(self, base_text: str, group_id: str) -> str:
         languages = self._limit_language_codes(self._repo.fetch_group_languages(group_id))
-        translations = self._invoke_interface_translation_with_retry(base_text, languages)
+        translate_targets = [lang for lang in languages if lang.lower() != "en"]
+        translations = self._invoke_interface_translation_with_retry(base_text, translate_targets)
 
         if not translations:
             return base_text
@@ -822,7 +861,10 @@ class MessageHandler:
         lines: List[str] = []
         for lang in languages:
             lowered = lang.lower()
-            text = text_by_lang.get(lowered, base_text)
+            if lowered == "en":
+                text = base_text  # 英語→英語はそのまま
+            else:
+                text = text_by_lang.get(lowered, base_text)
             text = (text or base_text).strip()
             lines.append(text)
 
