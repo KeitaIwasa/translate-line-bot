@@ -46,6 +46,16 @@ Parameters:
     MinValue: 1
     MaxValue: 10
     Description: Maximum number of translation target languages per group
+  EnableStripe:
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+    Description: Set to true when Stripe secrets/price IDs are provisioned
+
+Conditions:
+  UseStripe: !Equals [!Ref EnableStripe, "true"]
 
 Globals:
   Function:
@@ -66,6 +76,18 @@ Globals:
         MAX_GROUP_LANGUAGES: !Ref MaxGroupLanguages
         TRANSLATION_RETRY: !Ref TranslationRetry
         BOT_MENTION_NAME: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:BOT_MENTION_NAME}}"
+        STRIPE_SECRET_KEY: !If
+          - UseStripe
+          - !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:STRIPE_SECRET_KEY}}"
+          - ""
+        STRIPE_WEBHOOK_SECRET: !If
+          - UseStripe
+          - !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:STRIPE_WEBHOOK_SECRET}}"
+          - ""
+        STRIPE_PRICE_MONTHLY_ID: !If
+          - UseStripe
+          - !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:STRIPE_PRICE_MONTHLY_ID}}"
+          - ""
 
 Resources:
   LineWebhookApi:
@@ -87,6 +109,40 @@ Resources:
             ApiId: !Ref LineWebhookApi
             Path: /webhook
             Method: POST
+
+  StripeWebhookFunction:
+    Type: AWS::Serverless::Function
+    Condition: UseStripe
+    Properties:
+      CodeUri: .
+      Handler: src.stripe_webhook_handler.lambda_handler
+      Description: Handles Stripe webhook events to sync subscription state
+      Policies:
+        - AWSLambdaBasicExecutionRole
+      Events:
+        StripeWebhook:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LineWebhookApi
+            Path: /stripe/webhook
+            Method: POST
+
+  GroupUsageMonthlyResetFunction:
+    Type: AWS::Serverless::Function
+    Condition: UseStripe
+    Properties:
+      CodeUri: .
+      Handler: src.usage_counter_initializer.lambda_handler
+      Description: Initializes monthly usage counters for each LINE group
+      Policies:
+        - AWSLambdaBasicExecutionRole
+      Events:
+        MonthlySchedule:
+          Type: Schedule
+          Properties:
+            Name: !Sub "group-usage-monthly-reset-${StageName}"
+            Description: Monthly counter initializer (00:00 UTC on 1st)
+            Schedule: cron(0 0 1 * ? *)
 
 Outputs:
   FunctionArn:
