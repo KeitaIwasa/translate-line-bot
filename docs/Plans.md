@@ -17,3 +17,22 @@
 - [x] ドキュメント: `README`/`AGENTS` に運用手順（無料枠、支払い後の挙動、価格 ID 差し替え手順、Webhook 構築手順）を追記。
 - [ ] ステージング検証: ステージング Stripe アカウントで Checkout → Webhook → 翻訳再開までの E2E を確認し、手動 QA チェックリストを残す。
 - [x] 決済導線改善: /checkout リダイレクトで短い決済リンクを配信し、LINE 上での URL 可読性を向上。
+- [ ] 決済後の遷移先: Checkout の `success_url` / `cancel_url` を自前のサンクスページ（LINE への遷移ボタン付き）に差し替え、スマホでは LINE グループへ自動遷移する導線を用意する。
+- [ ] サンクスページホスティング: GitHub Pages 上の静的ページでサンクス画面を提供し、Stripe.js（publishable key のみ）で `retrieveCheckoutSession(session_id)` を用いてステータス表示しつつ、`line://` ディープリンクを試行する実装を追加。
+
+---
+
+# メンション機能拡張（サブスク管理）
+
+## ゴール
+- ボットメンション経由でサブスク状態の確認・停止・Pro へのアップグレードを自己完結できる操作メニューを提供し、グループ管理者が LINE 上だけで課金関連の操作を完了できるようにする。
+
+## ToDo
+- [ ] コマンド判定拡張: Gemini の command router に `subscription_menu` / `subscription_cancel` / `subscription_upgrade` を追加し、ヒント語と ack テンプレート（英語原文）を定義する。
+- [ ] メニューUI: メンション入力に応じて Buttons テンプレートを返すハンドラを追加し、ボタン文言の英語原文＋設定言語への翻訳を組み立てる共通関数を用意する。
+- [ ] 現在プラン表示: `group_subscriptions` 状態と Stripe Customer Portal セッションを用いて「請求内容を見る」リンクを生成し、メニュー/ボタン経由で返す（return_url は LINE グループ遷移を指定）。
+- [ ] サブスク停止フロー: 確認テンプレート表示→承認時に Stripe の cancel_at_period_end=True で解約予約し、DB を即時更新（status / current_period_end / canceled_at）し多言語で完了メッセージを返す。
+- [ ] Pro へのアップグレード: 現プランが Free の場合のみ Pro 価格 ID で Checkout セッションを発行し、URL を応答。既に課金中の場合はガード応答を返す。
+- [ ] Postback/状態管理: Buttons/Confirm の postback data をパースし、メンションハンドラ側で各フローにディスパッチするルーティングを実装。重複クリック抑止のため idempotency key を用意。
+- [ ] テスト: Command Router の JSON 出力、メンションハンドラのメニュー/解約/アップグレード分岐、Stripe SDK モックを用いた単体テスト、Webhook 連携を含む統合テストを追加。
+- [ ] ステージング検証: ステージング Stripe でメンション→メニュー表示→解約予約→再課金（Pro）までを E2E 検証し、確認結果を記録する。

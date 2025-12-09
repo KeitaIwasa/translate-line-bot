@@ -622,8 +622,8 @@ class MessageHandler:
             session = stripe.checkout.Session.create(
                 mode="subscription",
                 line_items=[{"price": price_id, "quantity": 1}],
-                success_url="https://line.me",
-                cancel_url="https://line.me",
+                success_url="https://translate.iwasadigital.com/pages/thanks.html?session_id={CHECKOUT_SESSION_ID}",
+                cancel_url="https://translate.iwasadigital.com/pages/thanks.html?status=cancelled&session_id={CHECKOUT_SESSION_ID}",
                 metadata={"group_id": group_id},
                 subscription_data={"metadata": {"group_id": group_id}},
             )
