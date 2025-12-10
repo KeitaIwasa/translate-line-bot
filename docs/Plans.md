@@ -32,6 +32,7 @@
 - LanguageSettingsService を実装し、言語設定プロンプト生成・確認/キャンセル処理を MessageHandler/PostbackHandler から完全委譲。ポストバック処理はサービス経由に統一。
 - RetryPolicy を導入し、翻訳系リトライを共通化（エラーハンドリングの横断化）。
 - `pytest` フルスイート実行（2件 skip: 既存 live/gemini 系）。
+- 未知コマンド案内のベース文言を英語に変更し、多言語展開の基点を統一。
 
 ### 現状調査メモ
 - `MessageHandler` がコマンド処理・翻訳フロー・課金/クオータ管理・UI翻訳・言語設定プロンプト生成まで抱えており SRP/DIP を逸脱。内部のヘルパが 60+ 個あり複雑度高。
