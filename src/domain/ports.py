@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Iterable, List, Optional, Sequence, Tuple, Protocol
+from typing import List, Optional, Sequence, Tuple, Protocol
 
 from .models import (
     ContextMessage,

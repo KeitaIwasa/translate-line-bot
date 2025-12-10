@@ -66,7 +66,8 @@ class SubscriptionService:
             return None
 
         stripe.api_key = self._stripe_secret_key
-        return_url = self._checkout_base_url + "/portal-return" if self._checkout_base_url else "https://translate.iwasadigital.com/pages/thanks.html"
+        # ポータル遷移後の戻り先
+        return_url = self._checkout_base_url + "/portal-return" if self._checkout_base_url else "https://line.me/R/nv/chat"
         try:
             session = stripe.billing_portal.Session.create(customer=customer_id, return_url=return_url)
             return getattr(session, "url", None)
