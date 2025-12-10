@@ -9,6 +9,7 @@
 - [x] 決済導線: 無料枠超過時に Checkout セッションを生成し、group_id をメタデータに付与した一時 URL を返信する処理を実装。料金プランは月次のみ。
 - [x] Webhook 処理: `invoice.payment_succeeded` / `customer.subscription.deleted` / `invoice.payment_failed` を受信し、`group_subscriptions` を更新（status, current_period_end, stripe IDs）し翻訳制限フラグを解除/付与。
 - [x] 利用カウント: 翻訳実行時に `group_usage_counters` をインクリメントし、無料枠・有料枠の判定を統一的に行うサービス層を追加。月次キー生成/ローテーションを実装。
+- [x] 課金サイクル連動: Stripe の `billing_cycle_anchor` / `current_period_start` に基づいて利用カウンタのリセットキーを算出し、`group_usage_counters` のキー設計・初期化ジョブ・上限通知判定をサブスク開始日基準に統一（未課金時は暦月運用を維持）。
 - [x] フロー制御: 無料枠超過時は翻訳を中断し課金案内メッセージを返信、支払い後は「利用再開」メッセージを送信する分岐をメッセージ処理に組み込む。
 - [x] 料金支払い確認時の案内文をグループの設定言語すべてへ翻訳・列挙して通知する。
 - [x] 設定/Secrets: Stripe Secret/Webhook Secret/Price ID（月次）を Secrets Manager 連携し、環境変数に反映。

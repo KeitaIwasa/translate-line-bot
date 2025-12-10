@@ -34,13 +34,13 @@ DB更新（サブスク有効） → 翻訳再開
 | current_period_end     | TIMESTAMPTZ | 次請求タイミング                              |
 
 2. `group_usage_counters`
-| 列                 | 型          | 説明               |
-| ----------------- | ---------- | ---------------- |
-| group_id          | TEXT (PK)  |                  |
-| month_key         | VARCHAR(7) | 2025-01 のような年月キー |
-| translation_count | INT        | 今月の翻訳回数          |
-PK: (group_id, month_key)
-→ 月初に自動的に新規レコードを作成(新規Lambda関数で対応)
+| 列                 | 型           | 説明                                   |
+| ----------------- | ----------- | -------------------------------------- |
+| group_id          | TEXT (PK)   |                                        |
+| period_key        | VARCHAR(10) | 課金周期開始日キー（有料: `YYYY-MM-DD` / 無料: `YYYY-MM-01`） |
+| translation_count | INT         | 当周期の翻訳回数                            |
+PK: (group_id, period_key)
+→ サブスク周期（または暦月）ごとに upsert する初期化ジョブで対応
 
 
 ## Stripe Webhook（Lambda別ファンクション）
@@ -91,4 +91,3 @@ MVPは月次プランのみ提供
 - `STRIPE_SECRET_KEY`: Stripe シークレットキー
 - `STRIPE_WEBHOOK_SECRET`: Webhook 署名検証用シークレット
 - `STRIPE_PRICE_MONTHLY_ID`: サブスク用 Price ID（月次のみ提供）
-

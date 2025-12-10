@@ -86,7 +86,11 @@ def _handle_payment_succeeded(invoice: Dict[str, Any]) -> None:
         logger.warning("group_id not found in Stripe metadata", extra={"subscription": subscription_id})
         return
 
+    period_start_ts = subscription.get("current_period_start")
     period_end_ts = subscription.get("current_period_end")
+    period_start = (
+        datetime.fromtimestamp(period_start_ts, tz=timezone.utc) if isinstance(period_start_ts, (int, float)) else None
+    )
     period_end = (
         datetime.fromtimestamp(period_end_ts, tz=timezone.utc) if isinstance(period_end_ts, (int, float)) else None
     )
@@ -95,6 +99,7 @@ def _handle_payment_succeeded(invoice: Dict[str, Any]) -> None:
         stripe_customer_id=customer_id,
         stripe_subscription_id=subscription_id,
         status=subscription.get("status", "active"),
+        current_period_start=period_start,
         current_period_end=period_end,
         enable_translation=True,
     )
@@ -106,7 +111,11 @@ def _handle_subscription_deleted(subscription: Dict[str, Any]) -> None:
     if not group_id:
         logger.warning("group_id missing on subscription.deleted")
         return
+    period_start_ts = subscription.get("current_period_start")
     period_end_ts = subscription.get("current_period_end")
+    period_start = (
+        datetime.fromtimestamp(period_start_ts, tz=timezone.utc) if isinstance(period_start_ts, (int, float)) else None
+    )
     period_end = (
         datetime.fromtimestamp(period_end_ts, tz=timezone.utc) if isinstance(period_end_ts, (int, float)) else None
     )
@@ -115,6 +124,7 @@ def _handle_subscription_deleted(subscription: Dict[str, Any]) -> None:
         stripe_customer_id=subscription.get("customer", ""),
         stripe_subscription_id=subscription.get("id", ""),
         status="canceled",
+        current_period_start=period_start,
         current_period_end=period_end,
         enable_translation=False,
     )
@@ -127,7 +137,11 @@ def _handle_payment_failed(invoice: Dict[str, Any]) -> None:
     if not group_id:
         logger.warning("group_id missing on payment_failed")
         return
+    period_start_ts = subscription.get("current_period_start")
     period_end_ts = subscription.get("current_period_end")
+    period_start = (
+        datetime.fromtimestamp(period_start_ts, tz=timezone.utc) if isinstance(period_start_ts, (int, float)) else None
+    )
     period_end = (
         datetime.fromtimestamp(period_end_ts, tz=timezone.utc) if isinstance(period_end_ts, (int, float)) else None
     )
@@ -136,6 +150,7 @@ def _handle_payment_failed(invoice: Dict[str, Any]) -> None:
         stripe_customer_id=invoice.get("customer", ""),
         stripe_subscription_id=subscription.get("id", subscription_id or ""),
         status="unpaid",
+        current_period_start=period_start,
         current_period_end=period_end,
         enable_translation=False,
     )
@@ -165,7 +180,11 @@ def _handle_checkout_session_completed(session: Dict[str, Any]) -> None:
         logger.warning("group_id missing on checkout.session.completed", extra={"session_id": session_id})
         return
 
+    period_start_ts = subscription.get("current_period_start") if isinstance(subscription, dict) else None
     period_end_ts = subscription.get("current_period_end") if isinstance(subscription, dict) else None
+    period_start = (
+        datetime.fromtimestamp(period_start_ts, tz=timezone.utc) if isinstance(period_start_ts, (int, float)) else None
+    )
     period_end = (
         datetime.fromtimestamp(period_end_ts, tz=timezone.utc) if isinstance(period_end_ts, (int, float)) else None
     )
@@ -175,6 +194,7 @@ def _handle_checkout_session_completed(session: Dict[str, Any]) -> None:
         stripe_customer_id=customer_id,
         stripe_subscription_id=subscription_id,
         status=status or "active",
+        current_period_start=period_start,
         current_period_end=period_end,
         enable_translation=status in {"active", "trialing"},
     )
@@ -196,6 +216,7 @@ def _upsert_subscription(
     stripe_customer_id: str,
     stripe_subscription_id: str,
     status: str,
+    current_period_start: datetime | None,
     current_period_end: datetime | None,
     *,
     enable_translation: bool,
@@ -206,13 +227,14 @@ def _upsert_subscription(
 
     query_subscription = """
         INSERT INTO group_subscriptions (
-            group_id, stripe_customer_id, stripe_subscription_id, status, current_period_end, created_at, updated_at
-        ) VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+            group_id, stripe_customer_id, stripe_subscription_id, status, current_period_start, current_period_end, created_at, updated_at
+        ) VALUES (%s, %s, %s, %s, %s, %s, NOW(), NOW())
         ON CONFLICT (group_id)
         DO UPDATE SET
             stripe_customer_id = EXCLUDED.stripe_customer_id,
             stripe_subscription_id = EXCLUDED.stripe_subscription_id,
             status = EXCLUDED.status,
+            current_period_start = EXCLUDED.current_period_start,
             current_period_end = EXCLUDED.current_period_end,
             updated_at = NOW()
     """
@@ -227,7 +249,14 @@ def _upsert_subscription(
         with conn.cursor() as cur:
             cur.execute(
                 query_subscription,
-                (group_id, stripe_customer_id, stripe_subscription_id, status, current_period_end),
+                (
+                    group_id,
+                    stripe_customer_id,
+                    stripe_subscription_id,
+                    status,
+                    current_period_start,
+                    current_period_end,
+                ),
             )
             cur.execute(query_settings, (group_id, enable_translation))
 

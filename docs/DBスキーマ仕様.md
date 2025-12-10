@@ -139,6 +139,7 @@ CREATE TABLE group_subscriptions (
   stripe_customer_id TEXT NOT NULL,
   stripe_subscription_id TEXT NOT NULL,
   status TEXT NOT NULL,
+  current_period_start TIMESTAMPTZ,
   current_period_end TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -150,24 +151,24 @@ CREATE TABLE group_subscriptions (
 | 列名 | 型 | NOT NULL | デフォルト | 説明 |
 | ---- | --- | -------- | ---------- | ---- |
 | `group_id` | TEXT | ✔ |  | LINE グループ ID |
-| `month_key` | VARCHAR(7) | ✔ |  | `YYYY-MM` 形式の月キー |
-| `translation_count` | INT | ✔ |  | 当月の翻訳実行回数 |
+| `period_key` | VARCHAR(10) | ✔ |  | 課金周期開始日キー（有料: `YYYY-MM-DD` / 無料: `YYYY-MM-01`） |
+| `translation_count` | INT | ✔ |  | 当周期の翻訳実行回数 |
 | `limit_notice_plan` | TEXT |  |  | 上限到達通知を送ったプラン種別（`free` / `pro`）。未送は `NULL` |
 | `created_at` | TIMESTAMPTZ | ✔ | `NOW()` | 作成日時 |
 | `updated_at` | TIMESTAMPTZ | ✔ | `NOW()` | 更新日時 |
 
-- 主キー: `(group_id, month_key)`
+- 主キー: `(group_id, period_key)`
 - `limit_notice_plan` は当月の上限到達通知をプラン別に 1 回に抑制するためのフラグ。Free → Pro へのアップグレード後も再通知できる。
 
 ```sql
 CREATE TABLE group_usage_counters (
   group_id TEXT NOT NULL,
-  month_key VARCHAR(7) NOT NULL,
+  period_key VARCHAR(10) NOT NULL,
   translation_count INT NOT NULL,
   limit_notice_plan TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  PRIMARY KEY (group_id, month_key)
+  PRIMARY KEY (group_id, period_key)
 );
 
 ALTER TABLE group_usage_counters

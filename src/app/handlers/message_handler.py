@@ -7,7 +7,7 @@ import re
 import time
 from functools import partial
 import zlib
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Sequence, Tuple
 from concurrent.futures import ThreadPoolExecutor, Future
 
@@ -432,36 +432,39 @@ class MessageHandler:
             self._send_pause_notice(event)
             return True
 
-        paid = self._is_subscription_active(event.group_id)
+        status, period_start, period_end = getattr(self._repo, "get_subscription_period", lambda *_: (None, None, None))(
+            event.group_id
+        )
+        paid = status in {"active", "trialing"}
         limit = self._pro_quota if paid else self._free_quota
-        month_key = self._current_month_key()
+        period_key = self._current_period_key(paid, period_start, period_end)
         plan_key = "pro" if paid else "free"
-        notice_plan = getattr(self._repo, "get_limit_notice_plan", lambda *_: None)(event.group_id, month_key)
+        notice_plan = getattr(self._repo, "get_limit_notice_plan", lambda *_: None)(event.group_id, period_key)
 
         # Free 上限通知済みかつ未課金の場合は静かにスキップ（メンション無しでここに来る）
         if not paid:
             if notice_plan == "free":
                 logger.info(
-                    "Skipping processing: free plan limit notice already sent this month",
-                    extra={"group_id": event.group_id, "month_key": month_key},
+                    "Skipping processing: free plan limit notice already sent this period",
+                    extra={"group_id": event.group_id, "period_key": period_key},
                 )
                 return True
 
         # すでに上限到達済みの場合はカウントを進めずに終了
-        current_usage = self._repo.get_usage(event.group_id, month_key)
+        current_usage = self._repo.get_usage(event.group_id, period_key)
         if current_usage >= limit:
             if not paid:
                 self._repo.set_translation_enabled(event.group_id, False)
-            self._maybe_send_limit_notice(event, paid, limit, plan_key, month_key)
+            self._maybe_send_limit_notice(event, paid, limit, plan_key, period_key)
             return True
 
         # 利用カウントと課金判定
-        usage_count = self._repo.increment_usage(event.group_id, month_key)
+        usage_count = self._repo.increment_usage(event.group_id, period_key)
         send_notice_after_translation = False
 
         if paid:
             if usage_count > limit:
-                self._maybe_send_limit_notice(event, paid, limit, plan_key, month_key)
+                self._maybe_send_limit_notice(event, paid, limit, plan_key, period_key)
                 return True
             if usage_count == limit:
                 # 8000通目は翻訳してから通知
@@ -469,7 +472,7 @@ class MessageHandler:
         else:
             if usage_count > limit:
                 self._repo.set_translation_enabled(event.group_id, False)
-                self._maybe_send_limit_notice(event, paid, limit, plan_key, month_key)
+                self._maybe_send_limit_notice(event, paid, limit, plan_key, period_key)
                 return True
             if usage_count == limit:
                 # 50通目は翻訳してから通知
@@ -491,7 +494,7 @@ class MessageHandler:
                 notice = self._build_limit_reached_notice_text(event.group_id, paid, limit)
                 setter = getattr(self._repo, "set_limit_notice_plan", None)
                 if setter:
-                    setter(event.group_id, month_key, plan_key)
+                    setter(event.group_id, period_key, plan_key)
                 if event.reply_token:
                     self._line.reply_messages(
                         event.reply_token,
@@ -516,10 +519,10 @@ class MessageHandler:
         paid: bool,
         limit: int,
         plan_key: str,
-        month_key: str,
+        period_key: str,
     ) -> None:
         """プラン別に月1回だけ上限通知を送る。"""
-        previous_plan = getattr(self._repo, "get_limit_notice_plan", lambda *_: None)(event.group_id, month_key)
+        previous_plan = getattr(self._repo, "get_limit_notice_plan", lambda *_: None)(event.group_id, period_key)
         if previous_plan == plan_key:
             # 同一プランで既に通知済み
             return
@@ -528,7 +531,7 @@ class MessageHandler:
 
         setter = getattr(self._repo, "set_limit_notice_plan", None)
         if setter:
-            setter(event.group_id, month_key, plan_key)
+            setter(event.group_id, period_key, plan_key)
 
     def _send_limit_reached_notice(self, event: models.MessageEvent, paid: bool, limit: int) -> None:
         """上限到達/超過時の統一通知。"""
@@ -559,9 +562,12 @@ class MessageHandler:
 
     def _send_pause_notice(self, event: models.MessageEvent) -> None:
         """translation_enabled=False のときに理由別の案内を返す。"""
-        paid = self._is_subscription_active(event.group_id)
+        status, period_start, period_end = getattr(self._repo, "get_subscription_period", lambda *_: (None, None, None))(
+            event.group_id
+        )
+        paid = status in {"active", "trialing"}
         limit = self._pro_quota if paid else self._free_quota
-        usage = self._repo.get_usage(event.group_id, self._current_month_key())
+        usage = self._repo.get_usage(event.group_id, self._current_period_key(paid, period_start, period_end))
 
         # 上限超過が原因で停止している場合
         if usage >= limit:
@@ -638,14 +644,20 @@ class MessageHandler:
             logger.warning("Failed to create checkout session: %s", exc)
             return None
 
-    def _is_subscription_active(self, group_id: str) -> bool:
-        status = self._repo.get_subscription_status(group_id)
-        return status in {"active", "trialing"}
-
-    @staticmethod
-    def _current_month_key() -> str:
+    def _current_period_key(
+        self, paid: bool, period_start: Optional[datetime], period_end: Optional[datetime]
+    ) -> str:
+        """課金周期開始日をキーにする。未課金は暦月1日基準。"""
         now = datetime.now(timezone.utc)
-        return f"{now.year:04d}-{now.month:02d}"
+        if paid:
+            anchor = period_start
+            if not anchor and period_end:
+                # period_start 未保存な環境へのフォールバックとして暫定推計
+                anchor = period_end - timedelta(days=31)
+            if anchor:
+                return anchor.astimezone(timezone.utc).date().isoformat()
+        # Free or anchor不明の場合は暦月の1日をキーにする
+        return f"{now.year:04d}-{now.month:02d}-01"
 
     def _build_usage_response(
         self,

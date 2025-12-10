@@ -1,4 +1,4 @@
-import datetime
+from datetime import datetime, timezone
 
 from src.app.handlers.message_handler import MessageHandler
 from src.domain import models
@@ -65,21 +65,23 @@ class ProQuotaRepo:
         return []
 
     # usage / subscription
-    def get_usage(self, _group_id, _month_key):
+    def get_usage(self, _group_id, _period_key):
         return self.usage
 
-    def get_limit_notice_plan(self, _group_id, _month_key):
+    def get_limit_notice_plan(self, _group_id, _period_key):
         return self.notice_plan
 
-    def increment_usage(self, _group_id, _month_key, increment: int = 1):
+    def increment_usage(self, _group_id, _period_key, increment: int = 1):
         self.usage += increment
         return self.usage
 
-    def set_limit_notice_plan(self, _group_id, _month_key, plan: str):
+    def set_limit_notice_plan(self, _group_id, _period_key, plan: str):
         self.notice_plan = plan
 
-    def get_subscription_status(self, _group_id):
-        return "active" if self.paid else None
+    def get_subscription_period(self, _group_id):
+        if self.paid:
+            return ("active", datetime(2025, 1, 1, tzinfo=timezone.utc), datetime(2025, 2, 1, tzinfo=timezone.utc))
+        return (None, None, None)
 
     def set_translation_enabled(self, _group_id, enabled: bool):
         self.translation_enabled = enabled
@@ -129,7 +131,7 @@ def _build_event(text: str = "hello"):
     return models.MessageEvent(
         event_type="message",
         reply_token="token",
-        timestamp=int(datetime.datetime.now().timestamp() * 1000),
+        timestamp=int(datetime.now(timezone.utc).timestamp() * 1000),
         text=text,
         user_id="user",
         group_id="group",

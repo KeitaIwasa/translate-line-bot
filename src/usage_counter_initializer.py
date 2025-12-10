@@ -18,22 +18,22 @@ def lambda_handler(event: Dict[str, Any], _context: Any):
         logger.error("NEON_DATABASE_URL missing")
         return {"statusCode": 500, "body": json.dumps({"message": "missing database url"})}
 
-    month_key = _current_month_key()
+    period_key = _current_period_key()
     with psycopg.connect(dsn, autocommit=True) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO group_usage_counters (group_id, month_key, translation_count, created_at, updated_at)
+                INSERT INTO group_usage_counters (group_id, period_key, translation_count, created_at, updated_at)
                 SELECT DISTINCT group_id, %s, 0, NOW(), NOW()
                 FROM group_members
-                ON CONFLICT (group_id, month_key) DO NOTHING
+                ON CONFLICT (group_id, period_key) DO NOTHING
                 """,
-                (month_key,),
+                (period_key,),
             )
 
-    return {"statusCode": 200, "body": json.dumps({"status": "ok", "month_key": month_key})}
+    return {"statusCode": 200, "body": json.dumps({"status": "ok", "period_key": period_key})}
 
 
-def _current_month_key() -> str:
+def _current_period_key() -> str:
     now = datetime.now(timezone.utc)
-    return f"{now.year:04d}-{now.month:02d}"
+    return f"{now.year:04d}-{now.month:02d}-01"
