@@ -5,7 +5,8 @@
       heroTitle: "Run multilingual LINE groups stress-free with the Pro plan.",
       heroLead:
         "The Translation AI Bot Pro Plan delivers context-aware translations inside your LINE groups. Use it confidently for work or personal chats without worrying about free-tier limits.",
-      price: "Price: ¥380 / month (tax included) per group",
+      price:
+        "Price: <span class=\"price-amount\"><span class=\"price-currency\">JPY</span><span class=\"price-number\">380</span></span> / month (tax included) per group",
       audience: "Best for: global business teams, international student or friend groups, and cross-cultural communities",
       ctaLabel: "Purchase Pro Plan",
       ctaTerms:
@@ -28,7 +29,7 @@
         {
           item: "Price",
           free: "Free",
-          pro: "¥380 / month (tax included) per group",
+          pro: "JPY 380 / month (tax included) per group",
         },
         {
           item: "Translation volume",
@@ -39,7 +40,7 @@
       pricingTitle: "Pricing & billing conditions",
       pricing: [
         "Plan name: LINE Multilingual Translation AI Bot Pro Plan",
-        "Price: ¥380 / month (tax included) per group",
+        "Price: JPY 380 / month (tax included) per group",
         "Billing: paid by one representative via credit card (auto-renew)",
         "Charge timing: first month is billed at checkout; renews monthly thereafter",
         "Cancellation: mention the bot in your group and send the cancel command anytime; Pro features remain until the paid period ends",
@@ -70,7 +71,8 @@
       heroTitle: "多言語のLINEグループ運営を、Proプランでストレスゼロに。",
       heroLead:
         "「翻訳AIボット Proプラン」は、LINEグループ内のメッセージを文脈を考慮して自動翻訳する有料プランです。無料プランの制限を気にせず、ビジネスでもプライベートでも安心してご利用いただけます。",
-      price: "料金：月額 ¥380（税込） / 1グループ",
+      price:
+        "料金：月額 <span class=\"price-amount\"><span class=\"price-currency\">¥</span><span class=\"price-number\">380</span></span>(税込) / 1グループ",
       audience: "対象：多国籍チームのビジネスチャット、留学生・友人グループ、国際交流コミュニティ など",
       ctaLabel: "Proプランを購入",
       ctaTerms:
@@ -126,7 +128,8 @@
       heroTitle: "用 Pro 方案，無壓力經營多語系 LINE 群組。",
       heroLead:
         "「翻譯 AI Bot Pro 方案」會在 LINE 群組中依據脈絡自動翻譯訊息。免擔心免費額度限制，無論商務或私人聊天都能放心使用。",
-      price: "價格：每組每月 ¥380（含稅）",
+      price:
+        "價格：每組每月 <span class=\"price-amount\"><span class=\"price-currency\">JPY</span><span class=\"price-number\">380</span></span>（含稅）",
       audience: "適用：跨國商務團隊、留學生／朋友群組、國際交流社群等",
       ctaLabel: "購買 Pro 方案",
       ctaTerms:
@@ -145,13 +148,13 @@
       compareFree: "Free 方案",
       comparePro: "Pro 方案",
       comparison: [
-        { item: "價格", free: "免費", pro: "每組每月 ¥380（含稅）" },
+        { item: "價格", free: "免費", pro: "每組每月 JPY 380（含稅）" },
         { item: "翻譯量", free: "每月 50 則訊息", pro: "每月 8,000 則訊息" },
       ],
       pricingTitle: "價格與課費條件",
       pricing: [
         "方案名稱：LINE 多語翻譯 AI Bot Pro 方案",
-        "價格：每組每月 ¥380（含稅）",
+        "價格：每組每月 JPY 380（含稅）",
         "付款方式：由一位代表以信用卡付款（自動續訂）",
         "收費時間：首次購買即收取一個月費用，其後每月自動續訂",
         "解約：在群組中標記機器人並傳送解約指令即可，已付費期間結束前皆可繼續使用",
@@ -182,7 +185,8 @@
       heroTitle: "ดูแลงานแปลในกลุ่ม LINE หลายภาษาง่าย ๆ ด้วย Pro Plan",
       heroLead:
         "แปลข้อความในกลุ่ม LINE อย่างเข้าใจบริบทด้วย Translation AI Bot Pro Plan ใช้งานได้ทั้งธุรกิจและส่วนตัวโดยไม่ต้องกังวลขีดจำกัดแบบฟรี",
-      price: "ราคา: ¥380 ต่อเดือน (รวมภาษี) ต่อ 1 กลุ่ม",
+      price:
+        "ราคา: <span class=\"price-amount\"><span class=\"price-currency\">JPY</span><span class=\"price-number\">380</span></span> ต่อเดือน (รวมภาษี) ต่อ 1 กลุ่ม",
       audience: "เหมาะสำหรับ: ทีมธุรกิจหลายชาติ กลุ่มเพื่อน/นักศึกษาต่างชาติ และคอมมูนิตี้นานาชาติ",
       ctaLabel: "ซื้อ Pro Plan",
       ctaTerms:
@@ -201,13 +205,13 @@
       compareFree: "Free",
       comparePro: "Pro",
       comparison: [
-        { item: "ราคา", free: "ฟรี", pro: "¥380 ต่อเดือน/กลุ่ม (รวมภาษี)" },
+        { item: "ราคา", free: "ฟรี", pro: "JPY 380 ต่อเดือน/กลุ่ม (รวมภาษี)" },
         { item: "ปริมาณการแปล", free: "50 ข้อความ/เดือน", pro: "8,000 ข้อความ/เดือน" },
       ],
       pricingTitle: "ราคาและเงื่อนไขการเรียกเก็บเงิน",
       pricing: [
         "ชื่อแพ็กเกจ: LINE Multilingual Translation AI Bot Pro Plan",
-        "ราคา: ¥380 ต่อเดือน (รวมภาษี) ต่อ 1 กลุ่ม",
+        "ราคา: JPY 380 ต่อเดือน (รวมภาษี) ต่อ 1 กลุ่ม",
         "การชำระเงิน: ผู้แทน 1 คนจ่ายด้วยบัตรเครดิต (ต่ออายุอัตโนมัติ)",
         "รอบบิล: ชำระเดือนแรกตอนซื้อ จากนั้นตัดบัตรอัตโนมัติทุกเดือน",
         "ยกเลิก: แท็กบอตในกลุ่มแล้วส่งคำสั่งยกเลิกได้ตลอด ใช้ Pro ต่อได้จนจบรอบที่ชำระแล้ว",
@@ -260,7 +264,19 @@
     notesTerms: document.getElementById("notesTerms"),
   };
 
-  const langButtons = Array.from(document.querySelectorAll(".lang-btn"));
+  const langSelect = document.getElementById("langSelect");
+  const flagPaths = {
+    ja: "./assets/flags/jp.svg",
+    en: "./assets/flags/gb.svg",
+    "zh-TW": "./assets/flags/tw.svg",
+    th: "./assets/flags/th.svg",
+  };
+
+  let customSelectEl;
+  let customOptionsEl;
+  let customTriggerEl;
+  let customTriggerFlagEl;
+  let customTriggerTextEl;
 
   const params = new URLSearchParams(window.location.search);
   const checkoutId = params.get("session_id") || params.get("sessionId");
@@ -297,6 +313,97 @@
     return "en";
   }
 
+  function toggleOptions(forceOpen) {
+    if (!customSelectEl || !customTriggerEl || !customOptionsEl) return;
+    const willOpen =
+      typeof forceOpen === "boolean"
+        ? forceOpen
+        : !customSelectEl.classList.contains("open");
+    customSelectEl.classList.toggle("open", willOpen);
+    customTriggerEl.setAttribute("aria-expanded", String(willOpen));
+  }
+
+  function updateCustomSelected(lang) {
+    if (!customTriggerEl || !customTriggerFlagEl || !customTriggerTextEl) return;
+    const selectedOption =
+      Array.from(langSelect?.options || []).find((opt) => opt.value === lang) ||
+      langSelect?.options?.[0];
+    const labelText = selectedOption?.textContent || "Language";
+    customTriggerFlagEl.src = flagPaths[lang] || flagPaths.ja;
+    customTriggerTextEl.textContent = labelText;
+
+    if (customOptionsEl) {
+      Array.from(customOptionsEl.children).forEach((li) => {
+        const isActive = li.dataset.value === lang;
+        li.classList.toggle("active", isActive);
+        li.setAttribute("aria-selected", String(isActive));
+      });
+    }
+  }
+
+  function buildCustomSelect() {
+    if (!langSelect) return;
+
+    langSelect.style.display = "none";
+
+    customSelectEl = document.createElement("div");
+    customSelectEl.className = "lang-select-custom";
+
+    customTriggerEl = document.createElement("button");
+    customTriggerEl.type = "button";
+    customTriggerEl.className = "lang-select-trigger";
+    customTriggerEl.setAttribute("aria-haspopup", "listbox");
+    customTriggerEl.setAttribute("aria-expanded", "false");
+
+    customTriggerFlagEl = document.createElement("img");
+    customTriggerFlagEl.className = "lang-flag";
+    customTriggerFlagEl.alt = "";
+
+    customTriggerTextEl = document.createElement("span");
+    customTriggerTextEl.className = "lang-selected-label";
+
+    const arrowEl = document.createElement("span");
+    arrowEl.className = "lang-select-arrow";
+    arrowEl.textContent = "▾";
+
+    customTriggerEl.append(customTriggerFlagEl, customTriggerTextEl, arrowEl);
+
+    customOptionsEl = document.createElement("ul");
+    customOptionsEl.className = "lang-select-options";
+    customOptionsEl.setAttribute("role", "listbox");
+
+    Array.from(langSelect.options).forEach((opt) => {
+      const li = document.createElement("li");
+      li.className = "lang-select-option";
+      li.dataset.value = opt.value;
+      li.setAttribute("role", "option");
+
+      const flagImg = document.createElement("img");
+      flagImg.className = "lang-flag";
+      flagImg.alt = "";
+      flagImg.src = flagPaths[opt.value] || flagPaths.ja;
+
+      const text = document.createElement("span");
+      text.textContent = opt.textContent;
+
+      li.append(flagImg, text);
+      li.addEventListener("click", () => {
+        applyLang(opt.value);
+        toggleOptions(false);
+      });
+
+      customOptionsEl.appendChild(li);
+    });
+
+    customSelectEl.append(customTriggerEl, customOptionsEl);
+    langSelect.insertAdjacentElement("afterend", customSelectEl);
+
+    customTriggerEl.addEventListener("click", () => toggleOptions());
+    document.addEventListener("click", (e) => {
+      if (!customSelectEl.contains(e.target)) toggleOptions(false);
+    });
+  }
+
   function applyLang(lang) {
     const t = translations[lang] || translations.ja;
     document.documentElement.lang = lang;
@@ -304,7 +411,7 @@
     elements.eyebrow.textContent = t.eyebrow;
     elements.heroTitle.textContent = t.heroTitle;
     elements.heroLead.textContent = t.heroLead;
-    elements.price.textContent = t.price;
+    elements.price.innerHTML = t.price;
     elements.audience.textContent = t.audience;
     elements.ctaButton.textContent = t.ctaLabel;
     elements.ctaTerms.innerHTML = t.ctaTerms;
@@ -329,9 +436,14 @@
     setList("notesList", t.notes);
     elements.notesTerms.innerHTML = t.notesTerms;
 
-    langButtons.forEach((btn) => {
-      btn.classList.toggle("active", btn.dataset.lang === lang);
-    });
+    if (langSelect) {
+      langSelect.value = lang;
+      const flagUrl = flagPaths[lang] || flagPaths.ja;
+      const cssUrl = `url("${flagUrl}")`;
+      langSelect.style.setProperty("--flag-image", cssUrl);
+    }
+
+    updateCustomSelected(lang);
   }
 
   function initLanguage() {
@@ -354,9 +466,10 @@
     }
   }
 
-  langButtons.forEach((btn) => {
-    btn.addEventListener("click", () => applyLang(btn.dataset.lang));
-  });
+  if (langSelect) {
+    buildCustomSelect();
+    langSelect.addEventListener("change", (e) => applyLang(e.target.value));
+  }
 
   initLanguage();
   initCta();

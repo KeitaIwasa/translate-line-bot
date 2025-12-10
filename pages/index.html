@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>LINE Multilingual Translation Bot | Pro Plan</title>
+  <title>KOTORI - AI翻訳/การแปล | Pro Plan</title>
+  <link rel="icon" href="./favicon.ico" sizes="any" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet" />
@@ -13,22 +14,25 @@
   <div class="page-shell">
     <header class="top-bar">
       <div class="brand">
-        <span class="brand-mark">AI</span>
+        <span class="brand-mark">KO</span>
         <div class="brand-text">
-          <div class="brand-name">LINE Translation Bot</div>
-          <div class="brand-sub">Multilingual AI Assistant</div>
+          <div class="brand-name">KOTORI</div>
+          <div class="brand-sub">LINE Translation Bot</div>
         </div>
       </div>
-      <nav class="lang-picker" aria-label="Language selector">
-        <button class="lang-btn" data-lang="ja">日本語</button>
-        <button class="lang-btn" data-lang="en">English</button>
-        <button class="lang-btn" data-lang="zh-TW">中文（台灣）</button>
-        <button class="lang-btn" data-lang="th">ไทย</button>
-      </nav>
+      <div class="lang-picker" aria-label="Language selector">
+        <select id="langSelect" class="lang-select">
+          <option value="ja">日本語</option>
+          <option value="en">English</option>
+          <option value="zh-TW">中文（台灣）</option>
+          <option value="th">ไทย</option>
+        </select>
+      </div>
     </header>
 
     <main>
       <section class="hero">
+        <p class="hero-wordmark">KOTORI</p>
         <p class="eyebrow" data-i18n="eyebrow">Pro Plan</p>
         <h1 class="hero-title" data-i18n="heroTitle">多言語のLINEグループ運営を、Proプランでストレスゼロに。</h1>
         <p class="hero-lead" data-i18n="heroLead">
@@ -37,7 +41,14 @@
         </p>
 
         <div class="price-card">
-          <p class="price" data-i18n="price">料金：月額 ¥380（税込） / 1グループ</p>
+          <p class="price" data-i18n="price">
+            料金：月額
+            <span class="price-amount">
+              <span class="price-currency">¥</span>
+              <span class="price-number">380</span>
+            </span>
+            (税込) / 1グループ
+          </p>
           <p class="audience" data-i18n="audience">対象：多国籍チームのビジネスチャット、留学生・友人グループ、国際交流コミュニティ など</p>
         </div>
 
