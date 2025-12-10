@@ -3,7 +3,7 @@ import os
 import pytest
 from dotenv import load_dotenv
 
-from src.app.handlers.message_handler import MessageHandler, UNKNOWN_INSTRUCTION_JA
+from src.app.handlers.message_handler import MessageHandler, UNKNOWN_INSTRUCTION_BASE
 from src.domain import models
 from src.domain.services.interface_translation_service import InterfaceTranslationService
 from src.domain.services.language_detection_service import LanguageDetectionService
@@ -48,9 +48,8 @@ class CollapsingTranslationService:
             models.TranslationResult(
                 lang=request.candidate_languages[0],
                 text=(
-                    "If you want to interact with this bot by mentioning it, "
-                    "please mention it again and instruct one of the following: "
-                    "- Change language settings - Usage instructions - Stop translation"
+                    "To interact with this bot, please mention it again and provide one of the following commands: "
+                    "- Change language settings - How to use - Stop translation"
                 ),
             )
         ]
@@ -156,9 +155,8 @@ def test_unknown_instruction_translated_to_detected_language(gemini_adapter):
         pytest.skip("Gemini rate limit hit; skipping live translation test")
 
     assert result
-    assert result != UNKNOWN_INSTRUCTION_JA
-    # Heuristic: translated text should contain ASCII letters predominantly (avoid original Japanese)
-    assert any(ch.isascii() and ch.isalpha() for ch in result)
+    assert result.startswith("To interact with this bot")
+    assert "Change language settings" in result
 
 
 def test_unknown_instruction_keeps_bullet_newlines():
@@ -181,7 +179,7 @@ def test_unknown_instruction_keeps_bullet_newlines():
 
     result = handler._build_unknown_response("en")
 
-    assert result.split("\n- ")[0].strip().endswith("following:")
+    assert result.split("\n- ")[0].strip().endswith("commands:")
     assert result.count("\n- ") == 3
 
 
@@ -230,4 +228,4 @@ def test_language_settings_invalid_operation_returns_unknown_instruction():
 
     handler._handle_command(event, "unsupported")
 
-    assert line_client.last_text == UNKNOWN_INSTRUCTION_JA
+    assert line_client.last_text == UNKNOWN_INSTRUCTION_BASE

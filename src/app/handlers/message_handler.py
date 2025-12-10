@@ -48,10 +48,11 @@ logger = logging.getLogger(__name__)
 RATE_LIMIT_MESSAGE = "You have reached the rate limit. Please try again later."
 _last_rate_limit_message: Dict[str, str] = {}
 
+# メンション機能一覧の案内文言
 USAGE_MESSAGE_JA = "言語設定をしたあと、任意の言語でメッセージでやり取りをしてください。その都度このボットが各言語に翻訳した文章を送信します。"
-UNKNOWN_INSTRUCTION_JA = (
-    "このボットをメンションして操作を行いたい場合は、再びメンションして、以下のうちのいずれかを指示してください。\n"
-    "- 言語設定の変更\n- 使い方説明\n- 翻訳停止"
+UNKNOWN_INSTRUCTION_BASE = (
+    "To interact with this bot, please mention it again and provide one of the following commands:\n"
+    "- Change language settings\n- How to use\n- Stop translation\n- Subscription management"
 )
 
 GROUP_PROMPT_MESSAGE = (
@@ -709,15 +710,15 @@ class MessageHandler:
     def _build_unknown_response(self, instruction_lang: str) -> str:
         translations = self._invoke_translation_with_retry(
             sender_name="System",
-            message_text=UNKNOWN_INSTRUCTION_JA,
+            message_text=UNKNOWN_INSTRUCTION_BASE,
             timestamp=datetime.now(timezone.utc),
             context=[],
             candidate_languages=[instruction_lang] if instruction_lang else [],
         )
         if not translations:
-            return self._normalize_bullet_newlines(UNKNOWN_INSTRUCTION_JA)
-        text = strip_source_echo(UNKNOWN_INSTRUCTION_JA, translations[0].text)
-        normalized = self._normalize_bullet_newlines(text or UNKNOWN_INSTRUCTION_JA)
+            return self._normalize_bullet_newlines(UNKNOWN_INSTRUCTION_BASE)
+        text = strip_source_echo(UNKNOWN_INSTRUCTION_BASE, translations[0].text)
+        normalized = self._normalize_bullet_newlines(text or UNKNOWN_INSTRUCTION_BASE)
         return normalized
 
     def _normalize_bullet_newlines(self, text: str) -> str:
