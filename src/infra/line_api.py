@@ -72,6 +72,25 @@ class LineApiAdapter(LinePort):
         data = response.json()
         return data.get("displayName")
 
+    def get_group_name(self, group_id: str) -> Optional[str]:
+        """LINE グループサマリからグループ名を取得する。"""
+        url = f"{self.BASE_URL}/v2/bot/group/{group_id}/summary"
+        response = self._session.get(url, timeout=5)
+        if response.status_code == 404:
+            return None
+        if not response.ok:
+            logger.warning(
+                "Failed to fetch group summary",
+                extra={"status": response.status_code, "body": response.text},
+            )
+            return None
+        try:
+            data = response.json()
+        except Exception:  # pylint: disable=broad-except
+            logger.warning("Group summary response is not JSON", extra={"status": response.status_code})
+            return None
+        return data.get("groupName") or data.get("displayName")
+
     @staticmethod
     def _sanitize_message(message):
         if message.get("type") == "text" and message.get("text"):

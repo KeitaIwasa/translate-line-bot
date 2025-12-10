@@ -239,6 +239,26 @@ class NeonMessageRepository(MessageRepositoryPort):
             )
             return
 
+    def upsert_group_name(self, group_id: str, group_name: str) -> None:
+        """グループ名を保存する。既存の translation_enabled 値は維持する。"""
+        if not group_name:
+            return
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO group_settings (group_id, translation_enabled, group_name, updated_at)
+                    VALUES (%s, TRUE, %s, NOW())
+                    ON CONFLICT (group_id)
+                    DO UPDATE SET group_name = EXCLUDED.group_name, updated_at = NOW()
+                    """,
+                    (group_id, group_name),
+                )
+        except errors.UndefinedColumn:
+            logger.warning("group_name column missing; skip persisting group name", extra={"group_id": group_id})
+        except errors.UndefinedTable:
+            logger.warning("group_settings table missing; skip persisting group name", extra={"group_id": group_id})
+
     # === Stripe usage/subscription helpers ===
     def increment_usage(self, group_id: str, period_key: str, increment: int = 1) -> int:
         query = sql.SQL(
