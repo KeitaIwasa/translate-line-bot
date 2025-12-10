@@ -30,6 +30,16 @@
 - `pytest` を実行して全テストが通ることを確認する。
 - ステージング環境にデプロイし、グループからボットを削除してサブスクリプションが自動キャンセルされることを確認する。
 
+# Proプラン申し込み導線改善 ToDo
+
+- 背景: Stripe Checkout へ直接遷移していた導線を、事前案内ページ経由に変更し、安全に決済へ進めるようにする。
+
+## 対応済み 2025-12-10
+- `pages/index.html` に多言語対応（日本語・英語・繁体字・タイ語）の Pro 申込ページを新設。
+- クエリの `session_id`／`sessionId` がある場合のみ「Proプランを購入」ボタンを表示し、`/checkout` へ遷移する短縮リンクを付与。
+- パラメータ欠如時はボタンを隠し、正しい招待リンク経由でのアクセスを促す文言を表示。
+- 規約リンク（利用規約・プライバシーポリシー）と料金表、Free/Pro 比較表、利用開始フロー、注意事項をページに集約。
+
 # Stripe 解約イベント反映（補足メモ）
 - Stripe 側でユーザーがサブスクリプションをキャンセルした場合、`customer.subscription.deleted` Webhook を `src/stripe_webhook_handler.py` で受信し、`group_subscriptions` に `status=canceled` を upsert、`group_settings.translation_enabled` を `False` に更新している。`metadata.group_id` が必須なので、Checkout セッション作成時に `group_id` を metadata に含めること。
 
