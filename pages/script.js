@@ -264,7 +264,10 @@
 
   const params = new URLSearchParams(window.location.search);
   const checkoutId = params.get("session_id") || params.get("sessionId");
-  const checkoutUrl = checkoutId ? `/checkout?session_id=${encodeURIComponent(checkoutId)}` : null;
+  const checkoutUrlParam = params.get("checkout_url");
+  const checkoutUrl =
+    checkoutUrlParam ||
+    (checkoutId ? `/checkout?session_id=${encodeURIComponent(checkoutId)}` : null);
 
   function setList(id, items) {
     const el = elements[id];
