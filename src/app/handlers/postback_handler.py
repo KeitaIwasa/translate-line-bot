@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 from typing import Dict, List, Sequence, Tuple
-from datetime import datetime, timezone
 
 from ...domain import models
 from ...domain.ports import LinePort, MessageRepositoryPort
@@ -11,7 +10,7 @@ from ...domain.services.subscription_service import SubscriptionService
 from ...domain.services.language_settings_service import LanguageSettingsService
 from ...presentation.reply_formatter import strip_source_echo
 from ..subscription_texts import SUBS_CANCEL_CONFIRM_TEXT, SUBS_CANCEL_DONE_TEXT, SUBS_CANCEL_FAIL_TEXT, SUBS_NOT_PRO_TEXT
-from ..subscription_postback import decode_postback_payload, encode_subscription_payload
+from ..subscription_postback import decode_postback_payload
 from ..subscription_templates import build_subscription_cancel_confirm
 
 logger = logging.getLogger(__name__)
