@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+import logging
 
 from ..ports import UsageRepositoryPort
 
@@ -150,3 +151,24 @@ class QuotaService:
             period_key=period_key,
             plan_key=plan_key,
         )
+
+    def rollback(self, *, group_id: str, period_key: str, increment: int = 1) -> None:
+        """翻訳失敗時に利用カウントを巻き戻す。
+
+        `increment_usage` に負数を渡してカウントを調整する。永続化に失敗した場合は警告ログのみ出し、処理は続行する。
+        """
+
+        if increment <= 0:
+            # 増分指定が不正な場合は何もしない
+            return
+
+        try:
+            self._repo.increment_usage(group_id, period_key, -increment)
+        except Exception:
+            logger.warning(
+                "Usage rollback failed | group=%s period=%s",
+                group_id,
+                period_key,
+                exc_info=True,
+            )
+logger = logging.getLogger(__name__)

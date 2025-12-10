@@ -72,18 +72,28 @@ class TranslationFlowService:
         if not decision.allowed:
             return TranslationFlowResult(decision=decision, reply_text=None)
 
+        increment = 1
+        group_id = event.group_id or ""
+
         context_messages = self._repo.fetch_recent_messages(event.group_id, self._max_context)
         timestamp = datetime.fromtimestamp(event.timestamp / 1000, tz=timezone.utc)
-
-        translations = self._invoke_translation_with_retry(
-            sender_name=sender_name,
-            message_text=event.text,
-            timestamp=timestamp,
-            context=context_messages,
-            candidate_languages=candidate_languages,
-        )
+        try:
+            translations = self._invoke_translation_with_retry(
+                sender_name=sender_name,
+                message_text=event.text,
+                timestamp=timestamp,
+                context=context_messages,
+                candidate_languages=candidate_languages,
+            )
+        except (GeminiRateLimitError, requests.exceptions.Timeout):
+            self._rollback_usage(group_id=group_id, period_key=decision.period_key, increment=increment)
+            raise
+        except Exception:
+            self._rollback_usage(group_id=group_id, period_key=decision.period_key, increment=increment)
+            raise
 
         if not translations:
+            self._rollback_usage(group_id=group_id, period_key=decision.period_key, increment=increment)
             logger.warning(
                 "Translation returned no candidates | group=%s user=%s languages=%s plan=%s",
                 event.group_id,
@@ -95,6 +105,13 @@ class TranslationFlowService:
 
         reply_text = build_translation_reply(event.text, translations)
         return TranslationFlowResult(decision=decision, reply_text=reply_text)
+
+    def _rollback_usage(self, *, group_id: str, period_key: str, increment: int) -> None:
+        """失敗時にクオータを元に戻すヘルパー。"""
+
+        if increment <= 0:
+            return
+        self._quota.rollback(group_id=group_id, period_key=period_key, increment=increment)
 
     # --- internal helpers ---
     def _invoke_translation_with_retry(
