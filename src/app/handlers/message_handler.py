@@ -31,6 +31,7 @@ from ...presentation.reply_formatter import (
 from ..subscription_texts import (
     SUBS_ALREADY_PRO_TEXT,
     SUBS_CANCEL_CONFIRM_TEXT,
+    SUBS_NOT_PRO_TEXT,
     SUBS_UPGRADE_LINK_FAIL,
 )
 from ..subscription_templates import (
@@ -454,6 +455,7 @@ class MessageHandler:
             portal_url=portal_url,
             upgrade_url=upgrade_url,
             include_upgrade=not paid,
+            include_cancel=paid,
             translate=lambda text: self._translate_template(text, instruction_lang, force=True),
             truncate=self._truncate,
             normalize_text=self._normalize_template_text,
@@ -473,8 +475,9 @@ class MessageHandler:
         customer_id, subscription_id, status = getattr(self._repo, "get_subscription_detail", lambda *_: (None, None, None))(
             event.group_id
         )
-        if not subscription_id or not customer_id:
-            message = self._translate_template("No active subscription found for this group.", instruction_lang, force=True)
+        active = status in {"active", "trialing"}
+        if not subscription_id or not customer_id or not active:
+            message = self._translate_interface_single(SUBS_NOT_PRO_TEXT, instruction_lang, event.group_id)
             if event.reply_token and message:
                 self._line.reply_text(event.reply_token, message[:5000])
             return True
@@ -732,6 +735,39 @@ class MessageHandler:
         text = strip_source_echo(UNKNOWN_INSTRUCTION_BASE, translations[0].text)
         normalized = self._normalize_bullet_newlines(text or UNKNOWN_INSTRUCTION_BASE)
         return normalized
+
+    def _translate_interface_single(self, base_text: str, instruction_lang: str, group_id: str) -> str:
+        """インターフェース文言を 1 言語で返す。instruction_lang が無い場合はグループの主要言語を使用。"""
+
+        # instruction_lang 優先
+        if instruction_lang and self._interface_translation:
+            try:
+                translations = self._interface_translation.translate(base_text, [instruction_lang])
+                if translations:
+                    cleaned = strip_source_echo(base_text, translations[0].text)
+                    if cleaned or translations[0].text:
+                        return cleaned or translations[0].text or base_text
+            except Exception:  # pylint: disable=broad-except
+                logger.warning("translate_interface_single failed", exc_info=True)
+
+        # グループ主要言語へフォールバック
+        languages = getattr(self._repo, "fetch_group_languages", lambda *_: [])(group_id)
+        primary = None
+        for lang in languages:
+            if lang and not lang.lower().startswith("en"):
+                primary = lang
+                break
+
+        if primary and self._interface_translation:
+            try:
+                translations = self._interface_translation.translate(base_text, [primary])
+                if translations:
+                    cleaned = strip_source_echo(base_text, translations[0].text)
+                    return cleaned or translations[0].text or base_text
+            except Exception:  # pylint: disable=broad-except
+                logger.warning("translate_interface_single fallback failed", exc_info=True)
+
+        return base_text
 
     def _normalize_bullet_newlines(self, text: str) -> str:
         """箇条書きのハイフンの前に改行を強制して読みやすくする。"""

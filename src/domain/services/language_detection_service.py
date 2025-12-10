@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from langdetect import LangDetectException, detect
+from langdetect import LangDetectException, detect, DetectorFactory
+
+# 乱数シードを固定して言語判定結果のブレを防ぐ
+DetectorFactory.seed = 0
 
 
 class LanguageDetectionService:

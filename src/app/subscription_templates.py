@@ -27,6 +27,7 @@ def build_subscription_menu_message(
     portal_url: Optional[str],
     upgrade_url: Optional[str],
     include_upgrade: bool,
+    include_cancel: bool,
     translate: TranslateFn,
     truncate: TruncateFn,
     normalize_text: NormalizeFn,
@@ -43,9 +44,13 @@ def build_subscription_menu_message(
         label = translate(SUBS_VIEW_LABEL) or SUBS_VIEW_LABEL
         actions.append({"type": "uri", "label": truncate(label, 20), "uri": portal_url})
 
-    if status:
+    if include_cancel:
         label = translate(SUBS_CANCEL_LABEL) or SUBS_CANCEL_LABEL
-        payload = encode_subscription_payload({"kind": "cancel", "group_id": group_id})
+        payload = encode_subscription_payload({
+            "kind": "cancel",
+            "group_id": group_id,
+            "instruction_lang": instruction_lang,
+        })
         actions.append({"type": "postback", "label": truncate(label, 20), "data": payload})
 
     if include_upgrade and upgrade_url:

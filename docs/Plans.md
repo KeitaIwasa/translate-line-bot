@@ -29,3 +29,17 @@
 ## リリース手順
 - `pytest` を実行して全テストが通ることを確認する。
 - ステージング環境にデプロイし、グループからボットを削除してサブスクリプションが自動キャンセルされることを確認する。
+
+# Stripe 解約イベント反映（補足メモ）
+- Stripe 側でユーザーがサブスクリプションをキャンセルした場合、`customer.subscription.deleted` Webhook を `src/stripe_webhook_handler.py` で受信し、`group_subscriptions` に `status=canceled` を upsert、`group_settings.translation_enabled` を `False` に更新している。`metadata.group_id` が必須なので、Checkout セッション作成時に `group_id` を metadata に含めること。
+
+# サブスク解約済みの再解約リクエスト対応 ToDo
+
+- 解約済みや未加入状態ではキャンセル確認テンプレートを出さず、プロ未加入メッセージを返す（ボタンテンプレートと同じ言語で返信する）。
+- Postback の payload に instruction_lang を含め、応答メッセージの言語選択に利用する。
+- PostbackHandler に単一言語翻訳ヘルパーを追加し、テストで挙動を確認する。
+
+## 対応済み 2025-12-10
+- 解約済みや未加入状態でサブスク解約ボタン/メンションを受けた場合、キャンセル確認テンプレートを出さずプロ未加入メッセージを返すように変更（ボタン言語を優先し、なければグループ主要言語で返信）。
+- langdetect の乱数シード固定で検出結果のブレを防止。
+- サブスク未加入の場合、メニューから「Cancel subscription」ボタンを非表示にするよう調整。

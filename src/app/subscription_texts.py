@@ -8,3 +8,4 @@ SUBS_UPGRADE_LINK_FAIL = "Unable to generate an upgrade link right now. Please t
 SUBS_CANCEL_CONFIRM_TEXT = "Are you sure you want to cancel your subscription? It will remain active until the end of the current period."
 SUBS_CANCEL_DONE_TEXT = "Your subscription has been scheduled to cancel at the end of the current period."
 SUBS_CANCEL_FAIL_TEXT = "Failed to cancel the subscription. Please try again later."
+SUBS_NOT_PRO_TEXT = "You are not on the Pro plan."
