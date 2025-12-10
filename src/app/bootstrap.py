@@ -47,6 +47,15 @@ def build_dispatcher() -> Dispatcher:
     )
     db_client = get_client(settings.neon_database_url)
     repo = NeonMessageRepository(db_client, max_group_languages=settings.max_group_languages)
+    # サブスク関連の共通サービス
+    from ..domain.services.subscription_service import SubscriptionService
+
+    subscription_service = SubscriptionService(
+        repo,
+        stripe_secret_key=settings.stripe_secret_key,
+        stripe_price_monthly_id=settings.stripe_price_monthly_id,
+        checkout_base_url=settings.public_api_base_url,
+    )
 
     message_handler = MessageHandler(
         line_client=line_client,
@@ -65,12 +74,14 @@ def build_dispatcher() -> Dispatcher:
         free_quota_per_month=settings.free_quota_per_month,
         pro_quota_per_month=settings.pro_quota_per_month,
         checkout_base_url=settings.public_api_base_url,
+        subscription_service=subscription_service,
     )
     postback_handler = PostbackHandler(
         line_client,
         repo,
         max_group_languages=settings.max_group_languages,
         interface_translation=interface_translation,
+        subscription_service=subscription_service,
     )
     join_handler = JoinHandler(line_client, repo)
     member_joined_handler = MemberJoinedHandler(line_client, repo)

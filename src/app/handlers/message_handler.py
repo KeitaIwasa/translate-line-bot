@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import base64
-import json
 import logging
+import json
+import base64
+import zlib
 import re
 import time
 from functools import partial
-import zlib
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Sequence, Tuple
 from concurrent.futures import ThreadPoolExecutor, Future
@@ -29,6 +29,16 @@ from ...presentation.reply_formatter import (
     build_translation_reply,
     strip_source_echo,
 )
+from ..subscription_texts import (
+    SUBS_ALREADY_PRO_TEXT,
+    SUBS_CANCEL_CONFIRM_TEXT,
+    SUBS_UPGRADE_LINK_FAIL,
+)
+from ..subscription_templates import (
+    build_subscription_cancel_confirm,
+    build_subscription_menu_message,
+)
+from ...domain.services.subscription_service import SubscriptionService
 from .postback_handler import _build_cancel_message, _build_completion_message
 
 logger = logging.getLogger(__name__)
@@ -81,6 +91,7 @@ class MessageHandler:
         free_quota_per_month: int = 50,
         pro_quota_per_month: int = 8000,
         checkout_base_url: str = "",
+        subscription_service: SubscriptionService | None = None,
         executor: ThreadPoolExecutor | None = None,
     ) -> None:
         self._line = line_client
@@ -99,6 +110,12 @@ class MessageHandler:
         self._free_quota = free_quota_per_month
         self._pro_quota = pro_quota_per_month
         self._checkout_base_url = checkout_base_url.rstrip("/") if checkout_base_url else ""
+        self._subscription_service = subscription_service or SubscriptionService(
+            repo,
+            stripe_secret_key,
+            stripe_price_monthly_id,
+            checkout_base_url,
+        )
         self._executor = executor or ThreadPoolExecutor(max_workers=4)
 
     def handle(self, event: models.MessageEvent) -> None:
@@ -332,6 +349,15 @@ class MessageHandler:
                 self._line.reply_text(event.reply_token, ack[:5000])
             return True
 
+        if action == "subscription_menu":
+            return self._handle_subscription_menu(event, instruction_lang or decision.instruction_language)
+
+        if action == "subscription_cancel":
+            return self._handle_subscription_cancel(event, instruction_lang or decision.instruction_language)
+
+        if action == "subscription_upgrade":
+            return self._handle_subscription_upgrade(event, instruction_lang or decision.instruction_language)
+
         return self._respond_unknown_instruction(event, instruction_lang or decision.instruction_language, command_text)
 
     def _handle_language_settings(
@@ -513,6 +539,84 @@ class MessageHandler:
 
         return True
 
+    # --- subscription helpers ---
+    def _handle_subscription_menu(self, event: models.MessageEvent, instruction_lang: str) -> bool:
+        status, _period_start, period_end = getattr(self._repo, "get_subscription_period", lambda *_: (None, None, None))(
+            event.group_id
+        )
+        paid = status in {"active", "trialing"}
+
+        portal_url = self._subscription_service.create_portal_url(event.group_id)
+        upgrade_url = None if paid else self._subscription_service.create_checkout_url(event.group_id)
+
+        message = build_subscription_menu_message(
+            group_id=event.group_id,
+            instruction_lang=instruction_lang,
+            status=status,
+            period_end=period_end,
+            portal_url=portal_url,
+            upgrade_url=upgrade_url,
+            include_upgrade=not paid,
+            translate=lambda text: self._translate_template(text, instruction_lang, force=True),
+            truncate=self._truncate,
+            normalize_text=self._normalize_template_text,
+        )
+
+        if not message:
+            fallback = self._translate_template("Subscription status is unavailable right now.", instruction_lang, force=True)
+            if event.reply_token and fallback:
+                self._line.reply_text(event.reply_token, fallback[:5000])
+            return True
+
+        if event.reply_token:
+            self._line.reply_messages(event.reply_token, [message])
+        return True
+
+    def _handle_subscription_cancel(self, event: models.MessageEvent, instruction_lang: str) -> bool:
+        customer_id, subscription_id, status = getattr(self._repo, "get_subscription_detail", lambda *_: (None, None, None))(
+            event.group_id
+        )
+        if not subscription_id or not customer_id:
+            message = self._translate_template("No active subscription found for this group.", instruction_lang, force=True)
+            if event.reply_token and message:
+                self._line.reply_text(event.reply_token, message[:5000])
+            return True
+
+        confirm = build_subscription_cancel_confirm(
+            group_id=event.group_id,
+            translate=lambda text: self._translate_template(text, instruction_lang, force=True),
+            truncate=self._truncate,
+            normalize_text=self._normalize_template_text,
+            base_confirm_text=SUBS_CANCEL_CONFIRM_TEXT,
+        )
+        if event.reply_token and confirm:
+            self._line.reply_messages(event.reply_token, [confirm])
+        return True
+
+    def _handle_subscription_upgrade(self, event: models.MessageEvent, instruction_lang: str) -> bool:
+        status, _period_start, _period_end = getattr(self._repo, "get_subscription_period", lambda *_: (None, None, None))(
+            event.group_id
+        )
+        paid = status in {"active", "trialing"}
+        if paid:
+            message = self._build_multilingual_interface_message(SUBS_ALREADY_PRO_TEXT, event.group_id)
+            if event.reply_token:
+                self._line.reply_text(event.reply_token, message)
+            return True
+
+        url = self._subscription_service.create_checkout_url(event.group_id)
+        if not url:
+            message = self._translate_template(SUBS_UPGRADE_LINK_FAIL, instruction_lang, force=True)
+            if event.reply_token and message:
+                self._line.reply_text(event.reply_token, message[:5000])
+            return True
+
+        base_text = f"Upgrade to Pro from the link below.\n{url}"
+        message = self._build_multilingual_interface_message(base_text, event.group_id)
+        if event.reply_token:
+            self._line.reply_text(event.reply_token, message)
+        return True
+
     def _maybe_send_limit_notice(
         self,
         event: models.MessageEvent,
@@ -551,7 +655,7 @@ class MessageHandler:
                 f"Free quota ({limit:,} messages per month) is exhausted and translation will stop.\n"
                 "To continue using the service, please purchase a subscription from the link below."
             )
-            url = self._build_checkout_url(group_id)
+            url = self._subscription_service.create_checkout_url(group_id)
 
         return self._build_multilingual_notice(
             base,
@@ -559,6 +663,53 @@ class MessageHandler:
             url,
             add_missing_link_notice=not paid,
         )
+
+    def _build_subscription_menu_message(
+        self,
+        *,
+        group_id: str,
+        instruction_lang: str,
+        status: Optional[str],
+        period_end: Optional[datetime],
+        portal_url: Optional[str],
+        upgrade_url: Optional[str],
+        include_upgrade: bool,
+    ) -> Optional[Dict]:
+        summary = self._build_subscription_summary_text(status, period_end)
+        translated_summary = self._translate_template(summary, instruction_lang, force=True) or summary
+        body_text = self._truncate(self._normalize_template_text(translated_summary), 120)
+
+        title = self._translate_template(SUBS_MENU_TITLE, instruction_lang, force=True) or SUBS_MENU_TITLE
+        alt_text = self._translate_template(SUBS_MENU_TEXT, instruction_lang, force=True) or SUBS_MENU_TEXT
+
+        actions: List[Dict] = []
+        if portal_url:
+            label = self._translate_template(SUBS_VIEW_LABEL, instruction_lang, force=True) or SUBS_VIEW_LABEL
+            actions.append({"type": "uri", "label": self._truncate(label, 20), "uri": portal_url})
+
+        if status:
+            label = self._translate_template(SUBS_CANCEL_LABEL, instruction_lang, force=True) or SUBS_CANCEL_LABEL
+            payload = self._encode_subscription_payload({"kind": "cancel", "group_id": group_id})
+            actions.append({"type": "postback", "label": self._truncate(label, 20), "data": payload})
+
+        if include_upgrade and upgrade_url:
+            label = self._translate_template(SUBS_UPGRADE_LABEL, instruction_lang, force=True) or SUBS_UPGRADE_LABEL
+            actions.append({"type": "uri", "label": self._truncate(label, 20), "uri": upgrade_url})
+
+        if not actions:
+            return None
+
+        return {
+            "type": "template",
+            "altText": self._truncate(alt_text, 400),
+            "template": {
+                "type": "buttons",
+                "title": self._truncate(title, 40),
+                "text": body_text,
+                "actions": actions,
+            },
+        }
+
 
     def _send_pause_notice(self, event: models.MessageEvent) -> None:
         """translation_enabled=False のときに理由別の案内を返す。"""
@@ -582,7 +733,7 @@ class MessageHandler:
                 "Translation is currently paused, likely because the free quota was exceeded.\n"
                 "To continue, please complete the checkout below."
             )
-            url = self._build_checkout_url(event.group_id)
+            url = self._subscription_service.create_checkout_url(event.group_id)
 
         message = self._build_multilingual_notice(
             base,
@@ -609,40 +760,9 @@ class MessageHandler:
             lines.append("(Unable to generate purchase link at this time, please contact administrator.)")
         return "\n\n".join(filter(None, lines))
 
+    # 後方互換：テストや既存コードが呼ぶ旧インターフェースをサービスに委譲
     def _build_checkout_url(self, group_id: str) -> Optional[str]:
-        import importlib
-
-        try:
-            stripe = importlib.import_module("stripe")
-        except ModuleNotFoundError:
-            logger.warning("stripe SDK not available; cannot create checkout session")
-            return None
-
-        secret = self._stripe_secret_key
-        price_id = self._stripe_price_monthly_id
-        if not secret or not price_id:
-            return None
-
-        stripe.api_key = secret
-        try:
-            session = stripe.checkout.Session.create(
-                mode="subscription",
-                line_items=[{"price": price_id, "quantity": 1}],
-                success_url="https://translate.iwasadigital.com/pages/thanks.html?session_id={CHECKOUT_SESSION_ID}",
-                cancel_url="https://translate.iwasadigital.com/pages/thanks.html?status=cancelled&session_id={CHECKOUT_SESSION_ID}",
-                metadata={"group_id": group_id},
-                subscription_data={"metadata": {"group_id": group_id}},
-            )
-            checkout_url = getattr(session, "url", None)
-            session_id = getattr(session, "id", None)
-
-            if self._checkout_base_url and session_id:
-                return f"{self._checkout_base_url}/checkout?session_id={session_id}"
-
-            return checkout_url
-        except Exception as exc:  # pylint: disable=broad-except
-            logger.warning("Failed to create checkout session: %s", exc)
-            return None
+        return self._subscription_service.create_checkout_url(group_id)
 
     def _current_period_key(
         self, paid: bool, period_start: Optional[datetime], period_end: Optional[datetime]

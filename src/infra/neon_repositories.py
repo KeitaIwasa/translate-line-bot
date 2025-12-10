@@ -360,6 +360,26 @@ class NeonMessageRepository(MessageRepositoryPort):
             logger.warning("group_subscriptions table missing; subscription not tracked", extra={"group_id": group_id})
             return (None, None, None)
 
+    def get_subscription_detail(self, group_id: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """Stripe 顧客/サブスク ID とステータスを取得する。"""
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT stripe_customer_id, stripe_subscription_id, status
+                    FROM group_subscriptions
+                    WHERE group_id = %s
+                    """,
+                    (group_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return (None, None, None)
+                return row[0], row[1], row[2]
+        except errors.UndefinedTable:
+            logger.warning("group_subscriptions table missing; subscription detail unavailable", extra={"group_id": group_id})
+            return (None, None, None)
+
     def upsert_subscription(
         self,
         group_id: str,
