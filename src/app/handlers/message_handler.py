@@ -26,6 +26,7 @@ from ...domain.services.language_detection_service import LanguageDetectionServi
 from ...infra.gemini_translation import GeminiRateLimitError
 from ...presentation.reply_formatter import (
     MAX_REPLY_LENGTH,
+    _wrap_bidi_isolate,
     strip_source_echo,
 )
 from ..subscription_texts import (
@@ -664,11 +665,9 @@ class MessageHandler:
             base = "Translation is currently paused. Please try again later or contact the administrator."
             url = None
         else:
-            base = (
-                "Translation is currently paused, likely because the free quota was exceeded.\n"
-                "To continue, please complete the checkout below."
-            )
-            url = self._subscription_service.create_checkout_url(event.group_id)
+            # メンションによる停止中
+            logger.info("翻訳停止中", extra={"group_id": event.group_id})
+            return
 
         message = self._build_multilingual_notice(
             base,
@@ -743,7 +742,7 @@ class MessageHandler:
 
         lines: List[str] = []
         if any(lang.startswith("en") for lang in targets_lower):
-            lines.append(USAGE_MESSAGE)
+            lines.append(_wrap_bidi_isolate(USAGE_MESSAGE, "en"))
 
         seen_langs = set()
         for item in translations:
@@ -752,7 +751,7 @@ class MessageHandler:
                 continue
             seen_langs.add(lang_code)
             cleaned = strip_source_echo(USAGE_MESSAGE, item.text)
-            lines.append(cleaned)
+            lines.append(_wrap_bidi_isolate(cleaned, lang_code))
 
         return "\n\n".join(lines)[:MAX_REPLY_LENGTH]
 
@@ -954,29 +953,33 @@ class MessageHandler:
 
     def _build_multilingual_interface_message(self, base_text: str, group_id: str) -> str:
         languages = self._limit_language_codes(self._repo.fetch_group_languages(group_id))
+
+        # ベース文は英語前提でそのまま使用する
+        base_text_en = base_text or ""
+
         translate_targets = [lang for lang in languages if lang.lower() != "en"]
-        translations = self._invoke_interface_translation_with_retry(base_text, translate_targets)
+        translations = self._invoke_interface_translation_with_retry(base_text_en, translate_targets)
 
         if not translations:
-            return base_text
+            return base_text_en
 
         text_by_lang = {}
         for item in translations:
             lowered = item.lang.lower()
             if lowered in text_by_lang:
                 continue
-            cleaned = strip_source_echo(base_text, item.text)
-            text_by_lang[lowered] = cleaned or item.text or base_text
+            cleaned = strip_source_echo(base_text_en, item.text)
+            text_by_lang[lowered] = cleaned or item.text or base_text_en
 
         lines: List[str] = []
         for lang in languages:
             lowered = lang.lower()
             if lowered == "en":
-                text = base_text  # 英語→英語はそのまま
+                text = base_text_en  # ベース英語文をそのまま使う
             else:
-                text = text_by_lang.get(lowered, base_text)
-            text = (text or base_text).strip()
-            lines.append(text)
+                text = text_by_lang.get(lowered, base_text_en)
+            text = (text or base_text_en).strip()
+            lines.append(_wrap_bidi_isolate(text, lowered))
 
         return "\n\n".join(lines)[:MAX_REPLY_LENGTH]
 

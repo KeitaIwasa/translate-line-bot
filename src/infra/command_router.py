@@ -38,8 +38,8 @@ Constraints:
 - Do NOT include the bot mention text in the ack_text.
 - Do NOT echo the entire user message.
 - For specific actions, tailor ack_text as follows:
-  - pause: "翻訳を一時停止します。再開するときはもう一度メンションしてください。" (translate to instruction language if needed, but keep the meaning about resuming by mentioning again)
-  - resume: "翻訳を再開します。" (translate to instruction language if needed)
+  - pause: "I will pause the translation. Please mention me again when you want to resume." 
+  - resume: "I will resume the translation."
   - subscription_menu: brief confirmation like "Opening subscription menu." in instruction language.
   - subscription_cancel: acknowledge that a cancel confirmation will be shown.
   - subscription_upgrade: acknowledge that an upgrade link will be provided.

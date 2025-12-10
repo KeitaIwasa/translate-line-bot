@@ -5,7 +5,7 @@ from typing import Dict, List, Sequence, Tuple
 from .. import models
 from ..ports import LanguagePreferencePort, MessageRepositoryPort
 from .interface_translation_service import InterfaceTranslationService
-from ...presentation.reply_formatter import strip_source_echo
+from ...presentation.reply_formatter import RTL_LANG_PREFIXES, _wrap_bidi_isolate, strip_source_echo
 
 
 class LanguageSettingsService:
@@ -247,16 +247,19 @@ class LanguageSettingsService:
     def _build_multilingual_completion_message(self, base_text: str, languages: Sequence[Tuple[str, str]]) -> str:
         deduped = [code.lower() for code, _ in languages if code]
         deduped = [lang for idx, lang in enumerate(deduped) if lang and lang not in deduped[:idx]]
-        deduped = [lang for lang in deduped if not lang.startswith("en")]
 
-        if not self._interface_translation or not deduped:
-            return base_text
+        # 英語が設定に含まれる場合のみ英語行を出す
+        include_en = any(lang.startswith("en") for lang in deduped)
+
+        target_langs = [lang for lang in deduped if not lang.startswith("en")]
+        if not self._interface_translation or not target_langs:
+            return base_text if include_en else "\n\n".join([base_text.strip()] if include_en else [])
 
         translations = []
         try:
-            translations = self._interface_translation.translate(base_text, deduped)
+            translations = self._interface_translation.translate(base_text, target_langs)
         except Exception:  # pylint: disable=broad-except
-            return base_text
+            return base_text if include_en else "\n\n".join([base_text.strip()] if include_en else [])
 
         text_by_lang = {}
         for item in translations or []:
@@ -266,13 +269,25 @@ class LanguageSettingsService:
             cleaned = strip_source_echo(base_text, item.text)
             text_by_lang[lowered] = (cleaned or item.text or base_text).strip()
 
-        lines: List[str] = [base_text.strip()]
-        for lang in deduped:
-            if lang.startswith("en"):
-                continue
+        def _maybe_wrap_bidi(text: str, lang: str) -> str:
+            if (lang or "").lower().startswith(RTL_LANG_PREFIXES):
+                return _wrap_bidi_isolate(text, lang)
+            return text
+
+        lines: List[str] = []
+        seen_texts = set()
+        if include_en:
+            base_line = base_text.strip()
+            if base_line:
+                lines.append(base_line)
+                seen_texts.add(base_line)
+
+        for lang in target_langs:
             translated = text_by_lang.get(lang)
-            if translated and translated not in lines:
-                lines.append(translated)
+            if translated and translated not in seen_texts:
+                cleaned = translated.strip()
+                lines.append(_maybe_wrap_bidi(cleaned, lang))
+                seen_texts.add(cleaned)
         return "\n\n".join(lines)
 
     @staticmethod

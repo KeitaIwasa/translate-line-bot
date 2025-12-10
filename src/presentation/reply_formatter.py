@@ -50,7 +50,8 @@ def _wrap_bidi_isolate(text: str, lang: str) -> str:
 
     LINE クライアントでは isolate (LRI/RLI) が効かない場合があるため、
     より互換性の高い embedding (LRE/RLE) に切り替える。
-    LTR 行末には LRM を付け、句読点が左に吸われるのを防ぐ。
+    LTR 行末には LRM、RTL 行末には RLM を付け、句読点が隣行の
+    方向性に引っ張られるのを防ぐ。
     """
 
     if not text:
@@ -58,11 +59,11 @@ def _wrap_bidi_isolate(text: str, lang: str) -> str:
 
     lowered = (lang or "").lower()
     if lowered.startswith(RTL_LANG_PREFIXES):
-        # RLE ... PDF
-        return f"\u202B{text}\u202C"
+        # 前に RLM、行全体を RLE ... PDF で囲み、末尾にも RLM を付与
+        return f"\u200F\u202B{text}\u202C\u200F"
 
-    # LTR: LRE ... PDF + LRM
-    return f"\u202A{text}\u202C\u200E"
+    # LTR: 前に LRM、LRE ... PDF で囲み、末尾にも LRM を付与
+    return f"\u200E\u202A{text}\u202C\u200E"
 
 
 def format_translations(translations: List[TranslationResult]) -> str:
