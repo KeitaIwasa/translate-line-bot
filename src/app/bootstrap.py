@@ -12,6 +12,9 @@ from ..infra.command_router import GeminiCommandRouter
 from ..infra.line_api import LineApiAdapter
 from ..infra.neon_client import get_client
 from ..infra.neon_repositories import NeonMessageRepository
+from ..domain.services.quota_service import QuotaService
+from ..domain.services.language_settings_service import LanguageSettingsService
+from ..domain.services.translation_flow_service import TranslationFlowService
 from .dispatcher import Dispatcher
 from .handlers.follow_handler import FollowHandler
 from .handlers.join_handler import JoinHandler
@@ -47,6 +50,21 @@ def build_dispatcher() -> Dispatcher:
     )
     db_client = get_client(settings.neon_database_url)
     repo = NeonMessageRepository(db_client, max_group_languages=settings.max_group_languages)
+    quota_service = QuotaService(repo)
+    lang_settings_service = LanguageSettingsService(
+        repo,
+        language_pref_service,
+        interface_translation,
+        settings.max_group_languages,
+    )
+    translation_flow_service = TranslationFlowService(
+        repo,
+        translation_service,
+        interface_translation,
+        quota_service,
+        max_context_messages=settings.max_context_messages,
+        translation_retry=settings.translation_retry,
+    )
     # サブスク関連の共通サービス
     from ..domain.services.subscription_service import SubscriptionService
 
@@ -75,6 +93,9 @@ def build_dispatcher() -> Dispatcher:
         pro_quota_per_month=settings.pro_quota_per_month,
         checkout_base_url=settings.public_api_base_url,
         subscription_service=subscription_service,
+        quota_service=quota_service,
+        translation_flow_service=translation_flow_service,
+        language_settings_service=lang_settings_service,
     )
     postback_handler = PostbackHandler(
         line_client,
@@ -82,6 +103,7 @@ def build_dispatcher() -> Dispatcher:
         max_group_languages=settings.max_group_languages,
         interface_translation=interface_translation,
         subscription_service=subscription_service,
+        language_settings_service=lang_settings_service,
     )
     join_handler = JoinHandler(line_client, repo)
     member_joined_handler = MemberJoinedHandler(line_client, repo)

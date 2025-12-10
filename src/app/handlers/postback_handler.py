@@ -8,6 +8,7 @@ from ...domain import models
 from ...domain.ports import LinePort, MessageRepositoryPort
 from ...domain.services.interface_translation_service import InterfaceTranslationService
 from ...domain.services.subscription_service import SubscriptionService
+from ...domain.services.language_settings_service import LanguageSettingsService
 from ...presentation.reply_formatter import strip_source_echo
 from ..subscription_texts import SUBS_CANCEL_CONFIRM_TEXT, SUBS_CANCEL_DONE_TEXT, SUBS_CANCEL_FAIL_TEXT
 from ..subscription_postback import decode_postback_payload, encode_subscription_payload
@@ -25,12 +26,19 @@ class PostbackHandler:
         max_group_languages: int = 5,
         interface_translation: InterfaceTranslationService | None = None,
         subscription_service: SubscriptionService | None = None,
+        language_settings_service: LanguageSettingsService | None = None,
     ) -> None:
         self._line = line_client
         self._repo = repo
         self._max_group_languages = max_group_languages
         self._interface_translation = interface_translation
         self._subscription_service = subscription_service or SubscriptionService(repo, "", "")
+        self._lang_settings = language_settings_service or LanguageSettingsService(
+            repo,
+            preference_analyzer=None,  # type: ignore[arg-type]
+            interface_translation=interface_translation or InterfaceTranslationService(None),  # type: ignore[arg-type]
+            max_group_languages=max_group_languages,
+        )
 
     def handle(self, event: models.PostbackEvent) -> None:
         if not event.data or not event.reply_token or not event.group_id:
@@ -57,44 +65,42 @@ class PostbackHandler:
         primary_language = (payload.get("primary_language") or "").lower()
         if action == "confirm":
             langs = payload.get("languages") or []
-            tuples: List[Tuple[str, str]] = _dedup_languages(
-                [(item.get("code", ""), item.get("name", "")) for item in langs if item.get("code")]
+            tuples: List[Tuple[str, str]] = [
+                (item.get("code", ""), item.get("name", "")) for item in langs if item.get("code")
+            ]
+            bundle = self._lang_settings.confirm(
+                group_id=event.group_id,
+                languages=tuples,
+                primary_language=primary_language,
+                completion_text=payload.get("completion_text"),
+                limit_text=payload.get("limit_text"),
             )
-            if len(tuples) > self._max_group_languages:
-                warning = payload.get("limit_text")
-                if not warning:
-                    warning = (
-                        f"You can set up to {self._max_group_languages} translation languages. "
-                        f"Please specify {self._max_group_languages} or fewer."
-                    )
-                self._line.reply_text(event.reply_token, warning)
-                return
-            completed = self._repo.try_complete_group_languages(event.group_id, tuples)
-            if not completed:
+            if not bundle:
                 logger.info(
                     "Duplicate language confirmation ignored",
                     extra={"group_id": event.group_id, "languages": [code for code, _ in tuples]},
                 )
                 return
-            self._repo.set_translation_enabled(event.group_id, True)
-            base_text = payload.get("completion_text") or _build_completion_message(tuples)
-            text = self._build_multilingual_completion_message(base_text, tuples)
-            self._line.reply_text(event.reply_token, text)
+            if event.reply_token and bundle.texts:
+                self._line.reply_text(event.reply_token, bundle.texts[0])
             logger.info(
                 "Language preferences saved",
                 extra={"group_id": event.group_id, "languages": [code for code, _ in tuples]},
             )
         elif action == "cancel":
-            cancelled = self._repo.try_cancel_language_prompt(event.group_id)
-            if not cancelled:
+            bundle = self._lang_settings.cancel(
+                group_id=event.group_id,
+                primary_language=primary_language,
+                cancel_text=payload.get("cancel_text"),
+            )
+            if not bundle:
                 logger.info(
                     "Duplicate language cancellation ignored",
                     extra={"group_id": event.group_id, "user_id": event.user_id},
                 )
                 return
-            self._repo.set_translation_enabled(event.group_id, False)
-            cancel_text = payload.get("cancel_text") or _build_cancel_message()
-            self._line.reply_text(event.reply_token, cancel_text)
+            if event.reply_token and bundle.texts:
+                self._line.reply_text(event.reply_token, bundle.texts[0])
             logger.info("Language enrollment cancelled", extra={"group_id": event.group_id, "user_id": event.user_id})
 
     def _build_multilingual_message(self, base_text: str, group_id: str) -> str:
@@ -190,55 +196,6 @@ class PostbackHandler:
             else:
                 if event.reply_token:
                     self._line.reply_text(event.reply_token, self._build_multilingual_message(SUBS_CANCEL_FAIL_TEXT, group_id))
-
-    def _build_multilingual_completion_message(self, base_text: str, languages: Sequence[Tuple[str, str]]) -> str:
-        if not base_text:
-            return ""
-
-        deduped: List[str] = []
-        seen = set()
-        for code, _name in languages:
-            lowered = (code or "").lower()
-            if not lowered or lowered in seen:
-                continue
-            seen.add(lowered)
-            deduped.append(lowered)
-
-        deduped = [lang for lang in deduped if not lang.startswith("en")]
-
-        if not self._interface_translation or not deduped:
-            return base_text
-
-        translations = []
-        try:
-            translations = self._interface_translation.translate(base_text, deduped)
-        except Exception:  # pylint: disable=broad-except
-            logger.warning("Completion translation failed", exc_info=True)
-
-        text_by_lang = {}
-        for item in translations or []:
-            lowered = (item.lang or "").lower()
-            if not lowered or lowered in text_by_lang:
-                continue
-            cleaned = strip_source_echo(base_text, item.text)
-            text_by_lang[lowered] = (cleaned or item.text or base_text).strip()
-
-        lines: List[str] = [base_text.strip()]
-        for lang in deduped:
-            # 英語はベース文で代用するためスキップ
-            if lang.startswith("en"):
-                continue
-            translated = text_by_lang.get(lang)
-            if not translated:
-                continue
-            if translated in lines:
-                continue
-            lines.append(translated)
-
-        return "\n\n".join(lines)
-
-
-
 
 def _build_completion_message(languages) -> str:
     names = [name or code for code, name in languages if code]

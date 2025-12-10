@@ -26,7 +26,6 @@ from ...domain.services.language_detection_service import LanguageDetectionServi
 from ...infra.gemini_translation import GeminiRateLimitError
 from ...presentation.reply_formatter import (
     MAX_REPLY_LENGTH,
-    build_translation_reply,
     strip_source_echo,
 )
 from ..subscription_texts import (
@@ -39,6 +38,9 @@ from ..subscription_templates import (
     build_subscription_menu_message,
 )
 from ...domain.services.subscription_service import SubscriptionService
+from ...domain.services.quota_service import QuotaService
+from ...domain.services.translation_flow_service import TranslationFlowService
+from ...domain.services.language_settings_service import LanguageSettingsService
 from .postback_handler import _build_cancel_message, _build_completion_message
 
 logger = logging.getLogger(__name__)
@@ -93,6 +95,9 @@ class MessageHandler:
         checkout_base_url: str = "",
         subscription_service: SubscriptionService | None = None,
         executor: ThreadPoolExecutor | None = None,
+        quota_service: QuotaService | None = None,
+        translation_flow_service: TranslationFlowService | None = None,
+        language_settings_service: LanguageSettingsService | None = None,
     ) -> None:
         self._line = line_client
         self._translation = translation_service
@@ -115,6 +120,21 @@ class MessageHandler:
             stripe_secret_key,
             stripe_price_monthly_id,
             checkout_base_url,
+        )
+        self._quota = quota_service or QuotaService(repo)
+        self._translation_flow = translation_flow_service or TranslationFlowService(
+            repo,
+            translation_service,
+            interface_translation,
+            self._quota,
+            max_context_messages=max_context_messages,
+            translation_retry=translation_retry,
+        )
+        self._language_settings = language_settings_service or LanguageSettingsService(
+            repo,
+            language_pref_service,
+            interface_translation,
+            max_group_languages,
         )
         self._executor = executor or ThreadPoolExecutor(max_workers=4)
 
@@ -165,119 +185,17 @@ class MessageHandler:
 
     # --- internal helpers ---
     def _attempt_language_enrollment(self, event: models.MessageEvent) -> bool:
-        logger.info(
-            "Analyzing language preferences",
-            extra={"group_id": event.group_id, "user_id": event.user_id, "text": event.text[:120]},
-        )
-        try:
-            result = self._lang_pref.analyze(event.text)
-        except Exception as exc:  # pylint: disable=broad-except
-            logger.warning("Failed to analyze language preferences: %s", exc)
-            if event.reply_token:
-                self._line.reply_text(event.reply_token, LANGUAGE_ANALYSIS_FALLBACK)
-            return True
-
-        if not result:
-            logger.info("Language analysis returned no result", extra={"user_id": event.user_id})
-            if event.reply_token:
-                self._line.reply_text(event.reply_token, LANGUAGE_ANALYSIS_FALLBACK)
-            return True
-
-        supported = result.supported
-        unsupported = result.unsupported
-        logger.info(
-            "Language analysis outcome",
-            extra={
-                "user_id": event.user_id,
-                "supported": [lang.code for lang in supported],
-                "unsupported": [lang.code for lang in unsupported],
-            },
-        )
-
-        detected_total = len(supported) + len(unsupported)
-        if detected_total > self._max_group_languages:
-            logger.info(
-                "Language selection exceeds max allowed (by detected count)",
-                extra={
-                    "user_id": event.user_id,
-                    "group_id": event.group_id,
-                    "detected_total": detected_total,
-                    "max": self._max_group_languages,
-                },
-            )
-            message = self._build_language_limit_message(result.primary_language)
-            if event.reply_token:
-                self._line.reply_text(event.reply_token, message[:5000])
-            # 翻訳は停止したままにする
-            self._repo.set_translation_enabled(event.group_id, False)
-            return True
-
-        messages: List[Dict] = []
-        limited_supported, dropped = self._limit_language_choices(supported)
-        if unsupported:
-            messages.append(
-                {
-                    "type": "text",
-                    "text": self._format_unsupported_message(unsupported, result.primary_language),
-                }
-            )
-        if dropped:
-            notice = self._build_language_limit_message(result.primary_language)
-            messages.append({"type": "text", "text": notice})
-            if event.reply_token:
-                self._line.reply_messages(event.reply_token, messages)
-            # 翻訳を一時停止し、再指定を促す
-            self._repo.set_translation_enabled(event.group_id, False)
-            return True
-
-        # 対応言語がなければ未対応メッセージだけ返して終了
-        if not limited_supported:
-            if messages and event.reply_token:
-                self._line.reply_messages(event.reply_token, messages)
-            return True
-
-        prompt_texts = self._prepare_language_prompt_texts(limited_supported, result)
-        confirm_payload = self._encode_postback_payload(
-            {
-                "kind": "language_confirm",
-                "action": "confirm",
-                "languages": [{"code": lang.code, "name": lang.name} for lang in limited_supported],
-                "primary_language": prompt_texts["primary_language"],
-                "completion_text": prompt_texts["completion_text"],
-                "limit_text": self._build_language_limit_message(result.primary_language),
-            }
-        )
-        cancel_payload = self._encode_postback_payload(
-            {
-                "kind": "language_confirm",
-                "action": "cancel",
-                "primary_language": prompt_texts["primary_language"],
-                "cancel_text": prompt_texts["cancel_text"],
-            }
-        )
-
-        confirm_text = prompt_texts["confirm_text"]
-        template_message = {
-            "type": "template",
-            "altText": "Confirm interpretation languages",
-            "template": {
-                "type": "confirm",
-                "text": confirm_text,
-                "actions": [
-                    {"type": "postback", "label": f"🆗 {prompt_texts['confirm_label']}", "data": confirm_payload},
-                    {"type": "postback", "label": f"↩️ {prompt_texts['cancel_label']}", "data": cancel_payload},
-                ],
-            },
-        }
-
-        messages.append(template_message)
+        bundle = self._language_settings.propose(event)
+        if not bundle:
+            return False
         if event.reply_token:
-            self._line.reply_messages(event.reply_token, messages)
-        self._repo.record_language_prompt(event.group_id)
-        self._repo.set_translation_enabled(event.group_id, False)
+            if bundle.messages:
+                self._line.reply_messages(event.reply_token, list(bundle.messages))
+            elif bundle.texts:
+                self._line.reply_text(event.reply_token, bundle.texts[0])
         logger.info(
             "Language enrollment prompt sent",
-            extra={"group_id": event.group_id, "user_id": event.user_id, "prompted_langs": [lang.code for lang in supported]},
+            extra={"group_id": event.group_id, "user_id": event.user_id},
         )
         return True
 
@@ -463,59 +381,36 @@ class MessageHandler:
         )
         paid = status in {"active", "trialing"}
         limit = self._pro_quota if paid else self._free_quota
-        period_key = self._current_period_key(paid, period_start, period_end)
         plan_key = "pro" if paid else "free"
-        notice_plan = getattr(self._repo, "get_limit_notice_plan", lambda *_: None)(event.group_id, period_key)
 
-        # Free 上限通知済みかつ未課金の場合は静かにスキップ（メンション無しでここに来る）
-        if not paid:
-            if notice_plan == "free":
-                logger.info(
-                    "Skipping processing: free plan limit notice already sent this period",
-                    extra={"group_id": event.group_id, "period_key": period_key},
-                )
-                return True
+        flow = self._translation_flow.run(
+            event=event,
+            sender_name=sender_name,
+            candidate_languages=candidate_languages,
+            paid=paid,
+            limit=limit,
+            plan_key=plan_key,
+            period_start=period_start,
+            period_end=period_end,
+        )
 
-        # すでに上限到達済みの場合はカウントを進めずに終了
-        current_usage = self._repo.get_usage(event.group_id, period_key)
-        if current_usage >= limit:
-            if not paid:
+        if not flow.decision.allowed:
+            if flow.decision.stop_translation:
                 self._repo.set_translation_enabled(event.group_id, False)
-            self._maybe_send_limit_notice(event, paid, limit, plan_key, period_key)
+            if flow.decision.should_notify:
+                self._maybe_send_limit_notice(
+                    event,
+                    paid,
+                    flow.decision.limit,
+                    flow.decision.plan_key,
+                    flow.decision.period_key,
+                )
             return True
 
-        # 利用カウントと課金判定
-        usage_count = self._repo.increment_usage(event.group_id, period_key)
-        send_notice_after_translation = False
+        send_notice_after_translation = flow.decision.should_notify
+        period_key = flow.decision.period_key
 
-        if paid:
-            if usage_count > limit:
-                self._maybe_send_limit_notice(event, paid, limit, plan_key, period_key)
-                return True
-            if usage_count == limit:
-                # 8000通目は翻訳してから通知
-                send_notice_after_translation = notice_plan != plan_key
-        else:
-            if usage_count > limit:
-                self._repo.set_translation_enabled(event.group_id, False)
-                self._maybe_send_limit_notice(event, paid, limit, plan_key, period_key)
-                return True
-            if usage_count == limit:
-                # 50通目は翻訳してから通知
-                send_notice_after_translation = notice_plan != plan_key
-
-        context_messages = self._repo.fetch_recent_messages(event.group_id, self._max_context)
-        timestamp = datetime.fromtimestamp(event.timestamp / 1000, tz=timezone.utc)
-
-        translations = self._invoke_translation_with_retry(
-            sender_name=sender_name,
-            message_text=event.text,
-            timestamp=timestamp,
-            context=context_messages,
-            candidate_languages=candidate_languages,
-        )
-        if translations:
-            reply_text = build_translation_reply(event.text, translations)
+        if flow.reply_text:
             if send_notice_after_translation:
                 notice = self._build_limit_reached_notice_text(event.group_id, paid, limit)
                 setter = getattr(self._repo, "set_limit_notice_plan", None)
@@ -525,17 +420,13 @@ class MessageHandler:
                     self._line.reply_messages(
                         event.reply_token,
                         [
-                            {"type": "text", "text": reply_text[:5000]},
+                            {"type": "text", "text": flow.reply_text[:5000]},
                             {"type": "text", "text": notice[:5000]},
                         ],
                     )
             else:
                 if event.reply_token:
-                    self._line.reply_text(event.reply_token, reply_text)
-
-        if send_notice_after_translation:
-            # 上で送信済み
-            return True
+                    self._line.reply_text(event.reply_token, flow.reply_text)
 
         return True
 

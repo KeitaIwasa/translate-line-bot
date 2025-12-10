@@ -98,3 +98,12 @@ class StoredMessage:
     sender_name: str
     text: str
     timestamp: datetime
+
+
+# === Reply DTO ===
+@dataclass(frozen=True)
+class ReplyBundle:
+    """送信用メッセージを束ねるシンプルな DTO。"""
+
+    texts: Sequence[str] = field(default_factory=tuple)
+    messages: Sequence[dict] = field(default_factory=tuple)
