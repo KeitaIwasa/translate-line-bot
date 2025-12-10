@@ -39,11 +39,16 @@ class TranslationService:
         timestamp: datetime,
         context_messages: Iterable[ContextMessage],
         candidate_languages: Sequence[str],
+        *,
+        allow_same_language: bool = False,
     ) -> List[TranslationResult]:
         detected_lang = detect_language(message_text)
-        filtered_targets = [
-            lang for lang in candidate_languages if lang and lang.lower() != detected_lang.lower()
-        ]
+        if allow_same_language:
+            filtered_targets = [lang for lang in candidate_languages if lang]
+        else:
+            filtered_targets = [
+                lang for lang in candidate_languages if lang and lang.lower() != detected_lang.lower()
+            ]
 
         if not filtered_targets:
             logger.info("No target languages after filtering", extra={"detected": detected_lang})

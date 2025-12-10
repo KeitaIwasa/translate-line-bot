@@ -48,8 +48,13 @@ logger = logging.getLogger(__name__)
 RATE_LIMIT_MESSAGE = "You have reached the rate limit. Please try again later."
 _last_rate_limit_message: Dict[str, str] = {}
 
+# 利用方法案内文言
+USAGE_MESSAGE = (
+    "After setting your language preferences, feel free to chat in any language. "
+    "This bot will deliver translations to each selected language every time you post."
+)
+
 # メンション機能一覧の案内文言
-USAGE_MESSAGE_JA = "言語設定をしたあと、任意の言語でメッセージでやり取りをしてください。その都度このボットが各言語に翻訳した文章を送信します。"
 UNKNOWN_INSTRUCTION_BASE = (
     "To interact with this bot, please mention it again and provide one of the following commands:\n"
     "- Change language settings\n- How to use\n- Stop translation\n- Subscription management"
@@ -656,6 +661,7 @@ class MessageHandler:
     def _build_checkout_url(self, group_id: str) -> Optional[str]:
         return self._subscription_service.create_checkout_url(group_id)
 
+    # 現在の課金周期を識別するキーを取得
     def _current_period_key(
         self, paid: bool, period_start: Optional[datetime], period_end: Optional[datetime]
     ) -> str:
@@ -682,27 +688,32 @@ class MessageHandler:
             base_targets.append(instruction_lang)
         targets_list = self._limit_language_codes(base_targets)
 
+        # 英語はベース文をそのまま使用し、翻訳リクエストには含めない
+        translation_targets = [
+            lang for lang in targets_list if not lang.lower().startswith("en")
+        ]
+
         translations = self._invoke_translation_with_retry(
             sender_name="System",
-            message_text=USAGE_MESSAGE_JA,
+            message_text=USAGE_MESSAGE,
             timestamp=datetime.now(timezone.utc),
             context=[],
-            candidate_languages=targets_list,
+            candidate_languages=translation_targets,
         )
 
         targets_lower = {lang.lower() for lang in targets_list}
 
-        # グループまたは依頼言語に日本語が含まれる場合は、必ず日本語原文を先頭に置く
         lines: List[str] = []
-        if "ja" in targets_lower:
-            lines.append(USAGE_MESSAGE_JA)
+        if any(lang.startswith("en") for lang in targets_lower):
+            lines.append(USAGE_MESSAGE)
 
         seen_langs = set()
         for item in translations:
-            if item.lang.lower() in seen_langs:
+            lang_code = item.lang.lower()
+            if lang_code in seen_langs:
                 continue
-            seen_langs.add(item.lang.lower())
-            cleaned = strip_source_echo(USAGE_MESSAGE_JA, item.text)
+            seen_langs.add(lang_code)
+            cleaned = strip_source_echo(USAGE_MESSAGE, item.text)
             lines.append(cleaned)
 
         return "\n\n".join(lines)[:MAX_REPLY_LENGTH]
@@ -714,6 +725,7 @@ class MessageHandler:
             timestamp=datetime.now(timezone.utc),
             context=[],
             candidate_languages=[instruction_lang] if instruction_lang else [],
+            allow_same_language=True,
         )
         if not translations:
             return self._normalize_bullet_newlines(UNKNOWN_INSTRUCTION_BASE)
@@ -804,6 +816,8 @@ class MessageHandler:
         timestamp: datetime,
         context: List[models.ContextMessage],
         candidate_languages: Sequence[str],
+        *,
+        allow_same_language: bool = False,
     ):
         if not candidate_languages:
             return []
@@ -817,6 +831,7 @@ class MessageHandler:
                 timestamp=timestamp,
                 context_messages=context,
                 candidate_languages=candidate_languages,
+                allow_same_language=allow_same_language,
             ),
             timeout_seconds=getattr(getattr(self._translation, "_translator", None), "_timeout", None),
         )
