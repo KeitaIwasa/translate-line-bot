@@ -38,6 +38,13 @@ def lambda_handler(event, _context):
         return {"statusCode": 403, "body": json.dumps({"message": "Forbidden"})}
 
     events = parse_events(body)
+    logger.info(
+        "Parsed LINE webhook events | count=%s types=%s",
+        len(events),
+        [evt.event_type for evt in events],
+    )
+    if not events:
+        logger.warning("No dispatchable events found in payload")
 
     for evt in events:
         try:

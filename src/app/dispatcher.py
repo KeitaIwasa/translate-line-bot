@@ -21,4 +21,10 @@ class Dispatcher:
         if not handler:
             logger.debug("No handler for event type %s", event.event_type)
             return
+        logger.info(
+            "Dispatching event | type=%s group=%s user=%s",
+            event.event_type,
+            getattr(event, "group_id", None),
+            getattr(event, "user_id", None),
+        )
         handler.handle(event)

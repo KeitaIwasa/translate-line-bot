@@ -46,7 +46,7 @@ def test_build_checkout_url_uses_short_redirect(monkeypatch):
     handler = _build_handler("https://api.example.com/stg")
     url = handler._build_checkout_url("group1")
 
-    assert url == "https://api.example.com/stg/checkout?session_id=cs_test_short"
+    assert url == "https://api.example.com/stg/pages/index.html?session_id=cs_test_short"
 
 
 def test_build_checkout_url_falls_back_to_session_url(monkeypatch):

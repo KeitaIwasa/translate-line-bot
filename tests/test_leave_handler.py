@@ -23,6 +23,7 @@ def test_leave_handler_cancels_subscription():
     handler.handle(_make_event())
 
     subscription_service.cancel_subscription.assert_called_once_with("gid")
+    repo.reset_limit_notice_plan.assert_called_once_with("gid")
 
 
 def test_leave_handler_ignores_event_without_group():
@@ -53,3 +54,14 @@ def test_leave_handler_stops_after_successful_retry():
     handler.handle(_make_event())
 
     assert subscription_service.cancel_subscription.call_count == 2
+
+
+def test_leave_handler_continues_when_reset_fails():
+    subscription_service = MagicMock()
+    repo = MagicMock()
+    repo.reset_limit_notice_plan.side_effect = RuntimeError("db down")
+    handler = LeaveHandler(subscription_service, repo)
+
+    handler.handle(_make_event())
+
+    subscription_service.cancel_subscription.assert_called_once_with("gid")

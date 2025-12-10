@@ -159,6 +159,13 @@ class MessageHandler:
             return
 
         self._repo.ensure_group_member(event.group_id, event.user_id)
+        logger.info(
+            "Handling message event | group=%s user=%s sender=%s text=%.40s",
+            event.group_id,
+            event.user_id,
+            event.sender_type,
+            (event.text or ""),
+        )
 
         timestamp = datetime.fromtimestamp(event.timestamp / 1000, tz=timezone.utc)
         sender_name = self._resolve_sender_name(event)
@@ -369,6 +376,12 @@ class MessageHandler:
     def _handle_translation_flow(self, event: models.MessageEvent, sender_name: str, translation_enabled: bool) -> bool:
         group_languages = self._repo.fetch_group_languages(event.group_id)
         candidate_languages = self._limit_language_codes(group_languages)
+        logger.info(
+            "Translation flow start | group=%s enabled=%s candidates=%s",
+            event.group_id,
+            translation_enabled,
+            candidate_languages,
+        )
 
         if not candidate_languages:
             logger.info(
@@ -379,6 +392,10 @@ class MessageHandler:
                 return True
 
         if not translation_enabled:
+            logger.info(
+                "Translation disabled; sending pause notice",
+                extra={"group_id": event.group_id, "user_id": event.user_id},
+            )
             # 停止理由に応じた案内を返して終了
             self._send_pause_notice(event)
             return True
@@ -402,6 +419,16 @@ class MessageHandler:
         )
 
         if not flow.decision.allowed:
+            logger.info(
+                "Translation blocked by quota | group=%s plan=%s period=%s usage=%s limit=%s stop_translation=%s notify=%s",
+                event.group_id,
+                flow.decision.plan_key,
+                flow.decision.period_key,
+                flow.decision.usage,
+                flow.decision.limit,
+                flow.decision.stop_translation,
+                flow.decision.should_notify,
+            )
             if flow.decision.stop_translation:
                 self._repo.set_translation_enabled(event.group_id, False)
             if flow.decision.should_notify:
@@ -434,6 +461,14 @@ class MessageHandler:
             else:
                 if event.reply_token:
                     self._line.reply_text(event.reply_token, flow.reply_text)
+        else:
+            logger.warning(
+                "Translation finished without reply text | group=%s candidates=%s plan=%s period=%s",
+                event.group_id,
+                candidate_languages,
+                plan_key,
+                period_key,
+            )
 
         return True
 

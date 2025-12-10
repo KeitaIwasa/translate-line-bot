@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from datetime import datetime, timezone
 from typing import List, Sequence
 
@@ -14,6 +15,8 @@ from .quota_service import QuotaService, QuotaDecision
 from ...presentation.reply_formatter import build_translation_reply
 from ...infra.gemini_translation import GeminiRateLimitError
 from .retry_policy import RetryPolicy
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -81,6 +84,13 @@ class TranslationFlowService:
         )
 
         if not translations:
+            logger.warning(
+                "Translation returned no candidates | group=%s user=%s languages=%s plan=%s",
+                event.group_id,
+                event.user_id,
+                list(candidate_languages),
+                plan_key,
+            )
             return TranslationFlowResult(decision=decision, reply_text=None)
 
         reply_text = build_translation_reply(event.text, translations)

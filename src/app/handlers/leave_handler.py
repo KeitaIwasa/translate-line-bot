@@ -20,6 +20,16 @@ class LeaveHandler:
         if not event.group_id:
             return
 
+        # 退会時は上限通知フラグをリセットして再招待後に再通知できるようにする
+        try:
+            self._repo.reset_limit_notice_plan(event.group_id)
+        except Exception:
+            logger.warning(
+                "Failed to reset limit notice plan on leave",
+                extra={"group_id": event.group_id},
+                exc_info=True,
+            )
+
         # サブスク解約は最大3回リトライする
         for attempt in range(3):
             result = self._subscription_service.cancel_subscription(event.group_id)

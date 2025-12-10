@@ -46,7 +46,8 @@ class SubscriptionService:
             session_id = getattr(session, "id", None)
 
             if self._checkout_base_url and session_id:
-                return f"{self._checkout_base_url}/checkout?session_id={session_id}"
+                # 事前案内ページへ遷移させ、ページ内ボタンから Checkout に進ませる
+                return f"{self._checkout_base_url}/pages/index.html?session_id={session_id}"
 
             return checkout_url
         except Exception as exc:  # pylint: disable=broad-except

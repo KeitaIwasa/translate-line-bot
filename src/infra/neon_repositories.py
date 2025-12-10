@@ -326,6 +326,23 @@ class NeonMessageRepository(MessageRepositoryPort):
         except errors.UndefinedTable:
             logger.warning("group_usage_counters table missing; skip setting notice plan", extra={"group_id": group_id})
 
+    def reset_limit_notice_plan(self, group_id: str) -> None:
+        """退会時などに上限通知フラグをリセットする。"""
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE group_usage_counters
+                    SET limit_notice_plan = NULL, updated_at = NOW()
+                    WHERE group_id = %s
+                    """,
+                    (group_id,),
+                )
+        except errors.UndefinedColumn:
+            logger.warning("limit_notice_plan column missing; skip resetting notice plan", extra={"group_id": group_id})
+        except errors.UndefinedTable:
+            logger.warning("group_usage_counters table missing; skip resetting notice plan", extra={"group_id": group_id})
+
     def get_subscription_status(self, group_id: str) -> Optional[str]:
         try:
             with self._client.cursor() as cur:
