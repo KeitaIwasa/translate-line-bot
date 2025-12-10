@@ -53,10 +53,6 @@ Parameters:
       - true
       - false
     Description: Set to true when Stripe secrets/price IDs are provisioned
-  PublicApiBaseUrl:
-    Type: String
-    Default: ""
-    Description: Base URL for the public HTTP API (e.g., custom domain or API Gateway URL with stage)
 
 Conditions:
   UseStripe: !Equals [!Ref EnableStripe, "true"]
@@ -92,7 +88,7 @@ Globals:
           - UseStripe
           - !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:STRIPE_PRICE_MONTHLY_ID}}"
           - ""
-        PUBLIC_API_BASE_URL: !Ref PublicApiBaseUrl
+        PUBLIC_API_BASE_URL: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:PUBLIC_API_BASE_URL}}"
 
 Resources:
   LineWebhookApi:
