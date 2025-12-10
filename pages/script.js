@@ -1,7 +1,6 @@
 (() => {
   const translations = {
     en: {
-      eyebrow: "Pro Plan",
       heroTitle: "Run multilingual LINE groups stress-free with the Pro plan.",
       heroLead:
         "The Translation AI Bot Pro Plan delivers context-aware translations inside your LINE groups. Use it confidently for work or personal chats without worrying about free-tier limits.",
@@ -67,7 +66,6 @@
         "See the full details below.<br />・<a href=\"https://your-domain/terms\" target=\"_blank\" rel=\"noopener\">Terms of Service</a><br />・<a href=\"https://your-domain/privacy\" target=\"_blank\" rel=\"noopener\">Privacy Policy</a>",
     },
     ja: {
-      eyebrow: "Pro Plan",
       heroTitle: "多言語のLINEグループ運営を、Proプランでストレスゼロに。",
       heroLead:
         "「翻訳AIボット Proプラン」は、LINEグループ内のメッセージを文脈を考慮して自動翻訳する有料プランです。無料プランの制限を気にせず、ビジネスでもプライベートでも安心してご利用いただけます。",
@@ -124,7 +122,6 @@
         "詳細な条件については、以下のページをご確認ください。<br />・<a href=\"https://your-domain/terms\" target=\"_blank\" rel=\"noopener\">利用規約</a><br />・<a href=\"https://your-domain/privacy\" target=\"_blank\" rel=\"noopener\">プライバシーポリシー</a>",
     },
     "zh-TW": {
-      eyebrow: "Pro Plan",
       heroTitle: "用 Pro 方案，無壓力經營多語系 LINE 群組。",
       heroLead:
         "「翻譯 AI Bot Pro 方案」會在 LINE 群組中依據脈絡自動翻譯訊息。免擔心免費額度限制，無論商務或私人聊天都能放心使用。",
@@ -181,7 +178,6 @@
         "詳細條件請參閱以下頁面。<br />・<a href=\"https://your-domain/terms\" target=\"_blank\" rel=\"noopener\">服務條款</a><br />・<a href=\"https://your-domain/privacy\" target=\"_blank\" rel=\"noopener\">隱私權政策</a>",
     },
     th: {
-      eyebrow: "Pro Plan",
       heroTitle: "ดูแลงานแปลในกลุ่ม LINE หลายภาษาง่าย ๆ ด้วย Pro Plan",
       heroLead:
         "แปลข้อความในกลุ่ม LINE อย่างเข้าใจบริบทด้วย Translation AI Bot Pro Plan ใช้งานได้ทั้งธุรกิจและส่วนตัวโดยไม่ต้องกังวลขีดจำกัดแบบฟรี",
@@ -244,10 +240,8 @@
     heroLead: document.querySelector("[data-i18n='heroLead']"),
     price: document.querySelector("[data-i18n='price']"),
     audience: document.querySelector("[data-i18n='audience']"),
-    eyebrow: document.querySelector("[data-i18n='eyebrow']"),
     ctaButton: document.getElementById("ctaButton"),
     ctaTerms: document.getElementById("ctaTerms"),
-    missingNotice: document.getElementById("missingNotice"),
     featuresTitle: document.querySelector("[data-i18n='featuresTitle']"),
     featuresList: document.getElementById("featuresList"),
     compareTitle: document.querySelector("[data-i18n='compareTitle']"),
@@ -262,6 +256,7 @@
     notesTitle: document.querySelector("[data-i18n='notesTitle']"),
     notesList: document.getElementById("notesList"),
     notesTerms: document.getElementById("notesTerms"),
+    ctaButtonBottom: document.getElementById("ctaButtonBottom"),
   };
 
   const langSelect = document.getElementById("langSelect");
@@ -277,6 +272,8 @@
   let customTriggerEl;
   let customTriggerFlagEl;
   let customTriggerTextEl;
+  let lineButtonTop;
+  let lineButtonBottom;
 
   const params = new URLSearchParams(window.location.search);
   const checkoutId = params.get("session_id") || params.get("sessionId");
@@ -408,14 +405,13 @@
     const t = translations[lang] || translations.ja;
     document.documentElement.lang = lang;
 
-    elements.eyebrow.textContent = t.eyebrow;
     elements.heroTitle.textContent = t.heroTitle;
     elements.heroLead.textContent = t.heroLead;
     elements.price.innerHTML = t.price;
     elements.audience.textContent = t.audience;
     elements.ctaButton.textContent = t.ctaLabel;
     elements.ctaTerms.innerHTML = t.ctaTerms;
-    elements.missingNotice.textContent = t.missingNotice;
+    if (elements.ctaButtonBottom) elements.ctaButtonBottom.textContent = t.ctaLabel;
 
     elements.featuresTitle.textContent = t.featuresTitle;
     setList("featuresList", t.features);
@@ -446,6 +442,44 @@
     updateCustomSelected(lang);
   }
 
+  function createLineAddButton() {
+    const anchor = document.createElement("a");
+    anchor.href = "https://lin.ee/5roFh0n";
+    anchor.target = "_blank";
+    anchor.rel = "noopener";
+    anchor.className = "line-add-btn";
+
+    const img = document.createElement("img");
+    img.src = "https://scdn.line-apps.com/n/line_add_friends/btn/ja.png";
+    img.alt = "友だち追加";
+    img.height = 36;
+    img.border = 0;
+
+    anchor.appendChild(img);
+    return anchor;
+  }
+
+  function showLineButton(isCheckoutAvailable) {
+    const ctaTop = document.getElementById("cta");
+    const ctaBottom = document.getElementById("ctaBottom");
+
+    if (!isCheckoutAvailable) {
+      if (!lineButtonTop && ctaTop) {
+        lineButtonTop = createLineAddButton();
+        ctaTop.insertBefore(lineButtonTop, ctaTop.firstChild);
+      }
+      if (!lineButtonBottom && ctaBottom) {
+        lineButtonBottom = createLineAddButton();
+        ctaBottom.insertBefore(lineButtonBottom, ctaBottom.firstChild);
+      }
+    } else {
+      if (lineButtonTop?.parentNode) lineButtonTop.remove();
+      if (lineButtonBottom?.parentNode) lineButtonBottom.remove();
+      lineButtonTop = null;
+      lineButtonBottom = null;
+    }
+  }
+
   function initLanguage() {
     const urlLang = normalizeLang(params.get("lang"));
     const browserLang = normalizeLang(navigator.language || navigator.userLanguage);
@@ -457,12 +491,21 @@
     if (checkoutUrl) {
       elements.ctaButton.href = checkoutUrl;
       elements.ctaButton.removeAttribute("aria-disabled");
-      elements.missingNotice.hidden = true;
+      if (elements.ctaButtonBottom) {
+        elements.ctaButtonBottom.href = checkoutUrl;
+        elements.ctaButtonBottom.removeAttribute("aria-disabled");
+      }
+      showLineButton(true);
     } else {
       elements.ctaButton.href = "#";
       elements.ctaButton.setAttribute("aria-disabled", "true");
       elements.ctaButton.style.display = "none";
-      elements.missingNotice.hidden = false;
+      if (elements.ctaButtonBottom) {
+        elements.ctaButtonBottom.href = "#";
+        elements.ctaButtonBottom.setAttribute("aria-disabled", "true");
+        elements.ctaButtonBottom.style.display = "none";
+      }
+      showLineButton(false);
     }
   }
 

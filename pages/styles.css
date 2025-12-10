@@ -8,7 +8,7 @@
   --panel: #ffffff;
   --panel-strong: #f7f7f7;
   --text: #111827;
-  --muted: #4b5563;
+  --muted: #3a4453;
   --accent: #ffb347;
   --accent-strong: #ff6b00;
   --border: #e5e7eb;
@@ -135,8 +135,8 @@ body {
   background-position: 10px 50%;
   background-size: 18px 12px;
   color: var(--text);
-  font-weight: 600;
-  font-size: 15px;
+  font-weight: 500;
+  font-size: 14px;
   cursor: pointer;
   box-shadow: 0 8px 20px rgba(15, 23, 42, 0.04);
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
@@ -202,7 +202,7 @@ body {
   gap: 8px;
   padding: 10px 12px;
   cursor: pointer;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--text);
 }
 
@@ -240,7 +240,7 @@ body {
 
 .hero-wordmark {
   margin: 0 0 8px;
-  font-size: 32px;
+  font-size: 50px;
   font-weight: 900;
   letter-spacing: 6px;
   color: #0f172a;
@@ -342,6 +342,23 @@ body {
 
 .primary-btn:active {
   transform: translateY(0);
+}
+
+.line-add-btn {
+  display: inline-block;
+}
+
+.line-add-btn img {
+  display: block;
+}
+
+.bottom-cta {
+  margin: 36px auto 12px;
+  text-align: center;
+}
+
+.bottom-cta .cta {
+  justify-items: center;
 }
 
 .terms,
