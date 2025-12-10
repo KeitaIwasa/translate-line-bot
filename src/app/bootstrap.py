@@ -18,6 +18,7 @@ from ..domain.services.translation_flow_service import TranslationFlowService
 from .dispatcher import Dispatcher
 from .handlers.follow_handler import FollowHandler
 from .handlers.join_handler import JoinHandler
+from .handlers.leave_handler import LeaveHandler
 from .handlers.member_joined_handler import MemberJoinedHandler
 from .handlers.message_handler import MessageHandler
 from .handlers.postback_handler import PostbackHandler
@@ -106,6 +107,7 @@ def build_dispatcher() -> Dispatcher:
         language_settings_service=lang_settings_service,
     )
     join_handler = JoinHandler(line_client, repo)
+    leave_handler = LeaveHandler(subscription_service, repo)
     member_joined_handler = MemberJoinedHandler(line_client, repo)
     follow_handler = FollowHandler(line_client)
 
@@ -113,6 +115,7 @@ def build_dispatcher() -> Dispatcher:
         "message": message_handler,
         "postback": postback_handler,
         "join": join_handler,
+        "leave": leave_handler,
         "memberJoined": member_joined_handler,
         "follow": follow_handler,
     }

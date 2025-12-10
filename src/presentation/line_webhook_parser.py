@@ -117,6 +117,19 @@ def parse_events(body: str) -> List[models.BaseEvent]:
                     timestamp=event.get("timestamp", 0),
                 )
             )
+        elif event_type == "leave":
+            if not group_id:
+                continue
+            events.append(
+                models.LeaveEvent(
+                    event_type="leave",
+                    reply_token=reply_token,
+                    group_id=group_id,
+                    user_id=user_id,
+                    sender_type=sender_type,
+                    timestamp=event.get("timestamp", 0),
+                )
+            )
     return events
 
 

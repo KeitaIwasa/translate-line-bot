@@ -41,6 +41,11 @@ class FollowEvent(BaseEvent):
     pass
 
 
+@dataclass(frozen=True)
+class LeaveEvent(BaseEvent):
+    pass
+
+
 # === Translation domain ===
 @dataclass(frozen=True)
 class TranslationRequest:
