@@ -230,7 +230,7 @@ class NeonMessageRepository(MessageRepositoryPort):
                     DO UPDATE SET translation_enabled = EXCLUDED.translation_enabled, updated_at = NOW()
                     """,
                     (group_id, enabled),
-                )
+            )
         except errors.UndefinedTable:
             # 後方互換: group_settings が未作成でも致命的エラーにしない
             logger.warning(
@@ -238,6 +238,237 @@ class NeonMessageRepository(MessageRepositoryPort):
                 extra={"group_id": group_id},
             )
             return
+
+    def upsert_group_name(self, group_id: str, group_name: str) -> None:
+        """グループ名を保存する。既存の translation_enabled 値は維持する。"""
+        if not group_name:
+            return
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO group_settings (group_id, translation_enabled, group_name, updated_at)
+                    VALUES (%s, TRUE, %s, NOW())
+                    ON CONFLICT (group_id)
+                    DO UPDATE SET group_name = EXCLUDED.group_name, updated_at = NOW()
+                    """,
+                    (group_id, group_name),
+                )
+        except errors.UndefinedColumn:
+            logger.warning("group_name column missing; skip persisting group name", extra={"group_id": group_id})
+        except errors.UndefinedTable:
+            logger.warning("group_settings table missing; skip persisting group name", extra={"group_id": group_id})
+
+    # === Stripe usage/subscription helpers ===
+    def increment_usage(self, group_id: str, period_key: str, increment: int = 1) -> int:
+        query = sql.SQL(
+            """
+            INSERT INTO group_usage_counters (group_id, period_key, translation_count, created_at, updated_at)
+            VALUES (%s, %s, %s, NOW(), NOW())
+            ON CONFLICT (group_id, period_key)
+            DO UPDATE SET translation_count = group_usage_counters.translation_count + EXCLUDED.translation_count,
+                          updated_at = NOW()
+            RETURNING translation_count
+            """
+        )
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(query, (group_id, period_key, increment))
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+        except errors.UndefinedTable:
+            logger.warning("group_usage_counters table missing; usage not tracked", extra={"group_id": group_id})
+            return 0
+
+    def get_usage(self, group_id: str, period_key: str) -> int:
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    "SELECT translation_count FROM group_usage_counters WHERE group_id = %s AND period_key = %s",
+                    (group_id, period_key),
+                )
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+        except errors.UndefinedTable:
+            logger.warning("group_usage_counters table missing; usage not tracked", extra={"group_id": group_id})
+            return 0
+
+    def get_limit_notice_plan(self, group_id: str, period_key: str) -> Optional[str]:
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    "SELECT limit_notice_plan FROM group_usage_counters WHERE group_id = %s AND period_key = %s",
+                    (group_id, period_key),
+                )
+                row = cur.fetchone()
+                return row[0] if row else None
+        except errors.UndefinedColumn:
+            logger.warning("limit_notice_plan column missing; treating as no notice", extra={"group_id": group_id})
+            return None
+        except errors.UndefinedTable:
+            logger.warning("group_usage_counters table missing; treating as no notice", extra={"group_id": group_id})
+            return None
+
+    def set_limit_notice_plan(self, group_id: str, period_key: str, plan: str) -> None:
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO group_usage_counters (group_id, period_key, translation_count, limit_notice_plan, created_at, updated_at)
+                    VALUES (%s, %s, 0, %s, NOW(), NOW())
+                    ON CONFLICT (group_id, period_key)
+                    DO UPDATE SET limit_notice_plan = EXCLUDED.limit_notice_plan, updated_at = NOW()
+                    """,
+                    (group_id, period_key, plan),
+                )
+        except errors.UndefinedColumn:
+            logger.warning("limit_notice_plan column missing; skip setting notice plan", extra={"group_id": group_id})
+        except errors.UndefinedTable:
+            logger.warning("group_usage_counters table missing; skip setting notice plan", extra={"group_id": group_id})
+
+    def reset_limit_notice_plan(self, group_id: str) -> None:
+        """退会時などに上限通知フラグをリセットする。"""
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE group_usage_counters
+                    SET limit_notice_plan = NULL, updated_at = NOW()
+                    WHERE group_id = %s
+                    """,
+                    (group_id,),
+                )
+        except errors.UndefinedColumn:
+            logger.warning("limit_notice_plan column missing; skip resetting notice plan", extra={"group_id": group_id})
+        except errors.UndefinedTable:
+            logger.warning("group_usage_counters table missing; skip resetting notice plan", extra={"group_id": group_id})
+
+    def get_subscription_status(self, group_id: str) -> Optional[str]:
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM group_subscriptions WHERE group_id = %s",
+                    (group_id,),
+                )
+                row = cur.fetchone()
+                return row[0] if row else None
+        except errors.UndefinedTable:
+            logger.warning("group_subscriptions table missing; subscription not tracked", extra={"group_id": group_id})
+            return None
+
+    def get_subscription_period(
+        self, group_id: str
+    ) -> Tuple[Optional[str], Optional[datetime], Optional[datetime]]:
+        """サブスクのステータスと当期の開始/終了を取得する。未課金の場合は (None, None, None)。"""
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT status, current_period_start, current_period_end
+                    FROM group_subscriptions
+                    WHERE group_id = %s
+                    """,
+                    (group_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return (None, None, None)
+                status, period_start, period_end = row
+                return (status, period_start, period_end)
+        except errors.UndefinedColumn:
+            # current_period_start 未導入環境の後方互換
+            try:
+                with self._client.cursor() as cur:
+                    cur.execute(
+                        "SELECT status, NULL::timestamptz AS period_start, current_period_end FROM group_subscriptions WHERE group_id = %s",
+                        (group_id,),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        return (None, None, None)
+                    status, period_start, period_end = row
+                    return (status, period_start, period_end)
+            except Exception:  # pylint: disable=broad-except
+                logger.warning(
+                    "group_subscriptions table missing columns; subscription period unavailable", extra={"group_id": group_id}
+                )
+                return (None, None, None)
+        except errors.UndefinedTable:
+            logger.warning("group_subscriptions table missing; subscription not tracked", extra={"group_id": group_id})
+            return (None, None, None)
+
+    def get_subscription_detail(self, group_id: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """Stripe 顧客/サブスク ID とステータスを取得する。"""
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT stripe_customer_id, stripe_subscription_id, status
+                    FROM group_subscriptions
+                    WHERE group_id = %s
+                    """,
+                    (group_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return (None, None, None)
+                return row[0], row[1], row[2]
+        except errors.UndefinedTable:
+            logger.warning("group_subscriptions table missing; subscription detail unavailable", extra={"group_id": group_id})
+            return (None, None, None)
+
+    def upsert_subscription(
+        self,
+        group_id: str,
+        stripe_customer_id: str,
+        stripe_subscription_id: str,
+        status: str,
+        current_period_start: Optional[datetime],
+        current_period_end: Optional[datetime],
+    ) -> None:
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO group_subscriptions (
+                        group_id, stripe_customer_id, stripe_subscription_id, status, current_period_start, current_period_end, created_at, updated_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, NOW(), NOW())
+                    ON CONFLICT (group_id)
+                    DO UPDATE SET
+                        stripe_customer_id = EXCLUDED.stripe_customer_id,
+                        stripe_subscription_id = EXCLUDED.stripe_subscription_id,
+                        status = EXCLUDED.status,
+                        current_period_start = EXCLUDED.current_period_start,
+                        current_period_end = EXCLUDED.current_period_end,
+                        updated_at = NOW()
+                    """,
+                    (
+                        group_id,
+                        stripe_customer_id,
+                        stripe_subscription_id,
+                        status,
+                        current_period_start,
+                        current_period_end,
+                    ),
+                )
+        except errors.UndefinedTable:
+            logger.warning("group_subscriptions table missing; cannot upsert", extra={"group_id": group_id})
+
+    def update_subscription_status(
+        self, group_id: str, status: str, current_period_end: Optional[datetime]
+    ) -> None:
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE group_subscriptions
+                    SET status = %s, current_period_end = %s, updated_at = NOW()
+                    WHERE group_id = %s
+                    """,
+                    (status, current_period_end, group_id),
+                )
+        except errors.UndefinedTable:
+            logger.warning("group_subscriptions table missing; cannot update status", extra={"group_id": group_id})
         except Exception:
             logger.exception("Failed to set translation_enabled", extra={"group_id": group_id})
             raise

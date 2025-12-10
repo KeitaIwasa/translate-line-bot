@@ -41,6 +41,11 @@ class FollowEvent(BaseEvent):
     pass
 
 
+@dataclass(frozen=True)
+class LeaveEvent(BaseEvent):
+    pass
+
+
 # === Translation domain ===
 @dataclass(frozen=True)
 class TranslationRequest:
@@ -67,7 +72,7 @@ class TranslationResult:
 # === Command routing ===
 @dataclass(frozen=True)
 class CommandDecision:
-    action: str  # language_settings | howto | pause | resume | unknown
+    action: str  # language_settings | howto | pause | resume | unknown | subscription_menu | subscription_cancel | subscription_upgrade
     operation: str = ""  # reset_all | add | remove | add_and_remove (for language_settings)
     languages_to_add: List[LanguageChoice] = field(default_factory=list)
     languages_to_remove: List[LanguageChoice] = field(default_factory=list)
@@ -98,3 +103,12 @@ class StoredMessage:
     sender_name: str
     text: str
     timestamp: datetime
+
+
+# === Reply DTO ===
+@dataclass(frozen=True)
+class ReplyBundle:
+    """送信用メッセージを束ねるシンプルな DTO。"""
+
+    texts: Sequence[str] = field(default_factory=tuple)
+    messages: Sequence[dict] = field(default_factory=tuple)

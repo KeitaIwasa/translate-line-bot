@@ -26,15 +26,33 @@ Gemini 2.5 Flash の Structured Output を用いて、
 
 ---
 
-## Architecture (Modular Version)
+## Architecture (現在のモジュラー構成)
 
 ```
-LINE → API Gateway → Lambda (Python, layered)
-                     ├→ presentation  : webhook parsing / reply formatting
-                     ├→ domain        : use-cases & models
-                     ├→ infra         : LINE / Gemini / Neon adapters
-                     └→ app           : DI bootstrap & event dispatcher
+LINE → API Gateway → Lambda (Python)
+                     ├ presentation : Webhookパース・署名検証・返信DTO生成
+                     ├ app         : DI組み立て、Dispatcher、Handler薄層
+                     ├ domain      : モデル/ポート + サービス
+                     │               - TranslationFlowService: クオータ判定→翻訳実行→返信生成
+                     │               - LanguageSettingsService: 言語設定プロンプト生成・確認/キャンセル
+                     │               - QuotaService: 無料/有料の上限判定・通知要否
+                     │               - SubscriptionService/Coordinator: Stripe連携とメニュー生成
+                     │               - RetryPolicy: 翻訳系リトライを共通化
+                     └ infra       : LINE API, Gemini 翻訳, Command Router, Neon Repository など
 ```
+
+### レイヤー責務まとめ
+- presentation: LINE Webhookをドメインイベントに変換し、返信メッセージのDTO (`ReplyBundle`) を扱う。
+- app: 依存解決とハンドラ登録のみ。`MessageHandler`/`PostbackHandler` はサービス呼び出しと送信に専念。
+- domain: ユースケースの本体。翻訳フロー/言語設定/クオータ判定/購読連携をここに集約し、ポート経由でinfraに依存。
+- infra: 外部サービス（LINE, Gemini, Neon, Stripe）との通信をポート実装として提供。
+
+### 主要コンポーネント
+- **TranslationFlowService**: QuotaServiceで判定→Gemini翻訳→返信文生成を一括で実行。
+- **LanguageSettingsService**: 入力解析→確認テンプレート生成→Postback確認/キャンセル→言語保存を一元管理。
+- **QuotaService**: 無料/有料ごとの上限管理と通知要否を決定。
+- **RetryPolicy**: 翻訳系のリトライを共通化（指数バックオフ簡易版）。
+- **ReplyBuilder**: LINE送信用メッセージ辞書を組み立てるユーティリティ。
 
 ---
 
@@ -53,46 +71,21 @@ LINE → API Gateway → Lambda (Python, layered)
 ---
 
 ## Repository Structure
-
-### 新アーキテクチャ（推奨・移行中、`src_new/`）
-```
-src_new/
-├─ lambda_handler.py          # 薄いエントリポイント（署名検証＋ディスパッチのみ）
-├─ app/
-│   ├─ bootstrap.py           # DI/依存組み立て
-│   ├─ dispatcher.py          # event.type ルーティング
-│   └─ handlers/              # message/postback/join/memberJoined/follow
-├─ domain/
-│   ├─ models.py              # イベント・翻訳リクエスト・言語設定などのドメインモデル
-│   ├─ ports.py               # LINE/Gemini/Neon 抽象インターフェース
-│   └─ services/translation_service.py
-├─ infra/
-│   ├─ line_api.py            # LinePort 実装
-│   ├─ gemini_translation.py  # TranslationPort 実装
-│   ├─ language_pref_client.py# LanguagePreferencePort 実装
-│   ├─ neon_client.py         # psycopg ConnectionPool ラッパー
-│   └─ neon_repositories.py   # MessageRepositoryPort 実装
-├─ presentation/
-│   ├─ line_webhook_parser.py # Webhook JSON → ドメインイベント
-│   └─ reply_formatter.py     # 原文エコー除去＋返信整形
-└─ config.py
-```
-
-### 既存シンプル構成（互換・当面維持、`src/`）
 ```
 src/
-├─ lambda_handler.py          # 旧エントリポイント（ロジック内包）
-├─ line_webhook.py            # Webhook パース＆署名検証
-├─ line_api.py                # LINE Messaging API
-├─ domain/                    # ドメインモデル＆サービス
-├─ infra/                     # LINE/Gemini/Neon アダプタ
-├─ presentation/              # パーサと整形
-├─ app/                       # DI / ブートストラップ
-├─ utils/                     # 共通ユーティリティ
-└─ reply_formatter.py         # 翻訳整形（互換 shim）
+├─ lambda_handler.py      # エントリポイント（署名検証→Dispatcher）
+├─ app/
+│   ├─ bootstrap.py       # 依存組み立て
+│   ├─ dispatcher.py      # event.type ルーティング
+│   └─ handlers/          # message / postback / join / memberJoined / follow
+├─ domain/
+│   ├─ models.py          # イベント/翻訳/言語設定/返信DTO
+│   ├─ ports.py           # 抽象ポート（Line/Gemini/Neon/Subscription 等）
+│   └─ services/          # TranslationFlow / LanguageSettings / Quota / RetryPolicy / Subscription
+├─ infra/                 # LINE API, Gemini 翻訳, Command Router, Neon Repository など
+├─ presentation/          # webhook parser, reply builder/formatter
+└─ config.py              # 設定ローダ
 ```
-
-> 注: `src_new` を Handler で参照するか、CodeUri を合わせて指定してください（下記参照）。
 
 ---
 
@@ -153,6 +146,12 @@ LINE_CHANNEL_SECRET=xxx
 LINE_CHANNEL_ACCESS_TOKEN=xxx
 NEON_DATABASE_URL=postgres://...
 GEMINI_API_KEY=your_google_ai_key
+STRIPE_SECRET_KEY=sk_live_or_test
+STRIPE_WEBHOOK_SECRET=whsec_xxx
+STRIPE_PRICE_MONTHLY_ID=price_xxx
+# Optional: override default quotas (Free=50, Pro=8000 messages/month)
+# FREE_QUOTA_PER_MONTH=50
+# PRO_QUOTA_PER_MONTH=8000
 ```
 
 Lambda では **環境変数として設定**してください。

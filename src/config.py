@@ -19,6 +19,12 @@ class Settings:
     gemini_timeout_seconds: int = 10
     translation_retry: int = 2
     log_level: str = "INFO"
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_price_monthly_id: str = ""
+    free_quota_per_month: int = 50
+    pro_quota_per_month: int = 8000
+    public_api_base_url: str = ""
 
 
 @lru_cache(maxsize=1)
@@ -50,4 +56,10 @@ def get_settings() -> Settings:
         gemini_timeout_seconds=int(env.get("GEMINI_TIMEOUT_SECONDS", "10")),
         translation_retry=int(env.get("TRANSLATION_RETRY", "2")),
         log_level=env.get("LOG_LEVEL", "INFO"),
+        stripe_secret_key=env.get("STRIPE_SECRET_KEY", ""),
+        stripe_webhook_secret=env.get("STRIPE_WEBHOOK_SECRET", ""),
+        stripe_price_monthly_id=env.get("STRIPE_PRICE_MONTHLY_ID", ""),
+        free_quota_per_month=int(env.get("FREE_QUOTA_PER_MONTH", "50")),
+        pro_quota_per_month=int(env.get("PRO_QUOTA_PER_MONTH", "8000")),
+        public_api_base_url=env.get("PUBLIC_API_BASE_URL", ""),
     )

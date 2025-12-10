@@ -84,6 +84,21 @@ class DummyRepo:
     def is_translation_enabled(self, *args, **kwargs):
         return True
 
+    def increment_usage(self, *args, **kwargs):
+        return 0
+
+    def get_usage(self, *args, **kwargs):
+        return 0
+
+    def get_subscription_status(self, *args, **kwargs):
+        return "active"
+
+    def upsert_subscription(self, *args, **kwargs):
+        return None
+
+    def update_subscription_status(self, *args, **kwargs):
+        return None
+
 
 class DummyCommandRouter:
     def decide(self, text: str):

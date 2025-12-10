@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple, Protocol
 
 from .models import (
     ContextMessage,
@@ -20,6 +20,8 @@ class LinePort:
     def reply_messages(self, reply_token: str, messages) -> None: ...  # type: ignore[override]
 
     def get_display_name(self, source_type: str, container_id: Optional[str], user_id: str) -> Optional[str]: ...
+
+    def get_group_name(self, group_id: str) -> Optional[str]: ...
 
 
 class TranslationPort:
@@ -62,3 +64,78 @@ class MessageRepositoryPort:
     def record_bot_joined_at(self, group_id: str, joined_at: datetime) -> None: ...
 
     def fetch_bot_joined_at(self, group_id: str) -> Optional[datetime]: ...
+
+    def upsert_group_name(self, group_id: str, group_name: str) -> None: ...
+
+    # Stripe 課金/利用カウント
+    def increment_usage(self, group_id: str, period_key: str, increment: int = 1) -> int: ...
+
+    def get_usage(self, group_id: str, period_key: str) -> int: ...
+    def get_limit_notice_plan(self, group_id: str, period_key: str) -> Optional[str]: ...
+    def set_limit_notice_plan(self, group_id: str, period_key: str, plan: str) -> None: ...
+    def reset_limit_notice_plan(self, group_id: str) -> None: ...
+
+    def get_subscription_status(self, group_id: str) -> Optional[str]: ...
+
+    def get_subscription_detail(self, group_id: str) -> Tuple[Optional[str], Optional[str], Optional[str]]: ...
+
+    def get_subscription_period(
+        self, group_id: str
+    ) -> Tuple[Optional[str], Optional[datetime], Optional[datetime]]: ...
+
+    def upsert_subscription(
+        self,
+        group_id: str,
+        stripe_customer_id: str,
+        stripe_subscription_id: str,
+        status: str,
+        current_period_start: Optional[datetime],
+        current_period_end: Optional[datetime],
+    ) -> None: ...
+
+    def update_subscription_status(
+        self, group_id: str, status: str, current_period_end: Optional[datetime]
+    ) -> None: ...
+
+
+class UsageRepositoryPort(Protocol):
+    """利用カウント・クオータ管理専用のポート。"""
+
+    def increment_usage(self, group_id: str, period_key: str, increment: int = 1) -> int: ...
+    def get_usage(self, group_id: str, period_key: str) -> int: ...
+    def get_limit_notice_plan(self, group_id: str, period_key: str) -> Optional[str]: ...
+    def set_limit_notice_plan(self, group_id: str, period_key: str, plan: str) -> None: ...
+    def reset_limit_notice_plan(self, group_id: str) -> None: ...
+
+
+class SubscriptionRepositoryPort(Protocol):
+    """サブスクリプション情報取得/更新専用のポート。"""
+
+    def get_subscription_status(self, group_id: str) -> Optional[str]: ...
+
+    def get_subscription_detail(self, group_id: str) -> Tuple[Optional[str], Optional[str], Optional[str]]: ...
+
+    def get_subscription_period(
+        self, group_id: str
+    ) -> Tuple[Optional[str], Optional[datetime], Optional[datetime]]: ...
+
+    def upsert_subscription(
+        self,
+        group_id: str,
+        stripe_customer_id: str,
+        stripe_subscription_id: str,
+        status: str,
+        current_period_start: Optional[datetime],
+        current_period_end: Optional[datetime],
+    ) -> None: ...
+
+    def update_subscription_status(
+        self, group_id: str, status: str, current_period_end: Optional[datetime]
+    ) -> None: ...
+
+
+class ReplyBuilderPort(Protocol):
+    """送信用メッセージオブジェクトの構築を担当。"""
+
+    def build_text(self, text: str) -> dict: ...
+    def build_template(self, template: dict, alt_text: Optional[str] = None) -> dict: ...

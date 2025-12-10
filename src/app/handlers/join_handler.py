@@ -23,7 +23,10 @@ class JoinHandler:
         if not (event.group_id and event.reply_token):
             return
         join_time = _event_timestamp(event) or datetime.now(timezone.utc)
+        group_name = _fetch_group_name_safe(self._line, event.group_id)
         self._repo.record_bot_joined_at(event.group_id, join_time)
+        if group_name:
+            self._repo.upsert_group_name(event.group_id, group_name)
         self._repo.reset_group_language_settings(event.group_id)
         self._repo.set_translation_enabled(event.group_id, False)
         self._line.reply_text(event.reply_token, GROUP_PROMPT_MESSAGE)
@@ -36,3 +39,11 @@ def _event_timestamp(event: models.BaseEvent):
     except Exception:
         return None
     return None
+
+
+def _fetch_group_name_safe(line_client: LinePort, group_id: str) -> str | None:
+    """グループ名取得でエラーが出ても処理を継続するためのラッパー。"""
+    try:
+        return line_client.get_group_name(group_id)
+    except Exception:  # pylint: disable=broad-except
+        return None

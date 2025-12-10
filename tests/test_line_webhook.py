@@ -54,3 +54,25 @@ def test_verify_signature_success_and_failure():
 
     with pytest.raises(SignatureVerificationError):
         verify_signature(secret, body, "invalid")
+
+
+def test_parse_leave_event():
+    body = json.dumps(
+        {
+            "events": [
+                {
+                    "type": "leave",
+                    "timestamp": 1732060800000,
+                    "source": {"type": "group", "groupId": "G", "userId": "U"},
+                }
+            ]
+        }
+    )
+
+    events = parse_events(body)
+
+    assert len(events) == 1
+    event = events[0]
+    assert isinstance(event, models.LeaveEvent)
+    assert event.group_id == "G"
+    assert event.reply_token is None

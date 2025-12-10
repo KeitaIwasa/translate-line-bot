@@ -118,6 +118,64 @@ CREATE TABLE group_settings (
 );
 ```
 
+### 2.5 `group_subscriptions`
+
+| 列名 | 型 | NOT NULL | デフォルト | 説明 |
+| ---- | --- | -------- | ---------- | ---- |
+| `group_id` | TEXT | ✔ |  | LINE グループ ID |
+| `stripe_customer_id` | TEXT | ✔ |  | Stripe 顧客 ID |
+| `stripe_subscription_id` | TEXT | ✔ |  | Stripe サブスクリプション ID |
+| `status` | TEXT | ✔ |  | `active` / `trialing` / `unpaid` / `canceled` |
+| `current_period_end` | TIMESTAMPTZ |  |  | 現在請求期間の終了時刻 |
+| `created_at` | TIMESTAMPTZ | ✔ | `NOW()` | 作成日時 |
+| `updated_at` | TIMESTAMPTZ | ✔ | `NOW()` | 更新日時 |
+
+- 主キー: `group_id`
+- Webhook (`invoice.payment_succeeded` / `customer.subscription.deleted` / `invoice.payment_failed`) により同期する。
+
+```sql
+CREATE TABLE group_subscriptions (
+  group_id TEXT PRIMARY KEY,
+  stripe_customer_id TEXT NOT NULL,
+  stripe_subscription_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  current_period_start TIMESTAMPTZ,
+  current_period_end TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+### 2.6 `group_usage_counters`
+
+| 列名 | 型 | NOT NULL | デフォルト | 説明 |
+| ---- | --- | -------- | ---------- | ---- |
+| `group_id` | TEXT | ✔ |  | LINE グループ ID |
+| `period_key` | VARCHAR(10) | ✔ |  | 課金周期開始日キー（有料: `YYYY-MM-DD` / 無料: `YYYY-MM-01`） |
+| `translation_count` | INT | ✔ |  | 当周期の翻訳実行回数 |
+| `limit_notice_plan` | TEXT |  |  | 上限到達通知を送ったプラン種別（`free` / `pro`）。未送は `NULL` |
+| `created_at` | TIMESTAMPTZ | ✔ | `NOW()` | 作成日時 |
+| `updated_at` | TIMESTAMPTZ | ✔ | `NOW()` | 更新日時 |
+
+- 主キー: `(group_id, period_key)`
+- `limit_notice_plan` は当月の上限到達通知をプラン別に 1 回に抑制するためのフラグ。Free → Pro へのアップグレード後も再通知できる。
+
+```sql
+CREATE TABLE group_usage_counters (
+  group_id TEXT NOT NULL,
+  period_key VARCHAR(10) NOT NULL,
+  translation_count INT NOT NULL,
+  limit_notice_plan TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (group_id, period_key)
+);
+
+ALTER TABLE group_usage_counters
+  ADD CONSTRAINT chk_usage_notice_plan
+  CHECK (limit_notice_plan IN ('free', 'pro') OR limit_notice_plan IS NULL);
+```
+
 ## 3. リレーション / 外部キー
 
 - `group_languages` はグループ単位で保持し、外部キーは設定しない（Bot 再招待時にアプリ層で削除）。

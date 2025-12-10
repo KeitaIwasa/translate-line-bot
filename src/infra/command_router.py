@@ -27,6 +27,9 @@ Actions:
 - "howto": user asks how to use the bot.
 - "pause": temporarily pause translation until resumed.
 - "resume": resume translation.
+- "subscription_menu": user wants to manage subscription via menu (show buttons).
+- "subscription_cancel": user wants to cancel subscription; bot should ask confirmation.
+- "subscription_upgrade": user wants to upgrade to pro plan (checkout redirect link).
 - "unknown": anything else.
 
 Constraints:
@@ -35,8 +38,11 @@ Constraints:
 - Do NOT include the bot mention text in the ack_text.
 - Do NOT echo the entire user message.
 - For specific actions, tailor ack_text as follows:
-  - pause: "翻訳を一時停止します。再開するときはもう一度メンションしてください。" (translate to instruction language if needed, but keep the meaning about resuming by mentioning again)
-  - resume: "翻訳を再開します。" (translate to instruction language if needed)
+  - pause: "I will pause the translation. Please mention me again when you want to resume." 
+  - resume: "I will resume the translation."
+  - subscription_menu: brief confirmation like "Opening subscription menu." in instruction language.
+  - subscription_cancel: acknowledge that a cancel confirmation will be shown.
+  - subscription_upgrade: acknowledge that an upgrade link will be provided.
 """.strip()
 
 
@@ -45,7 +51,16 @@ SCHEMA = {
     "properties": {
         "action": {
             "type": "string",
-            "enum": ["language_settings", "howto", "pause", "resume", "unknown"],
+            "enum": [
+                "language_settings",
+                "howto",
+                "pause",
+                "resume",
+                "subscription_menu",
+                "subscription_cancel",
+                "subscription_upgrade",
+                "unknown",
+            ],
         },
         "instruction_language": {"type": "string"},
         "operation": {
@@ -139,7 +154,16 @@ class GeminiCommandRouter(CommandRouterPort):
             instruction_language=data.get("instruction_language", ""),
             ack_text=data.get("ack_text", ""),
         )
-        valid_actions = {"language_settings", "howto", "pause", "resume", "unknown"}
+        valid_actions = {
+            "language_settings",
+            "howto",
+            "pause",
+            "resume",
+            "subscription_menu",
+            "subscription_cancel",
+            "subscription_upgrade",
+            "unknown",
+        }
         if decision.action not in valid_actions:
             return self._unknown_decision()
         return decision
@@ -166,6 +190,9 @@ class GeminiCommandRouter(CommandRouterPort):
                                         "howto": ["使い方", "how to", "help"],
                                         "pause": ["翻訳停止", "pause translation"],
                                         "resume": ["翻訳再開", "resume translation"],
+                                        "subscription_menu": ["サブスク", "subscription", "plan", "billing"],
+                                        "subscription_cancel": ["解約", "cancel subscription", "停止"],
+                                        "subscription_upgrade": ["アップグレード", "upgrade to pro", "pro plan"],
                                     },
                                 },
                                 ensure_ascii=False,
