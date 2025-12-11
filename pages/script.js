@@ -9,7 +9,7 @@
       audience: "Best for: global business teams, international student or friend groups, and cross-cultural communities",
       ctaLabel: "Purchase Pro Plan",
       ctaTerms:
-        "By purchasing via the button below, you agree to the following terms.<br />・<a href=\"https://your-domain/terms\" target=\"_blank\" rel=\"noopener\">Terms of Service</a><br />・<a href=\"https://your-domain/privacy\" target=\"_blank\" rel=\"noopener\">Privacy Policy</a>",
+        "By purchasing via the button below, you agree to the following terms.<br />・<a href=\"./docs/terms-en.html\" target=\"_blank\" rel=\"noopener\">Terms of Service</a><br />・<a href=\"./docs/privacy-en.html\" target=\"_blank\" rel=\"noopener\">Privacy Policy</a>",
       missingNotice:
         "Checkout link is missing. Please open this page from the official invitation message to continue.",
       featuresTitle: "What you get with Pro",
@@ -63,7 +63,7 @@
         "For translation quality and context, recent group messages are stored and a portion may be sent to external AI models (Gemini).",
       ],
       notesTerms:
-        "See the full details below.<br />・<a href=\"https://your-domain/terms\" target=\"_blank\" rel=\"noopener\">Terms of Service</a><br />・<a href=\"https://your-domain/privacy\" target=\"_blank\" rel=\"noopener\">Privacy Policy</a>",
+        "See the full details below.<br />・<a href=\"./docs/terms-en.html\" target=\"_blank\" rel=\"noopener\">Terms of Service</a><br />・<a href=\"./docs/privacy-en.html\" target=\"_blank\" rel=\"noopener\">Privacy Policy</a>",
     },
     ja: {
       heroTitle: "多言語のLINEグループ運営を、Proプランでストレスゼロに。",
@@ -74,7 +74,7 @@
       audience: "対象：多国籍チームのビジネスチャット、留学生・友人グループ、国際交流コミュニティ など",
       ctaLabel: "Proプランを購入",
       ctaTerms:
-        "下記ボタンよりご購入いただくことで、以下の規約に同意したものとみなされます。<br />・<a href=\"https://your-domain/terms\" target=\"_blank\" rel=\"noopener\">利用規約</a><br />・<a href=\"https://your-domain/privacy\" target=\"_blank\" rel=\"noopener\">プライバシーポリシー</a>",
+        "下記ボタンよりご購入いただくことで、以下の規約に同意したものとみなされます。<br />・<a href=\"./docs/terms-ja.html\" target=\"_blank\" rel=\"noopener\">利用規約</a><br />・<a href=\"./docs/privacy-ja.html\" target=\"_blank\" rel=\"noopener\">プライバシーポリシー</a>",
       missingNotice: "決済リンクが無効です。招待メッセージから正しいリンクを開いてください。",
       featuresTitle: "Proプランでできること",
       features: [
@@ -119,7 +119,7 @@
         "翻訳品質向上と文脈理解のため、グループ内のメッセージを保存し、翻訳時に直近の会話履歴の一部を外部AIモデル（Gemini）に送信します。",
       ],
       notesTerms:
-        "詳細な条件については、以下のページをご確認ください。<br />・<a href=\"https://your-domain/terms\" target=\"_blank\" rel=\"noopener\">利用規約</a><br />・<a href=\"https://your-domain/privacy\" target=\"_blank\" rel=\"noopener\">プライバシーポリシー</a>",
+        "詳細な条件については、以下のページをご確認ください。<br />・<a href=\"./docs/terms-ja.html\" target=\"_blank\" rel=\"noopener\">利用規約</a><br />・<a href=\"./docs/privacy-ja.html\" target=\"_blank\" rel=\"noopener\">プライバシーポリシー</a>",
     },
     "zh-TW": {
       heroTitle: "用 Pro 方案，無壓力經營多語系 LINE 群組。",
@@ -130,7 +130,7 @@
       audience: "適用：跨國商務團隊、留學生／朋友群組、國際交流社群等",
       ctaLabel: "購買 Pro 方案",
       ctaTerms:
-        "點擊下方按鈕購買即表示同意以下條款。<br />・<a href=\"https://your-domain/terms\" target=\"_blank\" rel=\"noopener\">服務條款</a><br />・<a href=\"https://your-domain/privacy\" target=\"_blank\" rel=\"noopener\">隱私權政策</a>",
+        "點擊下方按鈕購買即表示同意以下條款。<br />・<a href=\"./docs/terms-zh-tw.html\" target=\"_blank\" rel=\"noopener\">服務條款</a><br />・<a href=\"./docs/privacy-zh-tw.html\" target=\"_blank\" rel=\"noopener\">隱私權政策</a>",
       missingNotice: "缺少結帳連結。請從官方邀請訊息開啟本頁以繼續。",
       featuresTitle: "Pro 方案提供的功能",
       features: [
@@ -175,7 +175,7 @@
         "為提升翻譯品質與脈絡理解，群組訊息會被儲存，部分近期對話可能傳送至外部 AI 模型（Gemini）。",
       ],
       notesTerms:
-        "詳細條件請參閱以下頁面。<br />・<a href=\"https://your-domain/terms\" target=\"_blank\" rel=\"noopener\">服務條款</a><br />・<a href=\"https://your-domain/privacy\" target=\"_blank\" rel=\"noopener\">隱私權政策</a>",
+        "詳細條件請參閱以下頁面。<br />・<a href=\"./docs/terms-zh-tw.html\" target=\"_blank\" rel=\"noopener\">服務條款</a><br />・<a href=\"./docs/privacy-zh-tw.html\" target=\"_blank\" rel=\"noopener\">隱私權政策</a>",
     },
     th: {
       heroTitle: "ดูแลงานแปลในกลุ่ม LINE หลายภาษาง่าย ๆ ด้วย Pro Plan",
@@ -186,7 +186,7 @@
       audience: "เหมาะสำหรับ: ทีมธุรกิจหลายชาติ กลุ่มเพื่อน/นักศึกษาต่างชาติ และคอมมูนิตี้นานาชาติ",
       ctaLabel: "ซื้อ Pro Plan",
       ctaTerms:
-        "เมื่อกดปุ่มด้านล่างถือว่ายอมรับเงื่อนไขต่อไปนี้แล้ว<br />・<a href=\"https://your-domain/terms\" target=\"_blank\" rel=\"noopener\">ข้อตกลงการใช้บริการ</a><br />・<a href=\"https://your-domain/privacy\" target=\"_blank\" rel=\"noopener\">นโยบายความเป็นส่วนตัว</a>",
+        "เมื่อกดปุ่มด้านล่างถือว่ายอมรับเงื่อนไขต่อไปนี้แล้ว<br />・<a href=\"./docs/terms-th.html\" target=\"_blank\" rel=\"noopener\">ข้อตกลงการใช้บริการ</a><br />・<a href=\"./docs/privacy-th.html\" target=\"_blank\" rel=\"noopener\">นโยบายความเป็นส่วนตัว</a>",
       missingNotice: "ไม่มีลิงก์ชำระเงิน โปรดเปิดหน้านี้จากข้อความเชิญอย่างเป็นทางการ",
       featuresTitle: "สิ่งที่ได้ใน Pro Plan",
       features: [
@@ -231,7 +231,7 @@
         "เพื่อปรับปรุงคุณภาพการแปลและเข้าใจบริบท ระบบจะบันทึกข้อความในกลุ่มและส่งบางส่วนของประวัติสนทนาไปยังโมเดล AI ภายนอก (Gemini)",
       ],
       notesTerms:
-        "ดูรายละเอียดเพิ่มเติมได้ที่ลิงก์ด้านล่าง<br />・<a href=\"https://your-domain/terms\" target=\"_blank\" rel=\"noopener\">ข้อตกลงการใช้บริการ</a><br />・<a href=\"https://your-domain/privacy\" target=\"_blank\" rel=\"noopener\">นโยบายความเป็นส่วนตัว</a>",
+        "ดูรายละเอียดเพิ่มเติมได้ที่ลิงก์ด้านล่าง<br />・<a href=\"./docs/terms-th.html\" target=\"_blank\" rel=\"noopener\">ข้อตกลงการใช้บริการ</a><br />・<a href=\"./docs/privacy-th.html\" target=\"_blank\" rel=\"noopener\">นโยบายความเป็นส่วนตัว</a>",
     },
   };
 
@@ -266,6 +266,8 @@
     "zh-TW": "./assets/flags/tw.svg",
     th: "./assets/flags/th.svg",
   };
+  const globeIconPath = "./assets/globe.svg";
+  const triggerLabel = "LNGUAGE";
 
   let customSelectEl;
   let customOptionsEl;
@@ -325,9 +327,8 @@
     const selectedOption =
       Array.from(langSelect?.options || []).find((opt) => opt.value === lang) ||
       langSelect?.options?.[0];
-    const labelText = selectedOption?.textContent || "Language";
-    customTriggerFlagEl.src = flagPaths[lang] || flagPaths.ja;
-    customTriggerTextEl.textContent = labelText;
+    customTriggerFlagEl.src = globeIconPath;
+    customTriggerTextEl.textContent = triggerLabel;
 
     if (customOptionsEl) {
       Array.from(customOptionsEl.children).forEach((li) => {
@@ -351,13 +352,16 @@
     customTriggerEl.className = "lang-select-trigger";
     customTriggerEl.setAttribute("aria-haspopup", "listbox");
     customTriggerEl.setAttribute("aria-expanded", "false");
+    customTriggerEl.setAttribute("aria-label", "Language selector");
 
     customTriggerFlagEl = document.createElement("img");
-    customTriggerFlagEl.className = "lang-flag";
+    customTriggerFlagEl.className = "lang-globe";
     customTriggerFlagEl.alt = "";
+    customTriggerFlagEl.src = globeIconPath;
 
     customTriggerTextEl = document.createElement("span");
     customTriggerTextEl.className = "lang-selected-label";
+    customTriggerTextEl.textContent = triggerLabel;
 
     const arrowEl = document.createElement("span");
     arrowEl.className = "lang-select-arrow";
