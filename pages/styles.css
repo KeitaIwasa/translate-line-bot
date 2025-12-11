@@ -228,17 +228,22 @@ body {
 }
 
 .hero-brand {
-  display: inline-flex;
+  display: inline-grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto auto;
   align-items: center;
-  gap: 16px;
+  column-gap: 14px;
   margin-bottom: 16px;
+  row-gap: 5px;
 }
 
 .hero-logo {
-  width: 48px;
-  height: 48px;
+  width: 66px;
+  height: 66px;
   border-radius: 50%;
   object-fit: cover;
+  grid-row: 1 / span 2;
+  grid-column: 1;
 }
 
 .hero-wordmark {
@@ -247,18 +252,19 @@ body {
   font-weight: 900;
   letter-spacing: 6px;
   color: #0f172a;
+  grid-column: 2;
+  grid-row: 1;
+  line-height: 0.9;
 }
 
-.eyebrow {
-  display: inline-flex;
-  padding: 6px 10px;
-  border-radius: 10px;
-  background: #f3f4f6;
-  color: #111827;
-  font-weight: 700;
-  letter-spacing: 0.4px;
-  text-transform: uppercase;
-  margin: 0 0 10px;
+.hero-subtitle {
+  margin: 0;
+  font-size: 14px;
+  font-weight: var(--muted);
+  color: #535e6e;
+  grid-column: 2;
+  grid-row: 2;
+  line-height: 1.2;
 }
 
 .hero-title {
@@ -477,21 +483,8 @@ th {
     padding: 12px 16px;
   }
 
-  .page-shell {
-    padding-top: 10px;
-  }
-
   .hero-title {
     font-size: 24px;
-  }
-
-  .hero-brand {
-    gap: 10px;
-  }
-
-  .hero-logo {
-    width: 54px;
-    height: 54px;
   }
 
   .hero {

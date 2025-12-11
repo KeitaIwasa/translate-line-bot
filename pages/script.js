@@ -1,6 +1,7 @@
 (() => {
   const translations = {
     en: {
+      heroTagline: "Multilingual translation LINE bot",
       heroTitle: "Run multilingual LINE groups stress-free with the KOTORI Pro plan.",
       heroLead:
         "The KOTORI Pro Plan is the paid plan for our LINE bot that auto-translates group messages with contextual awareness. Use it confidently for work or personal chats without worrying about free-tier limits.",
@@ -67,7 +68,8 @@
       consumerLink: "Consumer Information",
     },
     ja: {
-      heroTitle: "多言語のLINEグループ運営を、AIボットのProプランでストレスゼロに。",
+      heroTagline: "多言語翻訳LINEボット",
+      heroTitle: "多言語のLINEグループ運営を、Proプランでストレスゼロに。",
       heroLead:
         "「KOTORI Proプラン」は、LINEグループ内のメッセージを文脈を考慮して自動翻訳するLINEボットの有料プランです。無料プランの制限を気にせず、ビジネスでもプライベートでも安心してご利用いただけます。",
       price:
@@ -123,6 +125,7 @@
       consumerLink: "特定商取引法に基づく表記",
     },
     "zh-TW": {
+      heroTagline: "多語翻譯 LINE 機器人",
       heroTitle: "用 KOTORI Pro 方案，無壓力經營多語系 LINE 群組。",
       heroLead:
         "「KOTORI Pro 方案」是 LINE 機器人的付費方案，可依據脈絡自動翻譯群組訊息。免擔心免費方案的限制，商務或私人聊天都能安心使用。",
@@ -179,6 +182,7 @@
       consumerLink: "消費者資訊",
     },
     th: {
+      heroTagline: "บอต LINE แปลหลายภาษา",
       heroTitle: "ดูแลงานแปลในกลุ่ม LINE หลายภาษาง่าย ๆ ด้วย KOTORI Pro Plan",
       heroLead:
         "KOTORI Pro Plan คือแพ็กเกจเสียเงินของบอต LINE ที่แปลข้อความในกลุ่มแบบเข้าใจบริบท ใช้งานได้ทั้งธุรกิจและส่วนตัวโดยไม่ต้องกังวลข้อจำกัดของฟรีแพ็กเกจ",
@@ -238,6 +242,7 @@
 
   const elements = {
     heroTitle: document.querySelector("[data-i18n='heroTitle']"),
+    heroTagline: document.querySelector("[data-i18n='heroTagline']"),
     heroLead: document.querySelector("[data-i18n='heroLead']"),
     price: document.querySelector("[data-i18n='price']"),
     audience: document.querySelector("[data-i18n='audience']"),
@@ -454,6 +459,7 @@
     document.documentElement.lang = lang;
 
     elements.heroTitle.textContent = t.heroTitle;
+    if (elements.heroTagline) elements.heroTagline.textContent = t.heroTagline;
     elements.heroLead.textContent = t.heroLead;
     elements.price.innerHTML = t.price;
     elements.audience.textContent = t.audience;
