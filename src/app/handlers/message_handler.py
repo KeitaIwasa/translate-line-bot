@@ -526,28 +526,8 @@ class MessageHandler:
         return True
 
     def _handle_subscription_upgrade(self, event: models.MessageEvent, instruction_lang: str) -> bool:
-        status, _period_start, _period_end = getattr(self._repo, "get_subscription_period", lambda *_: (None, None, None))(
-            event.group_id
-        )
-        paid = status in {"active", "trialing"}
-        if paid:
-            message = self._build_multilingual_interface_message(SUBS_ALREADY_PRO_TEXT, event.group_id)
-            if event.reply_token:
-                self._line.reply_text(event.reply_token, message)
-            return True
-
-        url = self._subscription_service.create_checkout_url(event.group_id)
-        if not url:
-            message = self._translate_template(SUBS_UPGRADE_LINK_FAIL, instruction_lang, force=True)
-            if event.reply_token and message:
-                self._line.reply_text(event.reply_token, message[:5000])
-            return True
-
-        base_text = f"Upgrade to Pro from the link below.\n{url}"
-        message = self._build_multilingual_interface_message(base_text, event.group_id)
-        if event.reply_token:
-            self._line.reply_text(event.reply_token, message)
-        return True
+        # アップグレード指示でもメニューを表示し、案内メッセージは送らない
+        return self._handle_subscription_menu(event, instruction_lang)
 
     def _maybe_send_limit_notice(
         self,
