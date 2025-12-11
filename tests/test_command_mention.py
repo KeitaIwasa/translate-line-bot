@@ -38,3 +38,10 @@ def test_command_detects_mention_in_sentence():
     handler = _build_handler()
 
     assert handler._extract_command_text("hello @bot stop") == "hello stop"
+
+
+def test_command_detects_mention_only():
+    handler = _build_handler()
+
+    # メンションのみでも None ではなく空文字列を返す（コマンド扱い）
+    assert handler._extract_command_text("@bot") == ""
