@@ -446,18 +446,18 @@ class MessageHandler:
 
         if flow.reply_text:
             if send_notice_after_translation:
-                notice = self._build_limit_reached_notice_text(event.group_id, paid, limit)
+                notice_text, notice_url = self._build_limit_reached_notice_text(event.group_id, paid, limit)
                 setter = getattr(self._repo, "set_limit_notice_plan", None)
                 if setter:
                     setter(event.group_id, period_key, plan_key)
                 if event.reply_token:
-                    self._line.reply_messages(
-                        event.reply_token,
-                        [
-                            {"type": "text", "text": flow.reply_text[:5000]},
-                            {"type": "text", "text": notice[:5000]},
-                        ],
-                    )
+                    messages = [
+                        {"type": "text", "text": flow.reply_text[:5000]},
+                        {"type": "text", "text": notice_text[:5000]},
+                    ]
+                    if notice_url:
+                        messages.append({"type": "text", "text": notice_url})
+                    self._line.reply_messages(event.reply_token, messages)
             else:
                 if event.reply_token:
                     self._line.reply_text(event.reply_token, flow.reply_text)
@@ -554,11 +554,17 @@ class MessageHandler:
 
     def _send_limit_reached_notice(self, event: models.MessageEvent, paid: bool, limit: int) -> None:
         """上限到達/超過時の統一通知。"""
-        message = self._build_limit_reached_notice_text(event.group_id, paid, limit)
-        if event.reply_token:
-            self._line.reply_text(event.reply_token, message[:5000])
+        notice_text, url = self._build_limit_reached_notice_text(event.group_id, paid, limit)
+        if not event.reply_token:
+            return
 
-    def _build_limit_reached_notice_text(self, group_id: str, paid: bool, limit: int) -> str:
+        messages = [{"type": "text", "text": notice_text[:5000]}]
+        if url:
+            # URL は左右書字方向混在時に誤判定されやすいため別メッセージで送る
+            messages.append({"type": "text", "text": url})
+        self._line.reply_messages(event.reply_token, messages)
+
+    def _build_limit_reached_notice_text(self, group_id: str, paid: bool, limit: int) -> tuple[str, Optional[str]]:
         if paid:
             base = (
                 f"The Pro plan monthly limit ({limit:,} messages) has been reached and translation is paused.\n"
@@ -648,14 +654,19 @@ class MessageHandler:
             logger.info("翻訳停止中", extra={"group_id": event.group_id})
             return
 
-        message = self._build_multilingual_notice(
+        notice_text, url = self._build_multilingual_notice(
             base,
             event.group_id,
             url,
             add_missing_link_notice=not paid,
         )
-        if event.reply_token:
-            self._line.reply_text(event.reply_token, message[:5000])
+        if not event.reply_token:
+            return
+
+        messages = [{"type": "text", "text": notice_text[:5000]}]
+        if url:
+            messages.append({"type": "text", "text": url})
+        self._line.reply_messages(event.reply_token, messages)
 
     def _build_multilingual_notice(
         self,
@@ -664,14 +675,14 @@ class MessageHandler:
         url: Optional[str],
         *,
         add_missing_link_notice: bool = True,
-    ) -> str:
+    ) -> tuple[str, Optional[str]]:
+        """案内文と言語混在時に崩れないための URL を分離して返す。"""
         translated_block = self._build_multilingual_interface_message(base_text, group_id)
         lines = [translated_block]
-        if url:
-            lines.append(url)
-        elif add_missing_link_notice:
+        if not url and add_missing_link_notice:
             lines.append("(Unable to generate purchase link at this time, please contact administrator.)")
-        return "\n\n".join(filter(None, lines))
+        notice_text = "\n\n".join(filter(None, lines))
+        return notice_text, url
 
     # 後方互換：テストや既存コードが呼ぶ旧インターフェースをサービスに委譲
     def _build_checkout_url(self, group_id: str) -> Optional[str]:
