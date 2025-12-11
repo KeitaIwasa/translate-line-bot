@@ -275,7 +275,7 @@
     th: "./docs/consumer-th.html",
   };
   const globeIconPath = "./assets/globe.svg";
-  const triggerLabel = "LNGUAGE";
+  const triggerLabel = "LANGUAGE";
 
   const lineButtonAssets = {
     ja: {
