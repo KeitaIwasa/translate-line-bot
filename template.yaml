@@ -46,6 +46,10 @@ Parameters:
     MinValue: 1
     MaxValue: 10
     Description: Maximum number of translation target languages per group
+  DeployNonce:
+    Type: String
+    Default: ""
+    Description: Dummy token to force stack updates even when code and config are unchanged
   EnableStripe:
     Type: String
     Default: false
@@ -76,6 +80,7 @@ Globals:
         MAX_GROUP_LANGUAGES: !Ref MaxGroupLanguages
         TRANSLATION_RETRY: !Ref TranslationRetry
         BOT_MENTION_NAME: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:BOT_MENTION_NAME}}"
+        DEPLOY_NONCE: !Ref DeployNonce
         STRIPE_SECRET_KEY: !If
           - UseStripe
           - !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:STRIPE_SECRET_KEY}}"

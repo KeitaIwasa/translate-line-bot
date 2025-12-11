@@ -317,6 +317,24 @@
     checkoutUrlParam ||
     (checkoutId ? `/checkout?session_id=${encodeURIComponent(checkoutId)}` : null);
 
+  // 既存購読チェック用エンドポイント
+  const checkoutStatusUrl =
+    checkoutId && checkoutUrl
+      ? `/checkout?session_id=${encodeURIComponent(checkoutId)}&mode=status`
+      : null;
+
+  async function fetchCheckoutStatus() {
+    if (!checkoutStatusUrl) return null;
+    try {
+      const res = await fetch(checkoutStatusUrl, { method: "GET" });
+      if (!res.ok) return null;
+      return await res.json();
+    } catch (err) {
+      console.warn("Failed to fetch checkout status", err);
+      return null;
+    }
+  }
+
   function setList(id, items) {
     const el = elements[id];
     if (!el) return;
@@ -549,24 +567,57 @@
   }
 
   function initCta() {
-    if (checkoutUrl) {
-      elements.ctaButton.href = checkoutUrl;
-      elements.ctaButton.removeAttribute("aria-disabled");
-      if (elements.ctaButtonBottom) {
-        elements.ctaButtonBottom.href = checkoutUrl;
-        elements.ctaButtonBottom.removeAttribute("aria-disabled");
-      }
-      showLineButton(true);
-    } else {
-      elements.ctaButton.href = "#";
-      elements.ctaButton.setAttribute("aria-disabled", "true");
-      elements.ctaButton.style.display = "none";
-      if (elements.ctaButtonBottom) {
-        elements.ctaButtonBottom.href = "#";
-        elements.ctaButtonBottom.setAttribute("aria-disabled", "true");
-        elements.ctaButtonBottom.style.display = "none";
-      }
+    if (!checkoutUrl) {
+      disableCta();
       showLineButton(false);
+      return;
+    }
+
+    // デフォルトは有効化。購読済み確認後に上書き。
+    enableCta(checkoutUrl);
+    showLineButton(true);
+
+    fetchCheckoutStatus().then((status) => {
+      if (status?.proActive) {
+        disableCta(
+          currentLang === "ja"
+            ? "このグループは既にProプランに加入済みです"
+            : "This group is already on the Pro plan"
+        );
+        showLineButton(false);
+      }
+    });
+  }
+
+  function enableCta(url) {
+    elements.ctaButton.href = url;
+    elements.ctaButton.removeAttribute("aria-disabled");
+    elements.ctaButton.style.display = "inline-flex";
+    if (elements.ctaButtonBottom) {
+      elements.ctaButtonBottom.href = url;
+      elements.ctaButtonBottom.removeAttribute("aria-disabled");
+      elements.ctaButtonBottom.style.display = "inline-flex";
+    }
+  }
+
+  function disableCta(reasonText) {
+    elements.ctaButton.href = "#";
+    elements.ctaButton.setAttribute("aria-disabled", "true");
+    elements.ctaButton.style.display = "none";
+    if (elements.ctaButtonBottom) {
+      elements.ctaButtonBottom.href = "#";
+      elements.ctaButtonBottom.setAttribute("aria-disabled", "true");
+      elements.ctaButtonBottom.style.display = "none";
+    }
+
+    if (reasonText) {
+      const notice = document.createElement("p");
+      notice.className = "cta-notice";
+      notice.textContent = reasonText;
+      const ctaTop = document.getElementById("cta");
+      if (ctaTop) {
+        ctaTop.appendChild(notice);
+      }
     }
   }
 

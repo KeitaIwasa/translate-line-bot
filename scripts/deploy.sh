@@ -19,6 +19,7 @@ TRANSLATION_RETRY="${TRANSLATION_RETRY:-2}"
 RUNTIME_SECRET_ARN="${RUNTIME_SECRET_ARN:-}"
 S3_BUCKET="${S3_BUCKET:-}"
 ENABLE_STRIPE="${ENABLE_STRIPE:-true}"
+DEPLOY_NONCE="${DEPLOY_NONCE:-$(date +%s)}"
 
 if [[ -z "$RUNTIME_SECRET_ARN" ]]; then
   if [[ "$STAGE" == "prod" ]]; then
@@ -45,6 +46,7 @@ deploy_args=(
     MaxGroupLanguages="$MAX_GROUP_LANGUAGES"
     TranslationRetry="$TRANSLATION_RETRY"
     RuntimeSecretArn="$RUNTIME_SECRET_ARN"
+    DeployNonce="$DEPLOY_NONCE"
     EnableStripe="$ENABLE_STRIPE"
 )
 

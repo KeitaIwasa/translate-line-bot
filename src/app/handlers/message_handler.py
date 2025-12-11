@@ -69,9 +69,6 @@ GROUP_PROMPT_MESSAGE = (
     "ฉันเป็นบอทแปลหลายภาษา กรุณาบอกฉันว่าคุณต้องการแปลเป็นภาษาใดบ้าง\n\n"
     "ex) English, 中文, 日本語, ไทย"
 )
-DIRECT_GREETING = (
-    "Thanks for adding me! Please invite me into a group so I can help with multilingual translation."
-)
 LANGUAGE_ANALYSIS_FALLBACK = (
     "ごめんなさい、翻訳する言語の確認に失敗しました。数秒おいてから、翻訳したい言語をカンマ区切りで送ってください。\n"
     "Sorry, I couldn't detect your languages. Please resend after a few seconds (e.g., English, 日本語, 中文, ไทย).\n"
@@ -150,10 +147,8 @@ class MessageHandler:
         if not event.reply_token:
             return
 
-        # 1: 個チャットではグループ招待を案内
+        # 1: 個チャットはサポート外（挨拶はLINE公式コンソール側で設定）
         if event.sender_type == "user" and (not event.group_id or event.group_id == event.user_id):
-            self._line.reply_text(event.reply_token, DIRECT_GREETING)
-            self._record_message(event, sender_name=event.user_id or "Unknown")
             return
 
         if not event.group_id or not event.user_id:
@@ -269,7 +264,7 @@ class MessageHandler:
 
         if action == "pause":
             self._repo.set_translation_enabled(event.group_id, False)
-            base_ack = decision.ack_text or "翻訳を一時停止します。再開するときはもう一度メンションしてください。"
+            base_ack = "I will pause translation. Please mention me again when you want to resume."
             ack = self._build_multilingual_interface_message(base_ack, event.group_id)
             if event.reply_token:
                 self._line.reply_text(event.reply_token, ack[:5000])
@@ -277,7 +272,7 @@ class MessageHandler:
 
         if action == "resume":
             self._repo.set_translation_enabled(event.group_id, True)
-            base_ack = decision.ack_text or "翻訳を再開します。"
+            base_ack = "I will resume the translation."
             ack = self._build_multilingual_interface_message(base_ack, event.group_id)
             if event.reply_token:
                 self._line.reply_text(event.reply_token, ack[:5000])
@@ -951,6 +946,28 @@ class MessageHandler:
         if last_error:
             raise last_error
         return []
+
+    @staticmethod
+    def _looks_english(text: str) -> bool:
+        """簡易的に英語らしいか判定（非英語文字を含む場合は除外）。"""
+        if not text:
+            return False
+        # CJK/ハングル/アラビア文字が含まれていれば英語扱いしない
+        if re.search(r"[\u3040-\u30ff\u4e00-\u9fff\u3130-\u318f\uac00-\ud7af\u0600-\u06ff]", text):
+            return False
+        # アルファベットが含まれていれば英語らしいとみなす
+        return bool(re.search(r"[A-Za-z]", text))
+
+    def _choose_interface_base_text(self, decision: models.CommandDecision, default_en: str) -> str:
+        """インターフェース文言のベース英語文を選択する。
+
+        ack_text は指示言語で生成されるため、そのまま使うと英語スロットに他言語が入って
+        重複表示になる。英語らしい場合のみ採用し、それ以外は英語デフォルトを返す。
+        """
+        ack = (decision.ack_text or "").strip()
+        if ack and self._looks_english(ack):
+            return ack
+        return default_en
 
     def _build_multilingual_interface_message(self, base_text: str, group_id: str) -> str:
         languages = self._limit_language_codes(self._repo.fetch_group_languages(group_id))
