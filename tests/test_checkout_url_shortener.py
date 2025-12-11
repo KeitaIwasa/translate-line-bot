@@ -20,7 +20,7 @@ def _fake_stripe_module(session_id: str = "cs_test_short", url: str = "https://c
     return module
 
 
-def _build_handler(checkout_base: str):
+def _build_handler(frontend_base: str, api_base: str = ""):
     return MessageHandler(
         line_client=_Dummy(),
         translation_service=_Dummy(),
@@ -36,20 +36,25 @@ def _build_handler(checkout_base: str):
         stripe_secret_key="sk_test_123",
         stripe_price_monthly_id="price_123",
         free_quota_per_month=50,
-        checkout_base_url=checkout_base,
+        subscription_frontend_base_url=frontend_base,
+        checkout_api_base_url=api_base,
     )
 
 
 def test_build_checkout_url_uses_short_redirect(monkeypatch):
     monkeypatch.setitem(sys.modules, "stripe", _fake_stripe_module())
 
-    handler = _build_handler("https://api.example.com/stg")
+    handler = _build_handler(
+        "https://frontend.example.com",
+        "https://api.example.com/stg",
+    )
     url = handler._build_checkout_url("group1")
 
     assert (
         url
-        == "https://api.example.com/stg/pages/index.html?"
+        == "https://frontend.example.com/pages/index.html?"
         "session_id=cs_test_short&checkout_url=https%3A%2F%2Fcheckout.stripe.com%2Fc%2Fpay%2Fmock"
+        "&api_base=https%3A%2F%2Fapi.example.com%2Fstg"
     )
 
 

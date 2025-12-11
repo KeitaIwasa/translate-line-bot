@@ -19,4 +19,7 @@
 - [x] 個別チャットでのDIRECT_GREETING送信を無効化（2025-12-11 実施）
 - [x] 本番環境へデプロイ（2025-12-11 実施）
 - [x] デプロイ時に必ずスタック更新を強制するDEPLOY_NONCEを追加（2025-12-11 実施）
+- [x] サブスク案内ページ用のベースURL環境変数をSUBSCRIPTION_FRONTEND_BASE_URLに改名（2025-12-11 実施）
 - [ ] Pro購入ページで既加入グループの場合は購入ボタンを無効化（2025-12-11 着手）
+- [ ] Secrets ManagerにSUBSCRIPTION_FRONTEND_BASE_URLキーを追加し再デプロイ（2025-12-11 未実施）
+- [ ] Secrets ManagerにCHECKOUT_API_BASE_URLキーを追加し再デプロイ（2025-12-11 未実施）

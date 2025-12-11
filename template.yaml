@@ -93,7 +93,8 @@ Globals:
           - UseStripe
           - !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:STRIPE_PRICE_MONTHLY_ID}}"
           - ""
-        PUBLIC_API_BASE_URL: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:PUBLIC_API_BASE_URL}}"
+        SUBSCRIPTION_FRONTEND_BASE_URL: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:SUBSCRIPTION_FRONTEND_BASE_URL}}"
+        CHECKOUT_API_BASE_URL: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:CHECKOUT_API_BASE_URL}}"
 
 Resources:
   LineWebhookApi:

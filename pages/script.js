@@ -313,14 +313,23 @@
   const params = new URLSearchParams(window.location.search);
   const checkoutId = params.get("session_id") || params.get("sessionId");
   const checkoutUrlParam = params.get("checkout_url");
+  const apiBaseParam = params.get("api_base") || params.get("apiBase");
+
+  function buildApiUrl(path) {
+    if (!apiBaseParam) return path;
+    const normalized = apiBaseParam.replace(/\/+$/, "");
+    return `${normalized}${path}`;
+  }
   const checkoutUrl =
     checkoutUrlParam ||
-    (checkoutId ? `/checkout?session_id=${encodeURIComponent(checkoutId)}` : null);
+    (checkoutId
+      ? buildApiUrl(`/checkout?session_id=${encodeURIComponent(checkoutId)}`)
+      : null);
 
   // 既存購読チェック用エンドポイント
   const checkoutStatusUrl =
     checkoutId && checkoutUrl
-      ? `/checkout?session_id=${encodeURIComponent(checkoutId)}&mode=status`
+      ? buildApiUrl(`/checkout?session_id=${encodeURIComponent(checkoutId)}&mode=status`)
       : null;
 
   async function fetchCheckoutStatus() {

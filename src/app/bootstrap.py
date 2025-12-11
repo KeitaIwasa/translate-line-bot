@@ -73,7 +73,8 @@ def build_dispatcher() -> Dispatcher:
         repo,
         stripe_secret_key=settings.stripe_secret_key,
         stripe_price_monthly_id=settings.stripe_price_monthly_id,
-        checkout_base_url=settings.public_api_base_url,
+        subscription_frontend_base_url=settings.subscription_frontend_base_url,
+        checkout_api_base_url=settings.checkout_api_base_url,
     )
 
     message_handler = MessageHandler(
@@ -92,7 +93,8 @@ def build_dispatcher() -> Dispatcher:
         stripe_price_monthly_id=settings.stripe_price_monthly_id,
         free_quota_per_month=settings.free_quota_per_month,
         pro_quota_per_month=settings.pro_quota_per_month,
-        checkout_base_url=settings.public_api_base_url,
+        subscription_frontend_base_url=settings.subscription_frontend_base_url,
+        checkout_api_base_url=settings.checkout_api_base_url,
         subscription_service=subscription_service,
         quota_service=quota_service,
         translation_flow_service=translation_flow_service,

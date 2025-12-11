@@ -97,7 +97,8 @@ class MessageHandler:
         stripe_price_monthly_id: str = "",
         free_quota_per_month: int = 50,
         pro_quota_per_month: int = 8000,
-        checkout_base_url: str = "",
+        subscription_frontend_base_url: str = "",
+        checkout_api_base_url: str = "",
         subscription_service: SubscriptionService | None = None,
         executor: ThreadPoolExecutor | None = None,
         quota_service: QuotaService | None = None,
@@ -119,12 +120,14 @@ class MessageHandler:
         self._stripe_price_monthly_id = stripe_price_monthly_id
         self._free_quota = free_quota_per_month
         self._pro_quota = pro_quota_per_month
-        self._checkout_base_url = checkout_base_url.rstrip("/") if checkout_base_url else ""
+        # 案内ポータル (GitHub Pages 等) のベース URL
+        self._subscription_frontend_base_url = subscription_frontend_base_url.rstrip("/") if subscription_frontend_base_url else ""
         self._subscription_service = subscription_service or SubscriptionService(
             repo,
             stripe_secret_key,
             stripe_price_monthly_id,
-            checkout_base_url,
+            subscription_frontend_base_url,
+            checkout_api_base_url,
         )
         self._quota = quota_service or QuotaService(repo)
         self._translation_flow = translation_flow_service or TranslationFlowService(
@@ -526,28 +529,8 @@ class MessageHandler:
         return True
 
     def _handle_subscription_upgrade(self, event: models.MessageEvent, instruction_lang: str) -> bool:
-        status, _period_start, _period_end = getattr(self._repo, "get_subscription_period", lambda *_: (None, None, None))(
-            event.group_id
-        )
-        paid = status in {"active", "trialing"}
-        if paid:
-            message = self._build_multilingual_interface_message(SUBS_ALREADY_PRO_TEXT, event.group_id)
-            if event.reply_token:
-                self._line.reply_text(event.reply_token, message)
-            return True
-
-        url = self._subscription_service.create_checkout_url(event.group_id)
-        if not url:
-            message = self._translate_template(SUBS_UPGRADE_LINK_FAIL, instruction_lang, force=True)
-            if event.reply_token and message:
-                self._line.reply_text(event.reply_token, message[:5000])
-            return True
-
-        base_text = f"Upgrade to Pro from the link below.\n{url}"
-        message = self._build_multilingual_interface_message(base_text, event.group_id)
-        if event.reply_token:
-            self._line.reply_text(event.reply_token, message)
-        return True
+        # アップグレード指示でもメニューを表示し、案内メッセージは送らない
+        return self._handle_subscription_menu(event, instruction_lang)
 
     def _maybe_send_limit_notice(
         self,
