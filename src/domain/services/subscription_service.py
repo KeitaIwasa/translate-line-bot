@@ -52,15 +52,20 @@ class SubscriptionService:
 
             if self._subscription_frontend_base_url and session_id:
                 # 事前案内ページへ遷移させ、ページ内ボタンから Checkout に進ませる
-                encoded_checkout = quote_plus(checkout_url) if checkout_url else ""
                 api_base_param = (
                     f"&api_base={quote_plus(self._checkout_api_base_url)}"
                     if self._checkout_api_base_url
                     else ""
                 )
+                # api_base が設定されていれば /checkout リダイレクト経由で短いURLを返す。
+                # 未設定の環境では Stripe の checkout_url を保持しつつ従来挙動を維持する。
+                checkout_param = ""
+                if (not self._checkout_api_base_url) and checkout_url:
+                    checkout_param = f"&checkout_url={quote_plus(checkout_url)}"
+
                 return (
                     f"{self._subscription_frontend_base_url}/pages/index.html"
-                    f"?session_id={session_id}&checkout_url={encoded_checkout}{api_base_param}"
+                    f"?session_id={session_id}{api_base_param}{checkout_param}"
                 )
 
             return checkout_url

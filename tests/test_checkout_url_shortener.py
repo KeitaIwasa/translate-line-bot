@@ -53,8 +53,7 @@ def test_build_checkout_url_uses_short_redirect(monkeypatch):
     assert (
         url
         == "https://frontend.example.com/pages/index.html?"
-        "session_id=cs_test_short&checkout_url=https%3A%2F%2Fcheckout.stripe.com%2Fc%2Fpay%2Fmock"
-        "&api_base=https%3A%2F%2Fapi.example.com%2Fstg"
+        "session_id=cs_test_short&api_base=https%3A%2F%2Fapi.example.com%2Fstg"
     )
 
 
