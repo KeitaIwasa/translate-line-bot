@@ -11,25 +11,23 @@
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
-  <div class="page-shell">
-    <header class="top-bar">
+  <div class="top-bar-wrap">
+    <nav class="top-bar" aria-label="Primary">
       <div class="brand">
-        <span class="brand-mark">KO</span>
-        <div class="brand-text">
-          <div class="brand-name">KOTORI</div>
-          <div class="brand-sub">LINE Translation Bot</div>
-        </div>
+        <div class="brand-name">KOTORI</div>
       </div>
       <div class="lang-picker" aria-label="Language selector">
         <select id="langSelect" class="lang-select">
           <option value="ja">日本語</option>
           <option value="en">English</option>
-          <option value="zh-TW">中文（台灣）</option>
+          <option value="zh-TW">繁體中文</option>
           <option value="th">ไทย</option>
         </select>
       </div>
-    </header>
+    </nav>
+  </div>
 
+  <div class="page-shell">
     <main>
       <section class="hero">
         <p class="hero-wordmark">KOTORI</p>
@@ -116,7 +114,7 @@
       </div>
 
       <div class="legal-links">
-        <a href="./docs/consumer-ja.html" target="_blank" rel="noopener">特定商取引法に基づく表記 (Consumer Information)</a>
+        <a id="consumerLink" data-i18n="consumerLink" href="./docs/consumer-ja.html" target="_blank" rel="noopener">Consumer Information</a>
       </div>
     </main>
   </div>

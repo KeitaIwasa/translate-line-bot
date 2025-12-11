@@ -64,6 +64,7 @@
       ],
       notesTerms:
         "See the full details below.<br />・<a href=\"./docs/terms-en.html\" target=\"_blank\" rel=\"noopener\">Terms of Service</a><br />・<a href=\"./docs/privacy-en.html\" target=\"_blank\" rel=\"noopener\">Privacy Policy</a>",
+      consumerLink: "Consumer Information",
     },
     ja: {
       heroTitle: "多言語のLINEグループ運営を、Proプランでストレスゼロに。",
@@ -120,6 +121,7 @@
       ],
       notesTerms:
         "詳細な条件については、以下のページをご確認ください。<br />・<a href=\"./docs/terms-ja.html\" target=\"_blank\" rel=\"noopener\">利用規約</a><br />・<a href=\"./docs/privacy-ja.html\" target=\"_blank\" rel=\"noopener\">プライバシーポリシー</a>",
+      consumerLink: "特定商取引法に基づく表記",
     },
     "zh-TW": {
       heroTitle: "用 Pro 方案，無壓力經營多語系 LINE 群組。",
@@ -176,6 +178,7 @@
       ],
       notesTerms:
         "詳細條件請參閱以下頁面。<br />・<a href=\"./docs/terms-zh-tw.html\" target=\"_blank\" rel=\"noopener\">服務條款</a><br />・<a href=\"./docs/privacy-zh-tw.html\" target=\"_blank\" rel=\"noopener\">隱私權政策</a>",
+      consumerLink: "消費者資訊",
     },
     th: {
       heroTitle: "ดูแลงานแปลในกลุ่ม LINE หลายภาษาง่าย ๆ ด้วย Pro Plan",
@@ -232,6 +235,7 @@
       ],
       notesTerms:
         "ดูรายละเอียดเพิ่มเติมได้ที่ลิงก์ด้านล่าง<br />・<a href=\"./docs/terms-th.html\" target=\"_blank\" rel=\"noopener\">ข้อตกลงการใช้บริการ</a><br />・<a href=\"./docs/privacy-th.html\" target=\"_blank\" rel=\"noopener\">นโยบายความเป็นส่วนตัว</a>",
+      consumerLink: "กฎหมายการค้าขายของญี่ปุ่น",
     },
   };
 
@@ -257,6 +261,7 @@
     notesList: document.getElementById("notesList"),
     notesTerms: document.getElementById("notesTerms"),
     ctaButtonBottom: document.getElementById("ctaButtonBottom"),
+    consumerLink: document.getElementById("consumerLink"),
   };
 
   const langSelect = document.getElementById("langSelect");
@@ -265,6 +270,12 @@
     en: "./assets/flags/gb.svg",
     "zh-TW": "./assets/flags/tw.svg",
     th: "./assets/flags/th.svg",
+  };
+  const consumerPaths = {
+    ja: "./docs/consumer-ja.html",
+    en: "./docs/consumer-en.html",
+    "zh-TW": "./docs/consumer-zh-tw.html",
+    th: "./docs/consumer-th.html",
   };
   const globeIconPath = "./assets/globe.svg";
   const triggerLabel = "LNGUAGE";
@@ -435,6 +446,10 @@
     elements.notesTitle.textContent = t.notesTitle;
     setList("notesList", t.notes);
     elements.notesTerms.innerHTML = t.notesTerms;
+    if (elements.consumerLink) {
+      elements.consumerLink.textContent = t.consumerLink || "Consumer Information";
+      elements.consumerLink.href = consumerPaths[lang] || consumerPaths.ja;
+    }
 
     if (langSelect) {
       langSelect.value = lang;
