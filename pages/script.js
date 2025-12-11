@@ -1,12 +1,13 @@
 (() => {
   const translations = {
     en: {
-      heroTitle: "Run multilingual LINE groups stress-free with the Pro plan.",
+      heroTitle: "Run multilingual LINE groups stress-free with the KOTORI Pro plan.",
       heroLead:
-        "The Translation AI Bot Pro Plan delivers context-aware translations inside your LINE groups. Use it confidently for work or personal chats without worrying about free-tier limits.",
+        "The KOTORI Pro Plan is the paid plan for our LINE bot that auto-translates group messages with contextual awareness. Use it confidently for work or personal chats without worrying about free-tier limits.",
       price:
         "Price: <span class=\"price-amount\"><span class=\"price-currency\">JPY</span><span class=\"price-number\">380</span></span> / month (tax included) per group",
-      audience: "Best for: global business teams, international student or friend groups, and cross-cultural communities",
+      audience:
+        "Best for: business chats in multinational teams, international student or friend groups, and cross-cultural communities",
       ctaLabel: "Purchase Pro Plan",
       ctaTerms:
         "By purchasing via the button below, you agree to the following terms.<br />・<a href=\"./docs/terms-en.html\" target=\"_blank\" rel=\"noopener\">Terms of Service</a><br />・<a href=\"./docs/privacy-en.html\" target=\"_blank\" rel=\"noopener\">Privacy Policy</a>",
@@ -38,20 +39,19 @@
       ],
       pricingTitle: "Pricing & billing conditions",
       pricing: [
-        "Plan name: LINE Multilingual Translation AI Bot Pro Plan",
+        "Plan name: KOTORI - AI Translation/การแปล Pro Plan",
         "Price: JPY 380 / month (tax included) per group",
-        "Billing: paid by one representative via credit card (auto-renew)",
-        "Charge timing: first month is billed at checkout; renews monthly thereafter",
-        "Cancellation: mention the bot in your group and send the cancel command anytime; Pro features remain until the paid period ends",
-        "If the bot is removed from the group, the Pro plan is automatically canceled and past charges are not refunded",
+        "Billing: paid online by one representative (auto-renew)",
+        "Charge timing: pay one month at checkout; auto-renews monthly thereafter",
+        "Cancellation: mention the bot in your group and send the cancel command anytime; Pro stays active until the paid period ends",
       ],
       flowTitle: "How to get started",
       flow: [
-        "Invite the Translation AI Bot to your LINE group.",
-        "Try the Free plan translation behavior.",
-        "Click the “Purchase Pro Plan” button on this page to proceed to checkout and pay by credit card.",
-        "After payment, Pro is activated within a few minutes and remains active for the billing period.",
-        "To cancel, mention the bot and send the cancel command; you can keep using Pro until the paid period ends.",
+        "Invite the official KOTORI LINE bot to your target group.",
+        "Try translation behavior on the Free plan.",
+        "Click the “Purchase Pro Plan” button on this page to go to checkout and pay by credit card.",
+        "After payment, the group’s Pro Plan activates within a few minutes and remains active for the billing period.",
+        "To cancel, mention the bot in the group and send the cancel command; you can keep using Pro until the paid period ends.",
       ],
       notesTitle: "Notes and terms",
       notes: [
@@ -67,15 +67,15 @@
       consumerLink: "Consumer Information",
     },
     ja: {
-      heroTitle: "多言語のLINEグループ運営を、Proプランでストレスゼロに。",
+      heroTitle: "多言語のLINEグループ運営を、AIボットのProプランでストレスゼロに。",
       heroLead:
-        "「翻訳AIボット Proプラン」は、LINEグループ内のメッセージを文脈を考慮して自動翻訳する有料プランです。無料プランの制限を気にせず、ビジネスでもプライベートでも安心してご利用いただけます。",
+        "「KOTORI Proプラン」は、LINEグループ内のメッセージを文脈を考慮して自動翻訳するLINEボットの有料プランです。無料プランの制限を気にせず、ビジネスでもプライベートでも安心してご利用いただけます。",
       price:
         "料金：月額 <span class=\"price-amount\"><span class=\"price-currency\">¥</span><span class=\"price-number\">380</span></span>(税込) / 1グループ",
       audience: "対象：多国籍チームのビジネスチャット、留学生・友人グループ、国際交流コミュニティ など",
       ctaLabel: "Proプランを購入",
       ctaTerms:
-        "下記ボタンよりご購入いただくことで、以下の規約に同意したものとみなされます。<br />・<a href=\"./docs/terms-ja.html\" target=\"_blank\" rel=\"noopener\">利用規約</a><br />・<a href=\"./docs/privacy-ja.html\" target=\"_blank\" rel=\"noopener\">プライバシーポリシー</a>",
+        "上のボタンよりご購入いただくことで、以下の規約に同意したものとみなされます。<br />・<a href=\"./docs/terms-ja.html\" target=\"_blank\" rel=\"noopener\">利用規約</a><br />・<a href=\"./docs/privacy-ja.html\" target=\"_blank\" rel=\"noopener\">プライバシーポリシー</a>",
       missingNotice: "決済リンクが無効です。招待メッセージから正しいリンクを開いてください。",
       featuresTitle: "Proプランでできること",
       features: [
@@ -91,22 +91,21 @@
       comparePro: "Proプラン",
       comparison: [
         { item: "料金", free: "無料", pro: "月額 ¥380（税込） / 1グループ" },
-        { item: "翻訳量", free: "50メッセージ/月", pro: "8000メッセージ/月" },
+        { item: "翻訳量", free: "50メッセージ/月", pro: "8,000メッセージ/月" },
       ],
       pricingTitle: "料金・課金条件",
       pricing: [
-        "プラン名：LINE多言語翻訳AIボット Proプラン",
+        "プラン名：KOTORI - AI翻訳/การแปล Proプラン",
         "料金：月額 ¥380（税込） / 1グループ",
-        "課金方式：代表者1人がクレジットカード決済（自動更新）",
+        "課金方式：代表者1人がオンライン決済（自動更新）",
         "請求タイミング：初回購入時に1か月分をお支払い、その後は毎月自動更新",
         "解約方法：グループでボットにメンションし、解約コマンドを送信するといつでも解約可能。支払済み期間の終了までは利用可能",
-        "グループからボットが退会させられた場合、当該グループの Pro プランは自動的に解約され、期間途中でも返金は行いません",
       ],
       flowTitle: "ご利用開始までの流れ",
       flow: [
-        "LINEで翻訳AIボットを対象グループに招待します。",
+        "KOTORI公式LINEを対象グループに招待します。",
         "Freeプランとして翻訳の挙動をお試しください。",
-        "本ページの「Proプランを購入」ボタンから決済ページへ進み、クレジットカードでお支払いください。",
+        "本ページの「Proプランを購入」ボタンから決済ページへ進み、クレジットカードなどでお支払いください。",
         "決済完了後、数分以内にグループの Pro プランが有効化され、月額期間中は Pro プランの機能をご利用いただけます。",
         "解約したい場合は、グループでボットにメンションし、解約コマンドを送信してください。支払済み期間の終了までは Pro プランを利用できます。",
       ],
@@ -116,17 +115,17 @@
         "グループからボットが退会させられた場合、その時点で Pro プランは自動的に解約され、期間途中でも返金は行いません。",
         "お客様による解約手続きの場合も、支払済み期間中の返金は行いません。支払済み期間の満了までは Pro プランを利用できます。",
         "サービスの仕様・料金・対応言語は、事前の予告なく変更される場合があります。",
-        "通信環境や外部サービス（LINE、LLM、Stripe 等）の障害により、一時的に翻訳結果の提供ができない場合があります。",
-        "翻訳品質向上と文脈理解のため、グループ内のメッセージを保存し、翻訳時に直近の会話履歴の一部を外部AIモデル（Gemini）に送信します。",
+        "通信環境や外部サービスの障害により、一時的に翻訳結果の提供ができない場合があります。",
+        "翻訳品質向上と文脈理解のため、グループ内のメッセージを保存し、翻訳時に直近の会話履歴の一部を外部AIモデルに送信します。",
       ],
       notesTerms:
         "詳細な条件については、以下のページをご確認ください。<br />・<a href=\"./docs/terms-ja.html\" target=\"_blank\" rel=\"noopener\">利用規約</a><br />・<a href=\"./docs/privacy-ja.html\" target=\"_blank\" rel=\"noopener\">プライバシーポリシー</a>",
       consumerLink: "特定商取引法に基づく表記",
     },
     "zh-TW": {
-      heroTitle: "用 Pro 方案，無壓力經營多語系 LINE 群組。",
+      heroTitle: "用 KOTORI Pro 方案，無壓力經營多語系 LINE 群組。",
       heroLead:
-        "「翻譯 AI Bot Pro 方案」會在 LINE 群組中依據脈絡自動翻譯訊息。免擔心免費額度限制，無論商務或私人聊天都能放心使用。",
+        "「KOTORI Pro 方案」是 LINE 機器人的付費方案，可依據脈絡自動翻譯群組訊息。免擔心免費方案的限制，商務或私人聊天都能安心使用。",
       price:
         "價格：每組每月 <span class=\"price-amount\"><span class=\"price-currency\">JPY</span><span class=\"price-number\">380</span></span>（含稅）",
       audience: "適用：跨國商務團隊、留學生／朋友群組、國際交流社群等",
@@ -152,19 +151,18 @@
       ],
       pricingTitle: "價格與課費條件",
       pricing: [
-        "方案名稱：LINE 多語翻譯 AI Bot Pro 方案",
+        "方案名稱：KOTORI - AI 翻譯/การแปล Pro 方案",
         "價格：每組每月 JPY 380（含稅）",
-        "付款方式：由一位代表以信用卡付款（自動續訂）",
-        "收費時間：首次購買即收取一個月費用，其後每月自動續訂",
-        "解約：在群組中標記機器人並傳送解約指令即可，已付費期間結束前皆可繼續使用",
-        "若機器人被移出群組，該群組的 Pro 方案會自動取消，期間內不退費",
+        "付款方式：由一位代表線上刷卡付款（自動續訂）",
+        "收費時間：首次購買即收取一個月，其後每月自動續訂",
+        "解約：在群組標記機器人並傳送解約指令即可；已付費期間結束前仍可使用 Pro",
       ],
       flowTitle: "開始使用的步驟",
       flow: [
-        "將翻譯 AI Bot 邀請到目標 LINE 群組。",
-        "先以 Free 方案體驗翻譯行為。",
-        "在本頁點擊「購買 Pro 方案」按鈕前往結帳並以信用卡付款。",
-        "付款完成後數分鐘內啟用 Pro，於計費期間內皆可使用。",
+        "將官方的 KOTORI LINE 機器人邀請到目標群組。",
+        "先以 Free 方案試用翻譯行為。",
+        "在本頁點擊「購買 Pro 方案」按鈕前往結帳，並以信用卡付款。",
+        "付款完成後數分鐘內即啟用該群組的 Pro 方案，於計費期間可持續使用。",
         "若要解約，在群組標記機器人並傳送解約指令；已付費期間結束前仍可使用 Pro。",
       ],
       notesTitle: "注意事項與條款",
@@ -181,9 +179,9 @@
       consumerLink: "消費者資訊",
     },
     th: {
-      heroTitle: "ดูแลงานแปลในกลุ่ม LINE หลายภาษาง่าย ๆ ด้วย Pro Plan",
+      heroTitle: "ดูแลงานแปลในกลุ่ม LINE หลายภาษาง่าย ๆ ด้วย KOTORI Pro Plan",
       heroLead:
-        "แปลข้อความในกลุ่ม LINE อย่างเข้าใจบริบทด้วย Translation AI Bot Pro Plan ใช้งานได้ทั้งธุรกิจและส่วนตัวโดยไม่ต้องกังวลขีดจำกัดแบบฟรี",
+        "KOTORI Pro Plan คือแพ็กเกจเสียเงินของบอต LINE ที่แปลข้อความในกลุ่มแบบเข้าใจบริบท ใช้งานได้ทั้งธุรกิจและส่วนตัวโดยไม่ต้องกังวลข้อจำกัดของฟรีแพ็กเกจ",
       price:
         "ราคา: <span class=\"price-amount\"><span class=\"price-currency\">JPY</span><span class=\"price-number\">380</span></span> ต่อเดือน (รวมภาษี) ต่อ 1 กลุ่ม",
       audience: "เหมาะสำหรับ: ทีมธุรกิจหลายชาติ กลุ่มเพื่อน/นักศึกษาต่างชาติ และคอมมูนิตี้นานาชาติ",
@@ -209,19 +207,18 @@
       ],
       pricingTitle: "ราคาและเงื่อนไขการเรียกเก็บเงิน",
       pricing: [
-        "ชื่อแพ็กเกจ: LINE Multilingual Translation AI Bot Pro Plan",
+        "ชื่อแพ็กเกจ: KOTORI - AI Translation/การแปล Pro Plan",
         "ราคา: JPY 380 ต่อเดือน (รวมภาษี) ต่อ 1 กลุ่ม",
-        "การชำระเงิน: ผู้แทน 1 คนจ่ายด้วยบัตรเครดิต (ต่ออายุอัตโนมัติ)",
+        "การชำระเงิน: ผู้แทน 1 คนชำระออนไลน์ด้วยบัตรเครดิต (ต่ออายุอัตโนมัติ)",
         "รอบบิล: ชำระเดือนแรกตอนซื้อ จากนั้นตัดบัตรอัตโนมัติทุกเดือน",
         "ยกเลิก: แท็กบอตในกลุ่มแล้วส่งคำสั่งยกเลิกได้ตลอด ใช้ Pro ต่อได้จนจบรอบที่ชำระแล้ว",
-        "หากบอตถูกเตะออกจากกลุ่ม ระบบจะยกเลิก Pro ให้โดยอัตโนมัติ และไม่คืนเงินส่วนที่เหลือ",
       ],
       flowTitle: "วิธีเริ่มต้นใช้งาน",
       flow: [
-        "เชิญ Translation AI Bot เข้ากลุ่ม LINE ของคุณ",
+        "เชิญบอต LINE อย่างเป็นทางการของ KOTORI เข้ากลุ่มที่ต้องการ",
         "ทดลองพฤติกรรมการแปลใน Free Plan",
         "กดปุ่ม “ซื้อ Pro Plan” บนหน้านี้เพื่อไปยังหน้าชำระเงินและจ่ายด้วยบัตรเครดิต",
-        "หลังชำระเงิน Pro จะเปิดใช้งานภายในไม่กี่นาที ใช้ได้ตลอดรอบบิล",
+        "หลังชำระเงิน แผน Pro ของกลุ่มจะเปิดภายในไม่กี่นาทีและใช้งานได้ตลอดรอบบิล",
         "หากต้องการยกเลิก ให้แท็กบอตแล้วส่งคำสั่งยกเลิก ใช้ Pro ต่อได้จนจบรอบที่จ่ายแล้ว",
       ],
       notesTitle: "ข้อควรทราบและเงื่อนไข",
@@ -280,6 +277,25 @@
   const globeIconPath = "./assets/globe.svg";
   const triggerLabel = "LNGUAGE";
 
+  const lineButtonAssets = {
+    ja: {
+      src: "https://scdn.line-apps.com/n/line_add_friends/btn/ja.png",
+      alt: "友だち追加",
+    },
+    en: {
+      src: "https://scdn.line-apps.com/n/line_add_friends/btn/en.png",
+      alt: "Add friend",
+    },
+    "zh-TW": {
+      src: "https://scdn.line-apps.com/n/line_add_friends/btn/zh-Hant.png",
+      alt: "加入好友",
+    },
+    th: {
+      src: "https://scdn.line-apps.com/n/line_add_friends/btn/th.png",
+      alt: "เพิ่มเพื่อน",
+    },
+  };
+
   let customSelectEl;
   let customOptionsEl;
   let customTriggerEl;
@@ -287,6 +303,7 @@
   let customTriggerTextEl;
   let lineButtonTop;
   let lineButtonBottom;
+  let currentLang = "ja";
 
   const params = new URLSearchParams(window.location.search);
   const checkoutId = params.get("session_id") || params.get("sessionId");
@@ -331,6 +348,21 @@
         : !customSelectEl.classList.contains("open");
     customSelectEl.classList.toggle("open", willOpen);
     customTriggerEl.setAttribute("aria-expanded", String(willOpen));
+  }
+
+  function getLineButtonAsset(lang) {
+    return lineButtonAssets[lang] || lineButtonAssets.ja;
+  }
+
+  function updateLineButtonAssets(lang) {
+    const asset = getLineButtonAsset(lang);
+    [lineButtonTop, lineButtonBottom].forEach((btn) => {
+      if (!btn) return;
+      const img = btn.querySelector("img");
+      if (!img) return;
+      img.src = asset.src;
+      img.alt = asset.alt;
+    });
   }
 
   function updateCustomSelected(lang) {
@@ -417,6 +449,7 @@
   }
 
   function applyLang(lang) {
+    currentLang = lang;
     const t = translations[lang] || translations.ja;
     document.documentElement.lang = lang;
 
@@ -459,18 +492,20 @@
     }
 
     updateCustomSelected(lang);
+    updateLineButtonAssets(lang);
   }
 
-  function createLineAddButton() {
+  function createLineAddButton(lang) {
     const anchor = document.createElement("a");
     anchor.href = "https://lin.ee/5roFh0n";
     anchor.target = "_blank";
     anchor.rel = "noopener";
     anchor.className = "line-add-btn";
 
+    const asset = getLineButtonAsset(lang);
     const img = document.createElement("img");
-    img.src = "https://scdn.line-apps.com/n/line_add_friends/btn/ja.png";
-    img.alt = "友だち追加";
+    img.src = asset.src;
+    img.alt = asset.alt;
     img.height = 36;
     img.border = 0;
 
@@ -484,13 +519,14 @@
 
     if (!isCheckoutAvailable) {
       if (!lineButtonTop && ctaTop) {
-        lineButtonTop = createLineAddButton();
+        lineButtonTop = createLineAddButton(currentLang);
         ctaTop.insertBefore(lineButtonTop, ctaTop.firstChild);
       }
       if (!lineButtonBottom && ctaBottom) {
-        lineButtonBottom = createLineAddButton();
+        lineButtonBottom = createLineAddButton(currentLang);
         ctaBottom.insertBefore(lineButtonBottom, ctaBottom.firstChild);
       }
+      updateLineButtonAssets(currentLang);
     } else {
       if (lineButtonTop?.parentNode) lineButtonTop.remove();
       if (lineButtonBottom?.parentNode) lineButtonBottom.remove();

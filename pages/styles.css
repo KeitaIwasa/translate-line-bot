@@ -227,8 +227,22 @@ body {
   box-shadow: var(--shadow);
 }
 
+.hero-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.hero-logo {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
 .hero-wordmark {
-  margin: 0 0 8px;
+  margin: 0;
   font-size: 50px;
   font-weight: 900;
   letter-spacing: 6px;
@@ -448,6 +462,15 @@ th {
 
   .hero-title {
     font-size: 24px;
+  }
+
+  .hero-brand {
+    gap: 10px;
+  }
+
+  .hero-logo {
+    width: 54px;
+    height: 54px;
   }
 
   .hero {
