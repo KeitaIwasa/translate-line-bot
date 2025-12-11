@@ -189,7 +189,8 @@ class MessageHandler:
     def _process_group_message(self, event: models.MessageEvent, sender_name: str) -> bool:
         """グループ向けメッセージのディスパッチを担当。"""
         command_text = self._extract_command_text(event.text)
-        if command_text:
+        # メンションさえ含まれていればコマンド扱い（空文字でも許可）
+        if command_text is not None:
             return self._handle_command(event, command_text)
 
         return self._handle_translation_flow(

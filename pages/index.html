@@ -3,33 +3,42 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>LINE Multilingual Translation Bot | Pro Plan</title>
+  <title>KOTORI - AI翻訳/การแปล | Pro Plan</title>
+  <link rel="icon" href="./favicon.ico" sizes="any" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
-  <div class="page-shell">
-    <header class="top-bar">
+  <div class="top-bar-wrap">
+    <nav class="top-bar" aria-label="Primary">
       <div class="brand">
-        <span class="brand-mark">AI</span>
-        <div class="brand-text">
-          <div class="brand-name">LINE Translation Bot</div>
-          <div class="brand-sub">Multilingual AI Assistant</div>
-        </div>
+        <div class="brand-name">KOTORI</div>
       </div>
-      <nav class="lang-picker" aria-label="Language selector">
-        <button class="lang-btn" data-lang="ja">日本語</button>
-        <button class="lang-btn" data-lang="en">English</button>
-        <button class="lang-btn" data-lang="zh-TW">中文（台灣）</button>
-        <button class="lang-btn" data-lang="th">ไทย</button>
-      </nav>
-    </header>
+      <div class="lang-picker" aria-label="Language selector">
+        <select id="langSelect" class="lang-select">
+          <option value="ja">日本語</option>
+          <option value="en">English</option>
+          <option value="zh-TW">繁體中文</option>
+          <option value="th">ไทย</option>
+        </select>
+      </div>
+    </nav>
+  </div>
 
+  <div class="page-shell">
     <main>
       <section class="hero">
-        <p class="eyebrow" data-i18n="eyebrow">Pro Plan</p>
+        <div class="hero-brand">
+          <img
+            src="./assets/KOTORIロゴ中.jpg"
+            alt="KOTORIロゴ"
+            class="hero-logo"
+            loading="lazy"
+          />
+          <p class="hero-wordmark">KOTORI</p>
+        </div>
         <h1 class="hero-title" data-i18n="heroTitle">多言語のLINEグループ運営を、Proプランでストレスゼロに。</h1>
         <p class="hero-lead" data-i18n="heroLead">
           「翻訳AIボット Proプラン」は、LINEグループ内のメッセージを文脈を考慮して自動翻訳する有料プランです。
@@ -37,18 +46,24 @@
         </p>
 
         <div class="price-card">
-          <p class="price" data-i18n="price">料金：月額 ¥380（税込） / 1グループ</p>
+          <p class="price" data-i18n="price">
+            料金：月額
+            <span class="price-amount">
+              <span class="price-currency">¥</span>
+              <span class="price-number">380</span>
+            </span>
+            (税込) / 1グループ
+          </p>
           <p class="audience" data-i18n="audience">対象：多国籍チームのビジネスチャット、留学生・友人グループ、国際交流コミュニティ など</p>
         </div>
 
         <div class="cta" id="cta">
           <a id="ctaButton" class="primary-btn" href="#" data-i18n="ctaLabel" rel="noopener">Proプランを購入</a>
           <p class="terms" id="ctaTerms" data-i18n-html="ctaTerms">
-            下記ボタンよりご購入いただくことで、以下の規約に同意したものとみなされます。<br />
-            ・<a href="https://your-domain/terms" target="_blank" rel="noopener">利用規約</a><br />
-            ・<a href="https://your-domain/privacy" target="_blank" rel="noopener">プライバシーポリシー</a>
+            上のボタンよりご購入いただくことで、以下の規約に同意したものとみなされます。<br />
+            ・<a href="./docs/terms-ja.html" target="_blank" rel="noopener">利用規約</a><br />
+            ・<a href="./docs/privacy-ja.html" target="_blank" rel="noopener">プライバシーポリシー</a>
           </p>
-          <p class="cta-note" id="missingNotice" data-i18n="missingNotice" hidden>決済リンクが無効です。招待メッセージから正しいリンクを開いてください。</p>
         </div>
       </section>
 
@@ -88,10 +103,27 @@
         <ul class="list" id="notesList"></ul>
         <p class="terms" id="notesTerms" data-i18n-html="notesTerms">
           詳細な条件については、以下のページをご確認ください。<br />
-          ・<a href="https://your-domain/terms" target="_blank" rel="noopener">利用規約</a><br />
-          ・<a href="https://your-domain/privacy" target="_blank" rel="noopener">プライバシーポリシー</a>
+          ・<a href="./docs/terms-ja.html" target="_blank" rel="noopener">利用規約</a><br />
+          ・<a href="./docs/privacy-ja.html" target="_blank" rel="noopener">プライバシーポリシー</a>
         </p>
       </section>
+
+      <div class="bottom-cta">
+        <div class="cta" id="ctaBottom">
+          <a
+            id="ctaButtonBottom"
+            class="primary-btn"
+            href="#"
+            data-i18n="ctaLabel"
+            rel="noopener"
+            >Proプランを購入</a
+          >
+        </div>
+      </div>
+
+      <div class="legal-links">
+        <a id="consumerLink" data-i18n="consumerLink" href="./docs/consumer-ja.html" target="_blank" rel="noopener">Consumer Information</a>
+      </div>
     </main>
   </div>
 
