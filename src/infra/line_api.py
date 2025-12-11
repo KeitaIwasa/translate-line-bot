@@ -54,23 +54,38 @@ class LineApiAdapter(LinePort):
         container_id: Optional[str],
         user_id: str,
     ) -> Optional[str]:
-        if source_type == "group" and container_id:
-            url = f"{self.BASE_URL}/v2/bot/group/{container_id}/member/{user_id}"
-        elif source_type == "room" and container_id:
-            url = f"{self.BASE_URL}/v2/bot/room/{container_id}/member/{user_id}"
-        else:
-            url = f"{self.BASE_URL}/v2/bot/profile/{user_id}"
+        display_name, _language = self.get_profile(source_type, container_id, user_id)
+        return display_name
+
+    def get_profile(
+        self,
+        source_type: str,
+        container_id: Optional[str],
+        user_id: str,
+    ) -> tuple[Optional[str], Optional[str]]:
+        url = self._build_profile_url(source_type, container_id, user_id)
         response = self._session.get(url, timeout=5)
         if response.status_code == 404:
-            return None
+            return None, None
         if not response.ok:
             logger.warning(
                 "Failed to fetch member profile",
                 extra={"status": response.status_code, "body": response.text},
             )
-            return None
-        data = response.json()
-        return data.get("displayName")
+            return None, None
+        try:
+            data = response.json()
+        except Exception:  # pylint: disable=broad-except
+            logger.warning("Profile response is not JSON", extra={"status": response.status_code})
+            return None, None
+        return data.get("displayName"), data.get("language")
+
+    def _build_profile_url(self, source_type: str, container_id: Optional[str], user_id: str) -> str:
+        if source_type == "group" and container_id:
+            return f"{self.BASE_URL}/v2/bot/group/{container_id}/member/{user_id}"
+        if source_type == "room" and container_id:
+            return f"{self.BASE_URL}/v2/bot/room/{container_id}/member/{user_id}"
+        return f"{self.BASE_URL}/v2/bot/profile/{user_id}"
 
     def get_group_name(self, group_id: str) -> Optional[str]:
         """LINE グループサマリからグループ名を取得する。"""

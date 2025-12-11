@@ -29,6 +29,9 @@ class DummyLineClient:
     def get_display_name(self, *_args, **_kwargs):
         return None
 
+    def get_profile(self, *_args, **_kwargs):
+        return None, None
+
 
 class DummyTranslationService(TranslationService):
     def __init__(self):

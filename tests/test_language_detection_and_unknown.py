@@ -24,6 +24,9 @@ class DummyLineClient:
     def get_display_name(self, *_args, **_kwargs):
         return None
 
+    def get_profile(self, *_args, **_kwargs):
+        return None, None
+
 
 class DummyLangPrefService:
     def analyze(self, _text: str):

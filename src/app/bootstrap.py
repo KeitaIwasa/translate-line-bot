@@ -109,7 +109,7 @@ def build_dispatcher() -> Dispatcher:
     join_handler = JoinHandler(line_client, repo)
     leave_handler = LeaveHandler(subscription_service, repo)
     member_joined_handler = MemberJoinedHandler(line_client, repo)
-    follow_handler = FollowHandler(line_client)
+    follow_handler = FollowHandler(line_client, translation_adapter)
 
     handlers = {
         "message": message_handler,

@@ -21,6 +21,10 @@ class LinePort:
 
     def get_display_name(self, source_type: str, container_id: Optional[str], user_id: str) -> Optional[str]: ...
 
+    def get_profile(
+        self, source_type: str, container_id: Optional[str], user_id: str
+    ) -> tuple[Optional[str], Optional[str]]: ...
+
     def get_group_name(self, group_id: str) -> Optional[str]: ...
 
 
