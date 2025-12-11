@@ -97,7 +97,8 @@ class MessageHandler:
         stripe_price_monthly_id: str = "",
         free_quota_per_month: int = 50,
         pro_quota_per_month: int = 8000,
-        checkout_base_url: str = "",
+        subscription_frontend_base_url: str = "",
+        checkout_api_base_url: str = "",
         subscription_service: SubscriptionService | None = None,
         executor: ThreadPoolExecutor | None = None,
         quota_service: QuotaService | None = None,
@@ -119,12 +120,14 @@ class MessageHandler:
         self._stripe_price_monthly_id = stripe_price_monthly_id
         self._free_quota = free_quota_per_month
         self._pro_quota = pro_quota_per_month
-        self._checkout_base_url = checkout_base_url.rstrip("/") if checkout_base_url else ""
+        # 案内ポータル (GitHub Pages 等) のベース URL
+        self._subscription_frontend_base_url = subscription_frontend_base_url.rstrip("/") if subscription_frontend_base_url else ""
         self._subscription_service = subscription_service or SubscriptionService(
             repo,
             stripe_secret_key,
             stripe_price_monthly_id,
-            checkout_base_url,
+            subscription_frontend_base_url,
+            checkout_api_base_url,
         )
         self._quota = quota_service or QuotaService(repo)
         self._translation_flow = translation_flow_service or TranslationFlowService(

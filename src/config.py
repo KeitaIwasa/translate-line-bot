@@ -24,7 +24,8 @@ class Settings:
     stripe_price_monthly_id: str = ""
     free_quota_per_month: int = 50
     pro_quota_per_month: int = 8000
-    public_api_base_url: str = ""
+    subscription_frontend_base_url: str = ""
+    checkout_api_base_url: str = ""
 
 
 @lru_cache(maxsize=1)
@@ -61,5 +62,10 @@ def get_settings() -> Settings:
         stripe_price_monthly_id=env.get("STRIPE_PRICE_MONTHLY_ID", ""),
         free_quota_per_month=int(env.get("FREE_QUOTA_PER_MONTH", "50")),
         pro_quota_per_month=int(env.get("PRO_QUOTA_PER_MONTH", "8000")),
-        public_api_base_url=env.get("PUBLIC_API_BASE_URL", ""),
+        subscription_frontend_base_url=(
+            env.get("SUBSCRIPTION_FRONTEND_BASE_URL")
+        ),
+        checkout_api_base_url=(
+            env.get("CHECKOUT_API_BASE_URL")
+        ),
     )

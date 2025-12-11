@@ -19,12 +19,16 @@ class SubscriptionService:
         repo: MessageRepositoryPort,
         stripe_secret_key: str,
         stripe_price_monthly_id: str,
-        checkout_base_url: str = "",
+        subscription_frontend_base_url: str = "",
+        checkout_api_base_url: str = "",
     ) -> None:
         self._repo = repo
         self._stripe_secret_key = stripe_secret_key
         self._stripe_price_monthly_id = stripe_price_monthly_id
-        self._checkout_base_url = checkout_base_url.rstrip("/") if checkout_base_url else ""
+        # 案内ポータル (GitHub Pages など) のベース URL
+        self._subscription_frontend_base_url = subscription_frontend_base_url.rstrip("/") if subscription_frontend_base_url else ""
+        # API Gateway 側のベース URL (/checkout リダイレクトを提供)
+        self._checkout_api_base_url = checkout_api_base_url.rstrip("/") if checkout_api_base_url else ""
 
     def create_checkout_url(self, group_id: str) -> Optional[str]:
         stripe = self._load_stripe()
@@ -39,19 +43,24 @@ class SubscriptionService:
                 mode="subscription",
                 line_items=[{"price": self._stripe_price_monthly_id, "quantity": 1}],
                 success_url="https://line.me/R/nv/chat",
-                cancel_url="https://line.me/R/nv/chat",
+                cancel_url=self._build_cancel_url(),
                 metadata={"group_id": group_id},
                 subscription_data={"metadata": {"group_id": group_id}},
             )
             checkout_url = getattr(session, "url", None)
             session_id = getattr(session, "id", None)
 
-            if self._checkout_base_url and session_id:
+            if self._subscription_frontend_base_url and session_id:
                 # 事前案内ページへ遷移させ、ページ内ボタンから Checkout に進ませる
                 encoded_checkout = quote_plus(checkout_url) if checkout_url else ""
+                api_base_param = (
+                    f"&api_base={quote_plus(self._checkout_api_base_url)}"
+                    if self._checkout_api_base_url
+                    else ""
+                )
                 return (
-                    f"{self._checkout_base_url}/pages/index.html"
-                    f"?session_id={session_id}&checkout_url={encoded_checkout}"
+                    f"{self._subscription_frontend_base_url}/pages/index.html"
+                    f"?session_id={session_id}&checkout_url={encoded_checkout}{api_base_param}"
                 )
 
             return checkout_url
@@ -72,13 +81,33 @@ class SubscriptionService:
 
         stripe.api_key = self._stripe_secret_key
         # ポータル遷移後の戻り先
-        return_url = self._checkout_base_url + "/portal-return" if self._checkout_base_url else "https://line.me/R/nv/chat"
+        return_url = (
+            self._subscription_frontend_base_url + "/portal-return"
+            if self._subscription_frontend_base_url
+            else "https://line.me/R/nv/chat"
+        )
         try:
             session = stripe.billing_portal.Session.create(customer=customer_id, return_url=return_url)
             return getattr(session, "url", None)
         except Exception:  # pylint: disable=broad-except
             logger.warning("Failed to create billing portal session", exc_info=True)
             return None
+
+    def _build_cancel_url(self) -> str:
+        """Stripe Checkout のキャンセル遷移先を組み立てる。"""
+        if not self._subscription_frontend_base_url:
+            return "https://line.me/R/nv/chat"
+
+        api_base = (
+            f"&api_base={quote_plus(self._checkout_api_base_url)}"
+            if self._checkout_api_base_url
+            else ""
+        )
+        # {CHECKOUT_SESSION_ID} は Stripe 側で実セッション ID に置換される
+        return (
+            f"{self._subscription_frontend_base_url}/pages/index.html"
+            f"?session_id={{CHECKOUT_SESSION_ID}}{api_base}"
+        )
 
     def cancel_subscription(self, group_id: str) -> bool:
         stripe = self._load_stripe()
