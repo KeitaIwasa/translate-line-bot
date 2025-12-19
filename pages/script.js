@@ -569,8 +569,12 @@
   }
 
   function initLanguage() {
-    const urlLang = normalizeLang(params.get("lang"));
-    const browserLang = normalizeLang(navigator.language || navigator.userLanguage);
+    const urlLang = normalizeLang(
+      params.get("lang") || params.get("language") || params.get("locale")
+    );
+    const browserLang = normalizeLang(
+      navigator.language || navigator.userLanguage
+    );
     const initial = urlLang || browserLang || "ja";
     applyLang(initial);
   }
