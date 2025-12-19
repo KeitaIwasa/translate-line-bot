@@ -11,7 +11,7 @@
         "Best for: business chats in multinational teams, international student or friend groups, and cross-cultural communities",
       ctaLabel: "Purchase Pro Plan",
       ctaTerms:
-        "By purchasing via the button below, you agree to the following terms.<br />・<a href=\"./docs/terms-en.html\" target=\"_blank\" rel=\"noopener\">Terms of Service</a><br />・<a href=\"./docs/privacy-en.html\" target=\"_blank\" rel=\"noopener\">Privacy Policy</a>",
+        "By purchasing via the button below, you agree to the following terms.<br />・<a href=\"./docs/terms-en.html\">Terms of Service</a><br />・<a href=\"./docs/privacy-en.html\">Privacy Policy</a>",
       missingNotice:
         "Checkout link is missing. Please open this page from the official invitation message to continue.",
       featuresTitle: "What you get with Pro",
@@ -64,7 +64,7 @@
         "For translation quality and context, recent group messages are stored and a portion may be sent to external AI models (Gemini).",
       ],
       notesTerms:
-        "See the full details below.<br />・<a href=\"./docs/terms-en.html\" target=\"_blank\" rel=\"noopener\">Terms of Service</a><br />・<a href=\"./docs/privacy-en.html\" target=\"_blank\" rel=\"noopener\">Privacy Policy</a>",
+        "See the full details below.<br />・<a href=\"./docs/terms-en.html\">Terms of Service</a><br />・<a href=\"./docs/privacy-en.html\">Privacy Policy</a>",
       consumerLink: "Consumer Information",
     },
     ja: {
@@ -77,7 +77,7 @@
       audience: "対象：多国籍チームのビジネスチャット、留学生・友人グループ、国際交流コミュニティ など",
       ctaLabel: "Proプランを購入",
       ctaTerms:
-        "上のボタンよりご購入いただくことで、以下の規約に同意したものとみなされます。<br />・<a href=\"./docs/terms-ja.html\" target=\"_blank\" rel=\"noopener\">利用規約</a><br />・<a href=\"./docs/privacy-ja.html\" target=\"_blank\" rel=\"noopener\">プライバシーポリシー</a>",
+        "上のボタンよりご購入いただくことで、以下の規約に同意したものとみなされます。<br />・<a href=\"./docs/terms-ja.html\">利用規約</a><br />・<a href=\"./docs/privacy-ja.html\">プライバシーポリシー</a>",
       missingNotice: "決済リンクが無効です。招待メッセージから正しいリンクを開いてください。",
       featuresTitle: "Proプランでできること",
       features: [
@@ -121,7 +121,7 @@
         "翻訳品質向上と文脈理解のため、グループ内のメッセージを保存し、翻訳時に直近の会話履歴の一部を外部AIモデルに送信します。",
       ],
       notesTerms:
-        "詳細な条件については、以下のページをご確認ください。<br />・<a href=\"./docs/terms-ja.html\" target=\"_blank\" rel=\"noopener\">利用規約</a><br />・<a href=\"./docs/privacy-ja.html\" target=\"_blank\" rel=\"noopener\">プライバシーポリシー</a>",
+        "詳細な条件については、以下のページをご確認ください。<br />・<a href=\"./docs/terms-ja.html\">利用規約</a><br />・<a href=\"./docs/privacy-ja.html\">プライバシーポリシー</a>",
       consumerLink: "特定商取引法に基づく表記",
     },
     "zh-TW": {
@@ -134,7 +134,7 @@
       audience: "適用：跨國商務團隊、留學生／朋友群組、國際交流社群等",
       ctaLabel: "購買 Pro 方案",
       ctaTerms:
-        "點擊下方按鈕購買即表示同意以下條款。<br />・<a href=\"./docs/terms-zh-tw.html\" target=\"_blank\" rel=\"noopener\">服務條款</a><br />・<a href=\"./docs/privacy-zh-tw.html\" target=\"_blank\" rel=\"noopener\">隱私權政策</a>",
+        "點擊下方按鈕購買即表示同意以下條款。<br />・<a href=\"./docs/terms-zh-tw.html\">服務條款</a><br />・<a href=\"./docs/privacy-zh-tw.html\">隱私權政策</a>",
       missingNotice: "缺少結帳連結。請從官方邀請訊息開啟本頁以繼續。",
       featuresTitle: "Pro 方案提供的功能",
       features: [
@@ -178,7 +178,7 @@
         "為提升翻譯品質與脈絡理解，群組訊息會被儲存，部分近期對話可能傳送至外部 AI 模型（Gemini）。",
       ],
       notesTerms:
-        "詳細條件請參閱以下頁面。<br />・<a href=\"./docs/terms-zh-tw.html\" target=\"_blank\" rel=\"noopener\">服務條款</a><br />・<a href=\"./docs/privacy-zh-tw.html\" target=\"_blank\" rel=\"noopener\">隱私權政策</a>",
+        "詳細條件請參閱以下頁面。<br />・<a href=\"./docs/terms-zh-tw.html\">服務條款</a><br />・<a href=\"./docs/privacy-zh-tw.html\">隱私權政策</a>",
       consumerLink: "消費者資訊",
     },
     th: {
@@ -191,7 +191,7 @@
       audience: "เหมาะสำหรับ: ทีมธุรกิจหลายชาติ กลุ่มเพื่อน/นักศึกษาต่างชาติ และคอมมูนิตี้นานาชาติ",
       ctaLabel: "ซื้อ Pro Plan",
       ctaTerms:
-        "เมื่อกดปุ่มด้านล่างถือว่ายอมรับเงื่อนไขต่อไปนี้แล้ว<br />・<a href=\"./docs/terms-th.html\" target=\"_blank\" rel=\"noopener\">ข้อตกลงการใช้บริการ</a><br />・<a href=\"./docs/privacy-th.html\" target=\"_blank\" rel=\"noopener\">นโยบายความเป็นส่วนตัว</a>",
+        "เมื่อกดปุ่มด้านล่างถือว่ายอมรับเงื่อนไขต่อไปนี้แล้ว<br />・<a href=\"./docs/terms-th.html\">ข้อตกลงการใช้บริการ</a><br />・<a href=\"./docs/privacy-th.html\">นโยบายความเป็นส่วนตัว</a>",
       missingNotice: "ไม่มีลิงก์ชำระเงิน โปรดเปิดหน้านี้จากข้อความเชิญอย่างเป็นทางการ",
       featuresTitle: "สิ่งที่ได้ใน Pro Plan",
       features: [
@@ -235,7 +235,7 @@
         "เพื่อปรับปรุงคุณภาพการแปลและเข้าใจบริบท ระบบจะบันทึกข้อความในกลุ่มและส่งบางส่วนของประวัติสนทนาไปยังโมเดล AI ภายนอก (Gemini)",
       ],
       notesTerms:
-        "ดูรายละเอียดเพิ่มเติมได้ที่ลิงก์ด้านล่าง<br />・<a href=\"./docs/terms-th.html\" target=\"_blank\" rel=\"noopener\">ข้อตกลงการใช้บริการ</a><br />・<a href=\"./docs/privacy-th.html\" target=\"_blank\" rel=\"noopener\">นโยบายความเป็นส่วนตัว</a>",
+        "ดูรายละเอียดเพิ่มเติมได้ที่ลิงก์ด้านล่าง<br />・<a href=\"./docs/terms-th.html\">ข้อตกลงการใช้บริการ</a><br />・<a href=\"./docs/privacy-th.html\">นโยบายความเป็นส่วนตัว</a>",
       consumerLink: "กฎหมายการค้าขายของญี่ปุ่น",
     },
   };
