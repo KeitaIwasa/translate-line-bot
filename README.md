@@ -2,6 +2,8 @@
 
 # LINE Multilingual Translation Bot
 
+http://kotori-ai.com/
+
 **A fast, minimal, serverless multilingual translation bot for LINE groups.**
 Built with AWS Lambda (Python), Gemini 2.5 Flash, and Neon (PostgreSQL).
 
