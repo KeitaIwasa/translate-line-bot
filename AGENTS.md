@@ -8,7 +8,13 @@
 
 ## コーディングスタイル
 - コメントは日本語で書く
-- DRY原則とSOLID原則をできるだけ遵守する
+- DRY原則「同じ知識・ロジック・責務を重複させるな」
+- SOLID原則
+  - Single Responsibility Principle
+  - Open/Closed Principle
+  - Liskov Substitution Principle
+  - Interface Segregation Principle
+  - Dependency Inversion Principle
 
 ## デバッグのポイント
 - コードを読んで問題の切り分けを行う

@@ -64,7 +64,7 @@ class SubscriptionService:
                     checkout_param = f"&checkout_url={quote_plus(checkout_url)}"
 
                 return (
-                    f"{self._subscription_frontend_base_url}/pages/index.html"
+                    f"{self._subscription_frontend_base_url}/pages/pro.html"
                     f"?session_id={session_id}{api_base_param}{checkout_param}"
                 )
 
@@ -110,7 +110,7 @@ class SubscriptionService:
         )
         # {CHECKOUT_SESSION_ID} は Stripe 側で実セッション ID に置換される
         return (
-            f"{self._subscription_frontend_base_url}/pages/index.html"
+            f"{self._subscription_frontend_base_url}/pages/pro.html"
             f"?session_id={{CHECKOUT_SESSION_ID}}{api_base}"
         )
 

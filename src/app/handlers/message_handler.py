@@ -639,11 +639,14 @@ class MessageHandler:
         )
         paid = status in {"active", "trialing"}
         limit = self._pro_quota if paid else self._free_quota
-        usage = self._repo.get_usage(event.group_id, self._current_period_key(paid, period_start, period_end))
+        period_key = self._current_period_key(paid, period_start, period_end)
+        usage = self._repo.get_usage(event.group_id, period_key)
 
         # 上限超過が原因で停止している場合
         if usage >= limit:
-            self._send_over_quota_message(event, paid, limit)
+            # 翻訳停止中パスでも月1回通知フラグ(limit_notice_plan)を更新する
+            plan_key = "pro" if paid else "free"
+            self._maybe_send_limit_notice(event, paid, limit, plan_key, period_key)
             return
 
         if paid:
