@@ -259,6 +259,20 @@ class NeonMessageRepository(MessageRepositoryPort):
         except errors.UndefinedTable:
             logger.warning("group_settings table missing; skip persisting group name", extra={"group_id": group_id})
 
+    def get_total_distinct_users(self) -> int:
+        """実ユーザーの累計人数を取得する。"""
+        query = sql.SQL(
+            """
+            SELECT COUNT(DISTINCT user_id)::bigint
+            FROM group_members
+            WHERE user_id NOT IN (%s, %s)
+            """
+        )
+        with self._client.cursor() as cur:
+            cur.execute(query, (BOT_JOIN_MARKER, GROUP_LANG_MARKER))
+            row = cur.fetchone()
+        return int(row[0]) if row else 0
+
     # === Stripe usage/subscription helpers ===
     def increment_usage(self, group_id: str, period_key: str, increment: int = 1) -> int:
         query = sql.SQL(

@@ -6,3 +6,4 @@
 [ ] 個人チャットで使い方などの質問に対して柔軟な応答をできるように
 [x] 翻訳停止中（quota到達など）に返信が返らない不具合（`_send_over_quota_message` 参照のAttributeError）を修正
 [x] 翻訳停止中に上限通知を出した場合でも limit_notice_plan を更新する
+[x] LPで累計利用者数（ユニークユーザー）を表示するAPIを追加

@@ -151,6 +151,22 @@ Resources:
             Path: /checkout
             Method: GET
 
+  StatsTotalUsersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src.stats_total_users_handler.lambda_handler
+      Description: Returns total distinct user count for homepage LP
+      Policies:
+        - AWSLambdaBasicExecutionRole
+      Events:
+        StatsTotalUsers:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LineWebhookApi
+            Path: /stats/total-users
+            Method: GET
+
   GroupUsageMonthlyResetFunction:
     Type: AWS::Serverless::Function
     Condition: UseStripe
