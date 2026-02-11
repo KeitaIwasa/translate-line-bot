@@ -306,6 +306,41 @@ class NeonMessageRepository(MessageRepositoryPort):
             row = cur.fetchone()
         return int(row[0]) if row else 0
 
+    def increment_contact_rate_limit(
+        self,
+        ip_hash: str,
+        window_start: datetime,
+        prune_before: Optional[datetime] = None,
+    ) -> int:
+        if window_start.tzinfo is None:
+            window_start = window_start.replace(tzinfo=timezone.utc)
+        if prune_before and prune_before.tzinfo is None:
+            prune_before = prune_before.replace(tzinfo=timezone.utc)
+
+        try:
+            with self._client.connection() as conn:
+                with conn.cursor() as cur:
+                    if prune_before:
+                        cur.execute(
+                            "DELETE FROM contact_rate_limits WHERE updated_at < %s",
+                            (prune_before,),
+                        )
+                    cur.execute(
+                        """
+                        INSERT INTO contact_rate_limits (ip_hash, window_start, count, updated_at)
+                        VALUES (%s, %s, 1, NOW())
+                        ON CONFLICT (ip_hash, window_start)
+                        DO UPDATE SET count = contact_rate_limits.count + 1, updated_at = NOW()
+                        RETURNING count
+                        """,
+                        (ip_hash, window_start),
+                    )
+                    row = cur.fetchone()
+            return int(row[0]) if row else 0
+        except errors.UndefinedTable:
+            logger.warning("contact_rate_limits table missing; skip contact rate limit", extra={"ip_hash": ip_hash})
+            return 0
+
     # === Stripe usage/subscription helpers ===
     def increment_usage(self, group_id: str, period_key: str, increment: int = 1) -> int:
         query = sql.SQL(

@@ -156,12 +156,49 @@ PRIVATE_CHAT_HISTORY_LIMIT=5
 STRIPE_SECRET_KEY=sk_live_or_test
 STRIPE_WEBHOOK_SECRET=whsec_xxx
 STRIPE_PRICE_MONTHLY_ID=price_xxx
+CONTACT_TO_EMAIL=contact@iwasadigital.com
+CONTACT_FROM_EMAIL=no-reply@iwasadigital.com
+CONTACT_ALLOWED_ORIGINS=https://kotori-ai.com,http://localhost:5500
+CONTACT_RATE_LIMIT_MAX=5
+CONTACT_RATE_LIMIT_WINDOW_SECONDS=600
+CONTACT_IP_HASH_SALT=your_random_salt
 # Optional: override default quotas (Free=50, Pro=8000 messages/month)
 # FREE_QUOTA_PER_MONTH=50
 # PRO_QUOTA_PER_MONTH=8000
 ```
 
 Lambda では **環境変数として設定**してください。
+
+お問い合わせフォーム API (`POST /contact`) を有効化する場合は、SES の Identity 検証（`no-reply@iwasadigital.com` または `iwasadigital.com`）が必要です。
+
+Neon のレート制限テーブルも事前作成してください。
+
+```sql
+-- sql/20260211_add_contact_rate_limits.sql
+CREATE TABLE IF NOT EXISTS contact_rate_limits (
+    ip_hash TEXT NOT NULL,
+    window_start TIMESTAMPTZ NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (ip_hash, window_start)
+);
+```
+
+SES Identity の CLI 例（ap-northeast-1）:
+
+```bash
+# ドメイン Identity 作成（推奨）
+aws sesv2 create-email-identity \
+  --profile line-translate-bot \
+  --region ap-northeast-1 \
+  --email-identity iwasadigital.com
+
+# ステータス確認
+aws sesv2 get-email-identity \
+  --profile line-translate-bot \
+  --region ap-northeast-1 \
+  --email-identity iwasadigital.com
+```
 
 ---
 
@@ -185,6 +222,7 @@ Lambda では **環境変数として設定**してください。
   - `LINE_CHANNEL_ACCESS_TOKEN`
   - `GEMINI_API_KEY`
   - `NEON_DATABASE_URL`
+  - `CONTACT_IP_HASH_SALT`
 - `.env` にはローカル検証用の `NEON_DATABASE_URL` / `GEMINI_API_KEY` を入れてテスト可能
 
 ### 1. 依存パッケージの準備

@@ -30,6 +30,12 @@ class Settings:
     openai_support_model: str = "gpt-5.2"
     openai_guardrail_model: str = "gpt-4.1-mini"
     private_chat_history_limit: int = 5
+    contact_to_email: str = "contact@iwasadigital.com"
+    contact_from_email: str = "no-reply@iwasadigital.com"
+    contact_allowed_origins: str = "https://kotori-ai.com,http://localhost:5500"
+    contact_rate_limit_max: int = 5
+    contact_rate_limit_window_seconds: int = 600
+    contact_ip_hash_salt: str = ""
 
 
 @lru_cache(maxsize=1)
@@ -76,4 +82,13 @@ def get_settings() -> Settings:
         openai_support_model=env.get("OPENAI_SUPPORT_MODEL", "gpt-5.2"),
         openai_guardrail_model=env.get("OPENAI_GUARDRAIL_MODEL", "gpt-4.1-mini"),
         private_chat_history_limit=int(env.get("PRIVATE_CHAT_HISTORY_LIMIT", "5")),
+        contact_to_email=env.get("CONTACT_TO_EMAIL", "contact@iwasadigital.com"),
+        contact_from_email=env.get("CONTACT_FROM_EMAIL", "no-reply@iwasadigital.com"),
+        contact_allowed_origins=env.get(
+            "CONTACT_ALLOWED_ORIGINS",
+            "https://kotori-ai.com,http://localhost:5500",
+        ),
+        contact_rate_limit_max=int(env.get("CONTACT_RATE_LIMIT_MAX", "5")),
+        contact_rate_limit_window_seconds=int(env.get("CONTACT_RATE_LIMIT_WINDOW_SECONDS", "600")),
+        contact_ip_hash_salt=env.get("CONTACT_IP_HASH_SALT", ""),
     )
