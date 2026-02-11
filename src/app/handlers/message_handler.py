@@ -150,11 +150,18 @@ class MessageHandler:
         if not event.reply_token:
             return
 
-        # 1: 個チャットはサポート外（挨拶はLINE公式コンソール側で設定）
-        if event.sender_type == "user" and (not event.group_id or event.group_id == event.user_id):
+        if not event.group_id or not event.user_id:
             return
 
-        if not event.group_id or not event.user_id:
+        timestamp = datetime.fromtimestamp(event.timestamp / 1000, tz=timezone.utc)
+        sender_name = self._resolve_sender_name(event)
+
+        # 個人チャットは無応答のまま保存のみ実施する。
+        if event.sender_type == "user" and event.group_id == event.user_id:
+            try:
+                self._record_message(event, sender_name=sender_name, timestamp=timestamp)
+            except Exception:
+                logger.exception("Failed to persist direct message")
             return
 
         self._repo.ensure_group_member(event.group_id, event.user_id)
@@ -165,9 +172,6 @@ class MessageHandler:
             event.sender_type,
             (event.text or ""),
         )
-
-        timestamp = datetime.fromtimestamp(event.timestamp / 1000, tz=timezone.utc)
-        sender_name = self._resolve_sender_name(event)
 
         handled = False
         try:
