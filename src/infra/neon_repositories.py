@@ -7,12 +7,13 @@ from typing import List, Optional, Sequence, Tuple
 
 from psycopg import errors, sql
 
-from ..domain.models import ContextMessage, StoredMessage
+from ..domain.models import ContextMessage, ConversationMessage, StoredMessage
 from ..domain.ports import MessageRepositoryPort
 from .neon_client import NeonClient
 
 BOT_JOIN_MARKER = "__bot_join__"
 GROUP_LANG_MARKER = "__group_lang__"
+PRIVATE_ASSISTANT_MARKER = "__assistant__"
 logger = logging.getLogger(__name__)
 
 
@@ -75,11 +76,36 @@ class NeonMessageRepository(MessageRepositoryPort):
         messages.reverse()
         return messages
 
+    def fetch_private_conversation(self, user_id: str, limit: int) -> List[ConversationMessage]:
+        query = sql.SQL(
+            """
+            SELECT sender_name, text, timestamp, COALESCE(message_role, 'user')
+            FROM messages
+            WHERE group_id = %s
+            ORDER BY timestamp DESC
+            LIMIT %s
+            """
+        )
+        with self._client.cursor() as cur:
+            cur.execute(query, (user_id, limit))
+            rows = cur.fetchall()
+        history = [
+            ConversationMessage(
+                role=(row[3] or "user"),
+                sender_name=row[0] or "",
+                text=row[1] or "",
+                timestamp=row[2],
+            )
+            for row in rows
+        ]
+        history.reverse()
+        return history
+
     def insert_message(self, message: StoredMessage) -> None:
         query = sql.SQL(
             """
-            INSERT INTO messages (group_id, user_id, sender_name, text, timestamp)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO messages (group_id, user_id, sender_name, text, timestamp, message_role)
+            VALUES (%s, %s, %s, %s, %s, %s)
             """
         )
         ts = message.timestamp
@@ -88,7 +114,14 @@ class NeonMessageRepository(MessageRepositoryPort):
         with self._client.cursor() as cur:
             cur.execute(
                 query,
-                (message.group_id, message.user_id, message.sender_name, message.text, ts),
+                (
+                    message.group_id,
+                    message.user_id,
+                    message.sender_name,
+                    message.text,
+                    ts,
+                    message.message_role or "user",
+                ),
             )
 
     def record_language_prompt(self, group_id: str) -> None:

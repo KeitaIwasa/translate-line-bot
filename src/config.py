@@ -26,6 +26,10 @@ class Settings:
     pro_quota_per_month: int = 8000
     subscription_frontend_base_url: str = ""
     checkout_api_base_url: str = ""
+    openai_api_key: str = ""
+    openai_support_model: str = "gpt-5.2"
+    openai_guardrail_model: str = "gpt-4.1-mini"
+    private_chat_history_limit: int = 5
 
 
 @lru_cache(maxsize=1)
@@ -68,4 +72,8 @@ def get_settings() -> Settings:
         checkout_api_base_url=(
             env.get("CHECKOUT_API_BASE_URL")
         ),
+        openai_api_key=env.get("OPENAI_API_KEY", ""),
+        openai_support_model=env.get("OPENAI_SUPPORT_MODEL", "gpt-5.2"),
+        openai_guardrail_model=env.get("OPENAI_GUARDRAIL_MODEL", "gpt-4.1-mini"),
+        private_chat_history_limit=int(env.get("PRIVATE_CHAT_HISTORY_LIMIT", "5")),
     )

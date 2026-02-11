@@ -103,6 +103,23 @@ class StoredMessage:
     sender_name: str
     text: str
     timestamp: datetime
+    message_role: str = "user"
+
+
+@dataclass(frozen=True)
+class ConversationMessage:
+    role: str
+    sender_name: str
+    text: str
+    timestamp: datetime
+
+
+@dataclass(frozen=True)
+class PrivateChatResponse:
+    output_text: str
+    safe_input_text: str
+    safe_output_text: str
+    guardrails_failed: bool = False
 
 
 # === Reply DTO ===

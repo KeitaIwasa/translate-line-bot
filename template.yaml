@@ -16,9 +16,9 @@ Parameters:
     Description: Lambda memory size in MB
   FunctionTimeout:
     Type: Number
-    Default: 20
+    Default: 60
     MinValue: 1
-    MaxValue: 29
+    MaxValue: 900
     Description: Lambda timeout in seconds
   RuntimeSecretArn:
     Type: String
@@ -95,6 +95,10 @@ Globals:
           - ""
         SUBSCRIPTION_FRONTEND_BASE_URL: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:SUBSCRIPTION_FRONTEND_BASE_URL}}"
         CHECKOUT_API_BASE_URL: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:CHECKOUT_API_BASE_URL}}"
+        OPENAI_API_KEY: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:OPENAI_API_KEY}}"
+        OPENAI_SUPPORT_MODEL: gpt-5.2
+        OPENAI_GUARDRAIL_MODEL: gpt-4.1-mini
+        PRIVATE_CHAT_HISTORY_LIMIT: 5
 
 Resources:
   LineWebhookApi:

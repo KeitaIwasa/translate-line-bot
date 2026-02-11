@@ -43,6 +43,7 @@ from ...domain.services.subscription_service import SubscriptionService
 from ...domain.services.quota_service import QuotaService
 from ...domain.services.translation_flow_service import TranslationFlowService
 from ...domain.services.language_settings_service import LanguageSettingsService
+from ...domain.services.private_chat_support_service import PrivateChatSupportService
 from .postback_handler import _build_cancel_message, _build_completion_message
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,8 @@ LANGUAGE_ANALYSIS_FALLBACK = (
     "ขออภัย ไม่สามารถระบุภาษาได้ กรุณาลองส่งมาใหม่อีกครั้ง (ตัวอย่าง: English, 日本語, 中文, ไทย)"
 )
 LANGUAGE_LIMIT_MESSAGE_EN = "You can set up to {limit} translation languages. Please specify {limit} or fewer."
+PRIVATE_ASSISTANT_USER_ID = "__assistant__"
+PRIVATE_ASSISTANT_SENDER = "KOTORI Support"
 
 
 class MessageHandler:
@@ -104,6 +107,7 @@ class MessageHandler:
         quota_service: QuotaService | None = None,
         translation_flow_service: TranslationFlowService | None = None,
         language_settings_service: LanguageSettingsService | None = None,
+        private_chat_support_service: PrivateChatSupportService | None = None,
     ) -> None:
         self._line = line_client
         self._translation = translation_service
@@ -144,6 +148,7 @@ class MessageHandler:
             interface_translation,
             max_group_languages,
         )
+        self._private_chat_support = private_chat_support_service
         self._executor = executor or ThreadPoolExecutor(max_workers=4)
 
     def handle(self, event: models.MessageEvent) -> None:
@@ -156,12 +161,9 @@ class MessageHandler:
         timestamp = datetime.fromtimestamp(event.timestamp / 1000, tz=timezone.utc)
         sender_name = self._resolve_sender_name(event)
 
-        # 個人チャットは無応答のまま保存のみ実施する。
+        # 個人チャットはサポート応答を返す。
         if event.sender_type == "user" and event.group_id == event.user_id:
-            try:
-                self._record_message(event, sender_name=sender_name, timestamp=timestamp)
-            except Exception:
-                logger.exception("Failed to persist direct message")
+            self._handle_private_chat(event, sender_name, timestamp)
             return
 
         self._repo.ensure_group_member(event.group_id, event.user_id)
@@ -200,6 +202,52 @@ class MessageHandler:
             sender_name,
             translation_enabled=self._repo.is_translation_enabled(event.group_id),
         )
+
+    def _handle_private_chat(
+        self,
+        event: models.MessageEvent,
+        sender_name: str,
+        timestamp: datetime,
+    ) -> None:
+        if not self._private_chat_support:
+            logger.warning("Private chat support is not configured")
+            return
+
+        response = self._private_chat_support.respond(event.user_id or "", event.text or "")
+
+        try:
+            self._repo.insert_message(
+                models.StoredMessage(
+                    group_id=event.group_id or "",
+                    user_id=event.user_id or "",
+                    sender_name=sender_name,
+                    text=response.safe_input_text or event.text,
+                    timestamp=timestamp,
+                    message_role="user",
+                )
+            )
+        except Exception:
+            logger.exception("Failed to persist direct user message")
+
+        if event.reply_token and response.output_text:
+            try:
+                self._line.reply_text(event.reply_token, response.output_text[:5000])
+            except Exception:
+                logger.exception("Failed to reply direct message")
+
+        try:
+            self._repo.insert_message(
+                models.StoredMessage(
+                    group_id=event.group_id or "",
+                    user_id=PRIVATE_ASSISTANT_USER_ID,
+                    sender_name=PRIVATE_ASSISTANT_SENDER,
+                    text=response.safe_output_text or response.output_text,
+                    timestamp=datetime.now(timezone.utc),
+                    message_role="assistant",
+                )
+            )
+        except Exception:
+            logger.exception("Failed to persist direct assistant message")
 
     # --- internal helpers ---
     def _attempt_language_enrollment(self, event: models.MessageEvent) -> bool:

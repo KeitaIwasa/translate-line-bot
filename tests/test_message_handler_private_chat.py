@@ -2,6 +2,7 @@ from unittest.mock import MagicMock
 
 from src.app.handlers.message_handler import MessageHandler
 from src.domain import models
+from src.domain.services.private_chat_support_service import PrivateChatSupportService
 
 
 class _DummyLineClient:
@@ -30,15 +31,29 @@ class _DummyRepo:
     def insert_message(self, message, *_args, **_kwargs):
         self.inserted.append(message)
 
+    def fetch_private_conversation(self, *_args, **_kwargs):
+        return []
+
 
 class _Dummy:
     def __getattr__(self, _name):
         return lambda *_args, **_kwargs: None
 
 
+class _DummyPrivateResponder:
+    def respond(self, input_text, history):
+        return models.PrivateChatResponse(
+            output_text="support reply",
+            safe_input_text=f"masked:{input_text}",
+            safe_output_text="masked:support reply",
+            guardrails_failed=False,
+        )
+
+
 def _build_handler() -> tuple[MessageHandler, _DummyLineClient, _DummyRepo]:
     line = _DummyLineClient()
     repo = _DummyRepo()
+    private_chat_support = PrivateChatSupportService(repo, _DummyPrivateResponder())
     handler = MessageHandler(
         line_client=line,
         translation_service=_Dummy(),
@@ -51,11 +66,12 @@ def _build_handler() -> tuple[MessageHandler, _DummyLineClient, _DummyRepo]:
         max_group_languages=5,
         translation_retry=1,
         bot_mention_name="KOTORI",
+        private_chat_support_service=private_chat_support,
     )
     return handler, line, repo
 
 
-def test_direct_message_is_persisted_without_reply_or_group_flow():
+def test_direct_message_replies_and_persists_user_and_assistant_messages():
     handler, line, repo = _build_handler()
     handler._process_group_message = MagicMock(return_value=True)
 
@@ -71,9 +87,9 @@ def test_direct_message_is_persisted_without_reply_or_group_flow():
 
     handler.handle(event)
 
-    assert len(repo.inserted) == 1
+    assert len(repo.inserted) == 2
     assert repo.ensure_calls == 0
-    assert line.reply_text_calls == 0
+    assert line.reply_text_calls == 1
     assert line.reply_messages_calls == 0
     handler._process_group_message.assert_not_called()
 
@@ -139,4 +155,3 @@ def test_group_message_keeps_existing_flow_and_persistence():
     assert repo.ensure_calls == 1
     assert len(repo.inserted) == 1
     handler._process_group_message.assert_called_once()
-

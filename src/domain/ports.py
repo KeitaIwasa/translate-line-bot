@@ -4,10 +4,12 @@ from datetime import datetime
 from typing import List, Optional, Sequence, Tuple, Protocol
 
 from .models import (
+    ConversationMessage,
     ContextMessage,
     LanguageChoice,
     CommandDecision,
     LanguagePreference,
+    PrivateChatResponse,
     StoredMessage,
     TranslationRequest,
     TranslationResult,
@@ -42,6 +44,7 @@ class MessageRepositoryPort:
     def fetch_group_languages(self, group_id: str) -> List[str]: ...
 
     def fetch_recent_messages(self, group_id: str, limit: int) -> List[ContextMessage]: ...
+    def fetch_private_conversation(self, user_id: str, limit: int) -> List[ConversationMessage]: ...
 
     def insert_message(self, message: StoredMessage) -> None: ...
 
@@ -96,6 +99,10 @@ class MessageRepositoryPort:
     def update_subscription_status(
         self, group_id: str, status: str, current_period_end: Optional[datetime]
     ) -> None: ...
+
+
+class PrivateChatResponderPort(Protocol):
+    def respond(self, input_text: str, history: Sequence[ConversationMessage]) -> PrivateChatResponse: ...
 
 
 class UsageRepositoryPort(Protocol):
