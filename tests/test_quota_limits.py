@@ -2,6 +2,8 @@ from datetime import datetime, timezone
 
 from src.app.handlers.message_handler import MessageHandler
 from src.domain import models
+from src.domain.models import TranslationRuntimeState
+from src.domain.services.quota_service import QuotaDecision
 
 
 class RecordingLineClient:
@@ -83,11 +85,54 @@ class ProQuotaRepo:
             return ("active", datetime(2025, 1, 1, tzinfo=timezone.utc), datetime(2025, 2, 1, tzinfo=timezone.utc))
         return (None, None, None)
 
+    def reserve_quota_slot(self, *, group_id, period_key, plan_key, paid, limit, increment):
+        notice_plan = self.notice_plan
+        current_usage = self.usage
+
+        if not paid and notice_plan == plan_key:
+            return QuotaDecision(False, False, False, current_usage, limit, period_key, plan_key)
+        if current_usage >= limit:
+            return QuotaDecision(False, notice_plan != plan_key, (not paid), current_usage, limit, period_key, plan_key)
+
+        self.usage += increment
+        usage_after = self.usage
+        if paid:
+            if usage_after > limit:
+                return QuotaDecision(False, notice_plan != plan_key, False, usage_after, limit, period_key, plan_key)
+            if usage_after == limit:
+                return QuotaDecision(True, notice_plan != plan_key, False, usage_after, limit, period_key, plan_key)
+            return QuotaDecision(True, False, False, usage_after, limit, period_key, plan_key)
+
+        if usage_after > limit:
+            return QuotaDecision(False, notice_plan != plan_key, True, usage_after, limit, period_key, plan_key)
+        if usage_after == limit:
+            return QuotaDecision(True, notice_plan != plan_key, False, usage_after, limit, period_key, plan_key)
+        return QuotaDecision(True, False, False, usage_after, limit, period_key, plan_key)
+
+    def fetch_translation_runtime_state(self, _group_id):
+        status, period_start, period_end = self.get_subscription_period(_group_id)
+        return TranslationRuntimeState(
+            translation_enabled=self.translation_enabled,
+            group_languages=["en"],
+            subscription_status=status,
+            period_start=period_start,
+            period_end=period_end,
+            period_key="2025-01-01",
+            usage=self.usage,
+            limit_notice_plan=self.notice_plan,
+        )
+
     def set_translation_enabled(self, _group_id, enabled: bool):
         self.translation_enabled = enabled
 
     def is_translation_enabled(self, _group_id):
         return self.translation_enabled
+
+    def get_group_member_display_name(self, *_args, **_kwargs):
+        return None
+
+    def upsert_group_member_display_name(self, *_args, **_kwargs):
+        return None
 
     # unused interface stubs
     def ensure_group_member(self, *_args, **_kwargs):

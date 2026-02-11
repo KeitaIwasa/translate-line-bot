@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Sequence, Tuple
 
 from psycopg import errors, sql
 
-from ..domain.models import ContextMessage, ConversationMessage, StoredMessage
+from ..domain.models import ContextMessage, ConversationMessage, StoredMessage, TranslationRuntimeState
 from ..domain.ports import MessageRepositoryPort
+from ..domain.services.quota_service import QuotaDecision
 from .neon_client import NeonClient
 
 BOT_JOIN_MARKER = "__bot_join__"
@@ -34,14 +35,47 @@ class NeonMessageRepository(MessageRepositoryPort):
     def ensure_group_member(self, group_id: str, user_id: str) -> None:
         query = sql.SQL(
             """
-            INSERT INTO group_members (group_id, user_id)
-            VALUES (%s, %s)
+            INSERT INTO group_members (group_id, user_id, display_name, display_name_updated_at)
+            VALUES (%s, %s, NULL, NULL)
             ON CONFLICT (group_id, user_id)
             DO UPDATE SET joined_at = NOW()
             """
         )
         with self._client.cursor() as cur:
             cur.execute(query, (group_id, user_id))
+
+    def get_group_member_display_name(self, group_id: str, user_id: str) -> Optional[str]:
+        with self._client.cursor() as cur:
+            cur.execute(
+                """
+                SELECT display_name
+                FROM group_members
+                WHERE group_id = %s AND user_id = %s
+                """,
+                (group_id, user_id),
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        return (row[0] or "").strip() or None
+
+    def upsert_group_member_display_name(self, group_id: str, user_id: str, display_name: str) -> None:
+        normalized = (display_name or "").strip()
+        if not normalized:
+            return
+        with self._client.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO group_members (group_id, user_id, display_name, display_name_updated_at)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (group_id, user_id)
+                DO UPDATE SET
+                    display_name = EXCLUDED.display_name,
+                    display_name_updated_at = NOW(),
+                    joined_at = group_members.joined_at
+                """,
+                (group_id, user_id, normalized),
+            )
 
     def fetch_group_languages(self, group_id: str) -> List[str]:
         query = sql.SQL(
@@ -127,14 +161,14 @@ class NeonMessageRepository(MessageRepositoryPort):
     def record_language_prompt(self, group_id: str) -> None:
         query = sql.SQL(
             """
-            INSERT INTO group_members (group_id, user_id, last_prompted_at)
-            VALUES (%s, %s, NOW())
+            INSERT INTO group_members (group_id, user_id, display_name, display_name_updated_at, last_prompted_at)
+            VALUES (%s, %s, %s, NOW(), NOW())
             ON CONFLICT (group_id, user_id)
             DO UPDATE SET last_prompted_at = NOW(), last_completed_at = NULL
             """
         )
         with self._client.cursor() as cur:
-            cur.execute(query, (group_id, GROUP_LANG_MARKER))
+            cur.execute(query, (group_id, GROUP_LANG_MARKER, GROUP_LANG_MARKER))
 
     def try_complete_group_languages(
         self,
@@ -147,11 +181,11 @@ class NeonMessageRepository(MessageRepositoryPort):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO group_members (group_id, user_id)
-                    VALUES (%s, %s)
+                    INSERT INTO group_members (group_id, user_id, display_name, display_name_updated_at)
+                    VALUES (%s, %s, %s, NOW())
                     ON CONFLICT (group_id, user_id) DO NOTHING
                     """,
-                    (group_id, GROUP_LANG_MARKER),
+                    (group_id, GROUP_LANG_MARKER, GROUP_LANG_MARKER),
                 )
                 cur.execute(
                     """
@@ -192,11 +226,11 @@ class NeonMessageRepository(MessageRepositoryPort):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO group_members (group_id, user_id)
-                    VALUES (%s, %s)
+                    INSERT INTO group_members (group_id, user_id, display_name, display_name_updated_at)
+                    VALUES (%s, %s, %s, NOW())
                     ON CONFLICT (group_id, user_id) DO NOTHING
                     """,
-                    (group_id, GROUP_LANG_MARKER),
+                    (group_id, GROUP_LANG_MARKER, GROUP_LANG_MARKER),
                 )
                 cur.execute(
                     """
@@ -391,6 +425,81 @@ class NeonMessageRepository(MessageRepositoryPort):
             logger.warning("group_usage_counters table missing; treating as no notice", extra={"group_id": group_id})
             return None
 
+    def reserve_quota_slot(
+        self,
+        *,
+        group_id: str,
+        period_key: str,
+        plan_key: str,
+        paid: bool,
+        limit: int,
+        increment: int,
+    ) -> QuotaDecision:
+        with self._client.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT translation_count, limit_notice_plan
+                    FROM group_usage_counters
+                    WHERE group_id = %s AND period_key = %s
+                    FOR UPDATE
+                    """,
+                    (group_id, period_key),
+                )
+                row = cur.fetchone()
+                current_usage = int(row[0]) if row else 0
+                notice_plan = row[1] if row else None
+
+                if not paid and notice_plan == plan_key:
+                    return QuotaDecision(
+                        allowed=False,
+                        should_notify=False,
+                        stop_translation=False,
+                        usage=current_usage,
+                        limit=limit,
+                        period_key=period_key,
+                        plan_key=plan_key,
+                    )
+
+                if current_usage >= limit:
+                    return QuotaDecision(
+                        allowed=False,
+                        should_notify=notice_plan != plan_key,
+                        stop_translation=not paid,
+                        usage=current_usage,
+                        limit=limit,
+                        period_key=period_key,
+                        plan_key=plan_key,
+                    )
+
+                cur.execute(
+                    """
+                    INSERT INTO group_usage_counters (group_id, period_key, translation_count, created_at, updated_at)
+                    VALUES (%s, %s, %s, NOW(), NOW())
+                    ON CONFLICT (group_id, period_key)
+                    DO UPDATE SET
+                        translation_count = group_usage_counters.translation_count + EXCLUDED.translation_count,
+                        updated_at = NOW()
+                    RETURNING translation_count
+                    """,
+                    (group_id, period_key, increment),
+                )
+                usage_after_row = cur.fetchone()
+                usage_after = int(usage_after_row[0]) if usage_after_row else current_usage
+
+        if paid:
+            if usage_after > limit:
+                return QuotaDecision(False, notice_plan != plan_key, False, usage_after, limit, period_key, plan_key)
+            if usage_after == limit:
+                return QuotaDecision(True, notice_plan != plan_key, False, usage_after, limit, period_key, plan_key)
+            return QuotaDecision(True, False, False, usage_after, limit, period_key, plan_key)
+
+        if usage_after > limit:
+            return QuotaDecision(False, notice_plan != plan_key, True, usage_after, limit, period_key, plan_key)
+        if usage_after == limit:
+            return QuotaDecision(True, notice_plan != plan_key, False, usage_after, limit, period_key, plan_key)
+        return QuotaDecision(True, False, False, usage_after, limit, period_key, plan_key)
+
     def set_limit_notice_plan(self, group_id: str, period_key: str, plan: str) -> None:
         try:
             with self._client.cursor() as cur:
@@ -576,6 +685,69 @@ class NeonMessageRepository(MessageRepositoryPort):
             logger.exception("Failed to fetch translation_enabled", extra={"group_id": group_id})
             raise
 
+    def fetch_translation_runtime_state(self, group_id: str) -> TranslationRuntimeState:
+        with self._client.cursor() as cur:
+            cur.execute(
+                """
+                SELECT translation_enabled
+                FROM group_settings
+                WHERE group_id = %s
+                """,
+                (group_id,),
+            )
+            settings_row = cur.fetchone()
+            translation_enabled = True if settings_row is None else bool(settings_row[0])
+
+            cur.execute(
+                """
+                SELECT lang_code
+                FROM group_languages
+                WHERE group_id = %s
+                ORDER BY lang_code
+                """,
+                (group_id,),
+            )
+            group_languages = [row[0] for row in cur.fetchall()]
+
+            cur.execute(
+                """
+                SELECT status, current_period_start, current_period_end
+                FROM group_subscriptions
+                WHERE group_id = %s
+                """,
+                (group_id,),
+            )
+            subscription_row = cur.fetchone()
+            status = subscription_row[0] if subscription_row else None
+            period_start = subscription_row[1] if subscription_row else None
+            period_end = subscription_row[2] if subscription_row else None
+
+            paid = status in {"active", "trialing"}
+            period_key = self._compute_period_key(paid=paid, period_start=period_start, period_end=period_end)
+
+            cur.execute(
+                """
+                SELECT translation_count, limit_notice_plan
+                FROM group_usage_counters
+                WHERE group_id = %s AND period_key = %s
+                """,
+                (group_id, period_key),
+            )
+            usage_row = cur.fetchone()
+            usage = int(usage_row[0]) if usage_row else 0
+            limit_notice_plan = usage_row[1] if usage_row else None
+
+        return TranslationRuntimeState(
+            translation_enabled=translation_enabled,
+            group_languages=group_languages,
+            subscription_status=status,
+            period_start=period_start,
+            period_end=period_end,
+            period_key=period_key,
+            usage=usage,
+            limit_notice_plan=limit_notice_plan,
+        )
+
     def reset_group_language_settings(self, group_id: str) -> None:
         with self._client.cursor() as cur:
             cur.execute("DELETE FROM group_languages WHERE group_id = %s", (group_id,))
@@ -605,14 +777,14 @@ class NeonMessageRepository(MessageRepositoryPort):
             ts = ts.replace(tzinfo=timezone.utc)
         query = sql.SQL(
             """
-            INSERT INTO group_members (group_id, user_id, joined_at)
-            VALUES (%s, %s, %s)
+            INSERT INTO group_members (group_id, user_id, display_name, display_name_updated_at, joined_at)
+            VALUES (%s, %s, %s, NOW(), %s)
             ON CONFLICT (group_id, user_id)
             DO UPDATE SET joined_at = EXCLUDED.joined_at
             """
         )
         with self._client.cursor() as cur:
-            cur.execute(query, (group_id, BOT_JOIN_MARKER, ts))
+            cur.execute(query, (group_id, BOT_JOIN_MARKER, BOT_JOIN_MARKER, ts))
 
     def fetch_bot_joined_at(self, group_id: str) -> Optional[datetime]:
         with self._client.cursor() as cur:
@@ -622,3 +794,19 @@ class NeonMessageRepository(MessageRepositoryPort):
             )
             row = cur.fetchone()
         return row[0] if row else None
+
+    @staticmethod
+    def _compute_period_key(
+        *,
+        paid: bool,
+        period_start: Optional[datetime],
+        period_end: Optional[datetime],
+    ) -> str:
+        now = datetime.now(timezone.utc)
+        if paid:
+            anchor = period_start
+            if not anchor and period_end:
+                anchor = period_end - timedelta(days=31)
+            if anchor:
+                return anchor.astimezone(timezone.utc).date().isoformat()
+        return f"{now.year:04d}-{now.month:02d}-01"

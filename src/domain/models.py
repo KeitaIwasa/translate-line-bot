@@ -115,6 +115,18 @@ class ConversationMessage:
 
 
 @dataclass(frozen=True)
+class TranslationRuntimeState:
+    translation_enabled: bool
+    group_languages: List[str]
+    subscription_status: Optional[str]
+    period_start: Optional[datetime]
+    period_end: Optional[datetime]
+    period_key: str
+    usage: int
+    limit_notice_plan: Optional[str]
+
+
+@dataclass(frozen=True)
 class PrivateChatResponse:
     output_text: str
     safe_input_text: str

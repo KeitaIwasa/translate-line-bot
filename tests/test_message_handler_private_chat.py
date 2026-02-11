@@ -34,6 +34,12 @@ class _DummyRepo:
     def fetch_private_conversation(self, *_args, **_kwargs):
         return []
 
+    def get_group_member_display_name(self, *_args, **_kwargs):
+        return None
+
+    def upsert_group_member_display_name(self, *_args, **_kwargs):
+        return None
+
 
 class _Dummy:
     def __getattr__(self, _name):

@@ -16,8 +16,8 @@ class Settings:
     bot_mention_name: str = "通訳AI"
     max_context_messages: int = 8
     max_group_languages: int = 5
-    gemini_timeout_seconds: int = 10
-    translation_retry: int = 2
+    gemini_timeout_seconds: int = 8
+    translation_retry: int = 1
     log_level: str = "INFO"
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
@@ -64,8 +64,8 @@ def get_settings() -> Settings:
         bot_mention_name=env.get("BOT_MENTION_NAME", "通訳AI"),
         max_context_messages=int(env.get("MAX_CONTEXT_MESSAGES", "8")),
         max_group_languages=int(env.get("MAX_GROUP_LANGUAGES", "5")),
-        gemini_timeout_seconds=int(env.get("GEMINI_TIMEOUT_SECONDS", "10")),
-        translation_retry=int(env.get("TRANSLATION_RETRY", "2")),
+        gemini_timeout_seconds=int(env.get("GEMINI_TIMEOUT_SECONDS", "8")),
+        translation_retry=int(env.get("TRANSLATION_RETRY", "1")),
         log_level=env.get("LOG_LEVEL", "INFO"),
         stripe_secret_key=env.get("STRIPE_SECRET_KEY", ""),
         stripe_webhook_secret=env.get("STRIPE_WEBHOOK_SECRET", ""),

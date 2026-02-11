@@ -36,7 +36,7 @@ Parameters:
     Description: Maximum number of context messages sent to Gemini
   TranslationRetry:
     Type: Number
-    Default: 2
+    Default: 1
     MinValue: 1
     MaxValue: 5
     Description: Number of Gemini retries

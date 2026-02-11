@@ -159,14 +159,16 @@ class MessageHandler:
             return
 
         timestamp = datetime.fromtimestamp(event.timestamp / 1000, tz=timezone.utc)
-        sender_name = self._resolve_sender_name(event)
 
         # 個人チャットはサポート応答を返す。
         if event.sender_type == "user" and event.group_id == event.user_id:
+            sender_name, _deferred_name = self._resolve_sender_name(event)
             self._handle_private_chat(event, sender_name, timestamp)
             return
 
         self._repo.ensure_group_member(event.group_id, event.user_id)
+        sender_name, deferred_name = self._resolve_sender_name(event)
+
         logger.info(
             "Handling message event | group=%s user=%s sender=%s text=%.40s",
             event.group_id,
@@ -177,7 +179,7 @@ class MessageHandler:
 
         handled = False
         try:
-            handled = self._process_group_message(event, sender_name)
+            handled = self._process_group_message(event, sender_name, deferred_name)
         except GeminiRateLimitError:
             logger.warning("Gemini rate limited; notifying user")
             self._send_rate_limit_notice(event)
@@ -190,18 +192,19 @@ class MessageHandler:
             except Exception:
                 logger.exception("Failed to persist message")
         
-    def _process_group_message(self, event: models.MessageEvent, sender_name: str) -> bool:
+    def _process_group_message(
+        self,
+        event: models.MessageEvent,
+        sender_name: str,
+        deferred_display_name: str | None,
+    ) -> bool:
         """グループ向けメッセージのディスパッチを担当。"""
         command_text = self._extract_command_text(event.text)
         # メンションさえ含まれていればコマンド扱い（空文字でも許可）
         if command_text is not None:
             return self._handle_command(event, command_text)
 
-        return self._handle_translation_flow(
-            event,
-            sender_name,
-            translation_enabled=self._repo.is_translation_enabled(event.group_id),
-        )
+        return self._handle_translation_flow(event, sender_name, deferred_display_name=deferred_display_name)
 
     def _handle_private_chat(
         self,
@@ -425,13 +428,22 @@ class MessageHandler:
             self._line.reply_text(event.reply_token, fallback)
         return True
 
-    def _handle_translation_flow(self, event: models.MessageEvent, sender_name: str, translation_enabled: bool) -> bool:
-        group_languages = self._repo.fetch_group_languages(event.group_id)
-        candidate_languages = self._limit_language_codes(group_languages)
+    def _handle_translation_flow(
+        self,
+        event: models.MessageEvent,
+        sender_name: str,
+        translation_enabled: bool | None = None,
+        deferred_display_name: str | None = None,
+    ) -> bool:
+        started = time.perf_counter()
+        runtime = self._repo.fetch_translation_runtime_state(event.group_id)
+        self._log_translation_stage("runtime_fetched", started, event.group_id)
+
+        candidate_languages = self._limit_language_codes(runtime.group_languages)
         logger.info(
             "Translation flow start | group=%s enabled=%s candidates=%s",
             event.group_id,
-            translation_enabled,
+            runtime.translation_enabled,
             candidate_languages,
         )
 
@@ -443,7 +455,7 @@ class MessageHandler:
             if self._attempt_language_enrollment(event):
                 return True
 
-        if not translation_enabled:
+        if not runtime.translation_enabled:
             logger.info(
                 "Translation disabled; sending pause notice",
                 extra={"group_id": event.group_id, "user_id": event.user_id},
@@ -452,12 +464,11 @@ class MessageHandler:
             self._send_pause_notice(event)
             return True
 
-        status, period_start, period_end = getattr(self._repo, "get_subscription_period", lambda *_: (None, None, None))(
-            event.group_id
-        )
-        paid = status in {"active", "trialing"}
+        paid = runtime.subscription_status in {"active", "trialing"}
         limit = self._pro_quota if paid else self._free_quota
         plan_key = "pro" if paid else "free"
+
+        self._log_translation_stage("before_translation_run", started, event.group_id)
 
         flow = self._translation_flow.run(
             event=event,
@@ -466,9 +477,10 @@ class MessageHandler:
             paid=paid,
             limit=limit,
             plan_key=plan_key,
-            period_start=period_start,
-            period_end=period_end,
+            period_start=runtime.period_start,
+            period_end=runtime.period_end,
         )
+        self._log_translation_stage("after_translation_run", started, event.group_id)
 
         if not flow.decision.allowed:
             logger.info(
@@ -499,9 +511,7 @@ class MessageHandler:
         if flow.reply_text:
             if send_notice_after_translation:
                 notice_text, notice_url = self._build_limit_reached_notice_text(event.group_id, paid, limit)
-                setter = getattr(self._repo, "set_limit_notice_plan", None)
-                if setter:
-                    setter(event.group_id, period_key, plan_key)
+                self._repo.set_limit_notice_plan(event.group_id, period_key, plan_key)
                 if event.reply_token:
                     messages = [
                         {"type": "text", "text": flow.reply_text[:5000]},
@@ -513,6 +523,21 @@ class MessageHandler:
             else:
                 if event.reply_token:
                     self._line.reply_text(event.reply_token, flow.reply_text)
+
+            if deferred_display_name and event.group_id and event.user_id:
+                try:
+                    self._repo.upsert_group_member_display_name(
+                        event.group_id,
+                        event.user_id,
+                        deferred_display_name,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to upsert group member display name after reply",
+                        extra={"group_id": event.group_id, "user_id": event.user_id},
+                    )
+
+            self._log_translation_stage("after_line_reply", started, event.group_id)
         else:
             logger.warning(
                 "Translation finished without reply text | group=%s candidates=%s plan=%s period=%s",
@@ -1119,12 +1144,26 @@ class MessageHandler:
         return text[: limit - 1] + "…"
 
 
-    def _resolve_sender_name(self, event: models.MessageEvent) -> str:
-        if event.user_id:
-            name = self._line.get_display_name(event.sender_type, event.group_id, event.user_id)
-            if name:
-                return name
-        return event.user_id or "Unknown"
+    def _resolve_sender_name(self, event: models.MessageEvent) -> tuple[str, str | None]:
+        if not event.user_id or not event.group_id:
+            return event.user_id or "Unknown", None
+
+        cached = self._repo.get_group_member_display_name(event.group_id, event.user_id)
+        if cached:
+            return cached, None
+
+        name = self._line.get_display_name(event.sender_type, event.group_id, event.user_id)
+        if name:
+            return name, name
+        return event.user_id, None
+
+    def _log_translation_stage(self, stage: str, started: float, group_id: str) -> None:
+        logger.info(
+            "Translation stage | stage=%s elapsed_ms=%.2f group=%s",
+            stage,
+            (time.perf_counter() - started) * 1000,
+            group_id,
+        )
 
     def _format_unsupported_message(self, languages, instruction_lang: Optional[str] = None) -> str:
         base_messages = []

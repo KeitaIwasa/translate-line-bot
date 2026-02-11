@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 from src.domain import models
 from src.domain.services.translation_flow_service import TranslationFlowService
-from src.domain.services.quota_service import QuotaService
+from src.domain.services.quota_service import QuotaDecision, QuotaService
 from src.domain.services.translation_service import TranslationService
 from src.domain.services.interface_translation_service import InterfaceTranslationService
 from src.domain.ports import MessageRepositoryPort, UsageRepositoryPort
@@ -24,6 +24,39 @@ class DummyUsageRepo(UsageRepositoryPort):
 
     def get_limit_notice_plan(self, group_id: str, period_key: str):
         return self.notice_plan
+
+    def reserve_quota_slot(
+        self,
+        *,
+        group_id: str,
+        period_key: str,
+        plan_key: str,
+        paid: bool,
+        limit: int,
+        increment: int,
+    ):
+        notice_plan = self.notice_plan
+        current_usage = self.usage
+
+        if not paid and notice_plan == plan_key:
+            return QuotaDecision(False, False, False, current_usage, limit, period_key, plan_key)
+        if current_usage >= limit:
+            return QuotaDecision(False, notice_plan != plan_key, (not paid), current_usage, limit, period_key, plan_key)
+
+        self.usage += increment
+        usage_after = self.usage
+        if paid:
+            if usage_after > limit:
+                return QuotaDecision(False, notice_plan != plan_key, False, usage_after, limit, period_key, plan_key)
+            if usage_after == limit:
+                return QuotaDecision(True, notice_plan != plan_key, False, usage_after, limit, period_key, plan_key)
+            return QuotaDecision(True, False, False, usage_after, limit, period_key, plan_key)
+
+        if usage_after > limit:
+            return QuotaDecision(False, notice_plan != plan_key, True, usage_after, limit, period_key, plan_key)
+        if usage_after == limit:
+            return QuotaDecision(True, notice_plan != plan_key, False, usage_after, limit, period_key, plan_key)
+        return QuotaDecision(True, False, False, usage_after, limit, period_key, plan_key)
 
     def set_limit_notice_plan(self, group_id: str, period_key: str, plan: str) -> None:
         self.notice_plan = plan

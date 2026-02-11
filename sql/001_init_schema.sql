@@ -2,6 +2,8 @@
 CREATE TABLE IF NOT EXISTS group_members (
     group_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
+    display_name TEXT,
+    display_name_updated_at TIMESTAMPTZ,
     joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_prompted_at TIMESTAMPTZ,
     last_completed_at TIMESTAMPTZ,

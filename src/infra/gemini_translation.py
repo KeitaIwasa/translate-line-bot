@@ -78,12 +78,12 @@ class GeminiTranslationAdapter(TranslationPort):
         payload = self._build_payload(source, context, list(request.candidate_languages))
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent"
 
-        # 可読ログ：ユーザーコンテンツをデコードして出力
-        try:
-            user_content_obj = json.loads(payload["contents"][0]["parts"][0]["text"])
-            logger.info("Gemini request content decoded: %s", json.dumps(user_content_obj, ensure_ascii=False))
-        except Exception:  # pylint: disable=broad-except
-            logger.debug("Failed to decode Gemini request content for logging", exc_info=True)
+        logger.debug(
+            "Gemini request prepared | model=%s targets=%s context_count=%s",
+            self._model,
+            list(request.candidate_languages),
+            len(context),
+        )
 
         response = self._session.post(
             url,
@@ -106,15 +106,21 @@ class GeminiTranslationAdapter(TranslationPort):
             raise ValueError(f"Unexpected Gemini response format: {body}") from exc
 
         data = json.loads(part_text)
-        logger.info("Gemini parsed translations: %s", json.dumps(data, ensure_ascii=False))
 
         translations = data.get("translations", [])
         allowed = {lang.lower() for lang in request.candidate_languages}
-        return [
+        results = [
             TranslationResult(lang=item["lang"], text=item["text"])
             for item in translations
             if item.get("lang") and item.get("text") and item["lang"].lower() in allowed
         ]
+        logger.info(
+            "Gemini translations parsed | model=%s count=%s langs=%s",
+            self._model,
+            len(results),
+            [item.lang for item in results],
+        )
+        return results
 
     def _build_payload(
         self,
