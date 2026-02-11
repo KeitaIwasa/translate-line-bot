@@ -38,7 +38,7 @@ class NeonMessageRepository(MessageRepositoryPort):
             INSERT INTO group_members (group_id, user_id, display_name, display_name_updated_at)
             VALUES (%s, %s, NULL, NULL)
             ON CONFLICT (group_id, user_id)
-            DO UPDATE SET joined_at = NOW()
+            DO NOTHING
             """
         )
         with self._client.cursor() as cur:
@@ -689,63 +689,93 @@ class NeonMessageRepository(MessageRepositoryPort):
         with self._client.cursor() as cur:
             cur.execute(
                 """
-                SELECT translation_enabled
-                FROM group_settings
-                WHERE group_id = %s
+                WITH base AS (
+                    SELECT
+                        %s::text AS group_id,
+                        COALESCE(gs.translation_enabled, TRUE) AS translation_enabled,
+                        sub.status AS subscription_status,
+                        sub.current_period_start AS period_start,
+                        sub.current_period_end AS period_end,
+                        COALESCE(gl.lang_codes, ARRAY[]::text[]) AS group_languages
+                    FROM (SELECT 1) AS one
+                    LEFT JOIN group_settings gs ON gs.group_id = %s
+                    LEFT JOIN LATERAL (
+                        SELECT status, current_period_start, current_period_end
+                        FROM group_subscriptions
+                        WHERE group_id = %s
+                        LIMIT 1
+                    ) sub ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT ARRAY_AGG(lang_code ORDER BY lang_code) AS lang_codes
+                        FROM group_languages
+                        WHERE group_id = %s
+                    ) gl ON TRUE
+                ),
+                periodized AS (
+                    SELECT
+                        group_id,
+                        translation_enabled,
+                        subscription_status,
+                        period_start,
+                        period_end,
+                        group_languages,
+                        CASE
+                            WHEN subscription_status IN ('active', 'trialing') THEN
+                                COALESCE(
+                                    (
+                                        CASE
+                                            WHEN period_start IS NOT NULL THEN ((period_start AT TIME ZONE 'UTC')::date)::text
+                                            WHEN period_end IS NOT NULL THEN (((period_end - INTERVAL '31 days') AT TIME ZONE 'UTC')::date)::text
+                                            ELSE NULL
+                                        END
+                                    ),
+                                    (date_trunc('month', NOW() AT TIME ZONE 'UTC')::date)::text
+                                )
+                            ELSE (date_trunc('month', NOW() AT TIME ZONE 'UTC')::date)::text
+                        END AS period_key
+                    FROM base
+                )
+                SELECT
+                    p.translation_enabled,
+                    p.group_languages,
+                    p.subscription_status,
+                    p.period_start,
+                    p.period_end,
+                    p.period_key,
+                    COALESCE(uc.translation_count, 0) AS usage,
+                    uc.limit_notice_plan
+                FROM periodized p
+                LEFT JOIN group_usage_counters uc
+                    ON uc.group_id = p.group_id
+                    AND uc.period_key = p.period_key
                 """,
-                (group_id,),
+                (group_id, group_id, group_id, group_id),
             )
-            settings_row = cur.fetchone()
-            translation_enabled = True if settings_row is None else bool(settings_row[0])
+            row = cur.fetchone()
 
-            cur.execute(
-                """
-                SELECT lang_code
-                FROM group_languages
-                WHERE group_id = %s
-                ORDER BY lang_code
-                """,
-                (group_id,),
+        if not row:
+            now = datetime.now(timezone.utc)
+            fallback_period_key = f"{now.year:04d}-{now.month:02d}-01"
+            return TranslationRuntimeState(
+                translation_enabled=True,
+                group_languages=[],
+                subscription_status=None,
+                period_start=None,
+                period_end=None,
+                period_key=fallback_period_key,
+                usage=0,
+                limit_notice_plan=None,
             )
-            group_languages = [row[0] for row in cur.fetchall()]
-
-            cur.execute(
-                """
-                SELECT status, current_period_start, current_period_end
-                FROM group_subscriptions
-                WHERE group_id = %s
-                """,
-                (group_id,),
-            )
-            subscription_row = cur.fetchone()
-            status = subscription_row[0] if subscription_row else None
-            period_start = subscription_row[1] if subscription_row else None
-            period_end = subscription_row[2] if subscription_row else None
-
-            paid = status in {"active", "trialing"}
-            period_key = self._compute_period_key(paid=paid, period_start=period_start, period_end=period_end)
-
-            cur.execute(
-                """
-                SELECT translation_count, limit_notice_plan
-                FROM group_usage_counters
-                WHERE group_id = %s AND period_key = %s
-                """,
-                (group_id, period_key),
-            )
-            usage_row = cur.fetchone()
-            usage = int(usage_row[0]) if usage_row else 0
-            limit_notice_plan = usage_row[1] if usage_row else None
 
         return TranslationRuntimeState(
-            translation_enabled=translation_enabled,
-            group_languages=group_languages,
-            subscription_status=status,
-            period_start=period_start,
-            period_end=period_end,
-            period_key=period_key,
-            usage=usage,
-            limit_notice_plan=limit_notice_plan,
+            translation_enabled=bool(row[0]),
+            group_languages=list(row[1] or []),
+            subscription_status=row[2],
+            period_start=row[3],
+            period_end=row[4],
+            period_key=row[5],
+            usage=int(row[6]),
+            limit_notice_plan=row[7],
         )
 
     def reset_group_language_settings(self, group_id: str) -> None:
