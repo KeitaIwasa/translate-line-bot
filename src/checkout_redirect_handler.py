@@ -42,7 +42,7 @@ def _handle_status(event: Dict[str, Any]) -> Dict[str, Any]:
     token = _extract_token(event)
     if token:
         try:
-            payload = verify_token(token, settings.subscription_token_secret, scope="checkout")
+            payload = verify_token(token, secret=settings.subscription_token_secret, scope="checkout")
         except TokenError:
             return _json_response(401, {"message": "invalid token"})
 
@@ -70,7 +70,7 @@ def _handle_start(event: Dict[str, Any]) -> Dict[str, Any]:
         return _json_response(400, {"message": "target is invalid"})
 
     try:
-        payload = verify_token(token, settings.subscription_token_secret, scope="checkout")
+        payload = verify_token(token, secret=settings.subscription_token_secret, scope="checkout")
     except TokenError:
         return _json_response(401, {"message": "invalid token"})
 

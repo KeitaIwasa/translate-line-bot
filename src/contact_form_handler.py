@@ -214,7 +214,7 @@ def _resolve_priority_support(payload: Dict[str, Any]) -> tuple[bool, Optional[s
     verified = None
     for scope in ("support", "checkout"):
         try:
-            verified = verify_token(token, settings.subscription_token_secret, scope=scope)
+            verified = verify_token(token, secret=settings.subscription_token_secret, scope=scope)
             break
         except TokenError:
             continue
