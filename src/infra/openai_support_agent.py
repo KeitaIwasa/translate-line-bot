@@ -48,15 +48,17 @@ class OpenAISupportAgent(PrivateChatResponderPort):
                 guardrails_failed=True,
             )
 
-        masked_history = [
-            models.ConversationMessage(
-                role=item.role,
-                sender_name=item.sender_name,
-                text=self._mask_text_with_pii(item.text),
-                timestamp=item.timestamp,
+        masked_history: list[models.ConversationMessage] = []
+        for item in history:
+            masked_text, _ = self._mask_text_with_pii(item.text)
+            masked_history.append(
+                models.ConversationMessage(
+                    role=item.role,
+                    sender_name=item.sender_name,
+                    text=masked_text,
+                    timestamp=item.timestamp,
+                )
             )
-            for item in history
-        ]
 
         try:
             output = self._run_agent(safe_input, masked_history)
@@ -67,7 +69,7 @@ class OpenAISupportAgent(PrivateChatResponderPort):
             logger.exception("OpenAI support agent failed")
             output = SAFETY_MESSAGE
 
-        safe_output = self._mask_text_with_pii(output)
+        safe_output, _ = self._mask_text_with_pii(output)
         return models.PrivateChatResponse(
             output_text=output,
             safe_input_text=safe_input,

@@ -262,7 +262,13 @@ sam deploy \
 
 ### 3-1. デプロイスクリプト (`scripts/deploy.sh`) の利用
 
-手元の環境変数で上書きしつつ、ビルドからデプロイまで一括実行できます。
+手元の環境変数で上書きしつつ、以下を一括実行できます。
+- `sql/*.sql` の DB マイグレーション適用
+- SAM ビルド
+- SAM デプロイ
+
+`STAGE=stg` のときは `stg/line-translate-bot-secrets` の `NEON_DATABASE_URL` にだけ、
+`STAGE=prod` のときは `prod/line-translate-bot-secrets` の `NEON_DATABASE_URL` にだけ適用されます。
 
 ```bash
 # ステージング（既定値のまま）
@@ -282,6 +288,7 @@ STACK_NAME=translate-line-bot-prod STAGE=prod PROFILE=line-translate-bot ./scrip
 - `STAGE` (既定: stg)
 - `S3_BUCKET`（未指定なら `--resolve-s3` で自動バケット利用）
 - `RUNTIME_SECRET_ARN` ほか Lambda パラメータ
+- `PYTHON_BIN`（既定: `python3`。`.venv/bin/python` があれば自動で優先）
 
 #### デプロイ時のよくあるミス
 - `--stack-name` を付け忘れると SAM がどのスタックを更新するか判断できず即失敗します。常に `translate-line-bot-stg` を指定してください。

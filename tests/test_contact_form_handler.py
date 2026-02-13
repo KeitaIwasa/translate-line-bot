@@ -48,6 +48,28 @@ def test_contact_handler_success(monkeypatch):
     assert sent["ReplyToAddresses"] == ["user@example.com"]
 
 
+def test_contact_handler_accepts_minimum_message_length(monkeypatch):
+    module = _import_handler(monkeypatch)
+
+    sent = {}
+
+    class _SesClient:
+        def send_email(self, **kwargs):
+            sent.update(kwargs)
+
+    monkeypatch.setattr(module, "_get_ses_client", lambda: _SesClient())
+    monkeypatch.setattr(module, "_enforce_rate_limit", lambda event: None)
+
+    response = module.lambda_handler(
+        _event(body={"email": "user@example.com", "message": "12345"}),
+        None,
+    )
+
+    assert response["statusCode"] == 200
+    assert json.loads(response["body"]) == {"ok": True}
+    assert sent["ReplyToAddresses"] == ["user@example.com"]
+
+
 def test_contact_handler_bad_request(monkeypatch):
     module = _import_handler(monkeypatch)
     response = module.lambda_handler(_event(body={"email": "invalid", "message": "x"}), None)

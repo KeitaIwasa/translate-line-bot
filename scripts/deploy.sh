@@ -2,9 +2,11 @@
 set -euo pipefail
 
 # ステージング／本番共通の SAM デプロイスクリプト
+# 1) 対象環境 DB へマイグレーション適用
+# 2) SAM build / deploy
 # 環境変数で上書き可能なパラメータ:
 # STACK_NAME, PROFILE, REGION, STAGE, GEMINI_MODEL, FUNCTION_MEMORY_SIZE, FUNCTION_TIMEOUT,
-# MAX_CONTEXT_MESSAGES, TRANSLATION_RETRY, RUNTIME_SECRET_ARN, S3_BUCKET
+# MAX_CONTEXT_MESSAGES, TRANSLATION_RETRY, RUNTIME_SECRET_ARN, S3_BUCKET, PYTHON_BIN
 
 STACK_NAME="${STACK_NAME:-translate-line-bot-stg}"
 PROFILE="${PROFILE:-line-translate-bot}"
@@ -20,6 +22,7 @@ RUNTIME_SECRET_ARN="${RUNTIME_SECRET_ARN:-}"
 S3_BUCKET="${S3_BUCKET:-}"
 ENABLE_STRIPE="${ENABLE_STRIPE:-true}"
 DEPLOY_NONCE="${DEPLOY_NONCE:-$(date +%s)}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 if [[ -z "$RUNTIME_SECRET_ARN" ]]; then
   if [[ "$STAGE" == "prod" ]]; then
@@ -28,6 +31,20 @@ if [[ -z "$RUNTIME_SECRET_ARN" ]]; then
     RUNTIME_SECRET_ARN="stg/line-translate-bot-secrets"
   fi
 fi
+
+if [[ -x ".venv/bin/python" && "$PYTHON_BIN" == "python3" ]]; then
+  PYTHON_BIN=".venv/bin/python"
+fi
+
+echo "Applying DB migrations for stage '$STAGE' (secret=$RUNTIME_SECRET_ARN)..."
+SECRET_JSON="$(aws secretsmanager get-secret-value \
+  --secret-id "$RUNTIME_SECRET_ARN" \
+  --region "$REGION" \
+  --profile "$PROFILE" \
+  --query SecretString \
+  --output text)"
+DB_URL="$(printf '%s' "$SECRET_JSON" | "$PYTHON_BIN" -c 'import sys, json; print(json.load(sys.stdin)["NEON_DATABASE_URL"])')"
+"$PYTHON_BIN" scripts/apply_migrations.py --db-url "$DB_URL"
 
 echo "SAM Build..."
 sam build

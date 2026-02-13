@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 _repo: Optional[NeonMessageRepository] = None
 
-MIN_MESSAGE_LENGTH = 10
+MIN_MESSAGE_LENGTH = 5
 MAX_MESSAGE_LENGTH = 2000
 ALLOWED_LOCALES = {"ja", "en", "zh-TW", "th"}
 DEFAULT_ALLOWED_ORIGIN = "https://kotori-ai.com"
