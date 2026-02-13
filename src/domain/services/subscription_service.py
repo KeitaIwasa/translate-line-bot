@@ -55,7 +55,7 @@ class SubscriptionService:
                 "scope": scope,
                 "exp": int(expires_at.timestamp()),
             },
-            self._subscription_token_secret,
+            secret=self._subscription_token_secret,
         )
         return f"{self._subscription_frontend_base_url}{page_path}?st={quote_plus(token)}"
 
