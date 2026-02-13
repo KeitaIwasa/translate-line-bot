@@ -153,35 +153,18 @@ class SubscriptionService:
 
         stripe.api_key = self._stripe_secret_key
         try:
-            # まず即時キャンセルを試み、失敗した場合は課金終了日までキャンセル予約にフォールバックする
-            try:
-                subscription = stripe.Subscription.delete(subscription_id)
-                cancelled_immediately = True
-            except Exception:  # pylint: disable=broad-except
-                logger.warning(
-                    "Immediate cancel failed; fallback to cancel_at_period_end",
-                    exc_info=True,
-                    extra={"subscription_id": subscription_id},
-                )
-                subscription = stripe.Subscription.modify(subscription_id, cancel_at_period_end=True)
-                cancelled_immediately = False
+            # 解約は常に次回更新時に適用する（期間中の権利は維持）
+            subscription = stripe.Subscription.modify(subscription_id, cancel_at_period_end=True)
 
             period_end_ts = subscription.get("current_period_end")
             period_end = datetime.fromtimestamp(period_end_ts, tz=timezone.utc) if period_end_ts else None
 
-            # Stripe は cancel_at_period_end=True の場合 status が active のままになるので、DB 上は canceled として扱う
-            status = subscription.get("status") or "canceled"
-            if not cancelled_immediately and subscription.get("cancel_at_period_end"):
-                status = "canceled"
+            # 予約解約中は Stripe status が active/trialing のままなのでそのまま保存する。
+            status = subscription.get("status") or "active"
 
             updater = getattr(self._repo, "update_subscription_status", None)
             if updater:
                 updater(group_id, status, period_end)
-
-            # 解約後は翻訳を停止する
-            set_enabled = getattr(self._repo, "set_translation_enabled", None)
-            if set_enabled:
-                set_enabled(group_id, False)
 
             return True
         except Exception:  # pylint: disable=broad-except

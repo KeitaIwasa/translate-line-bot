@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from src.app.handlers.message_handler import MessageHandler
 
 
@@ -46,3 +48,37 @@ def test_limit_notice_paid_has_no_url():
 
     assert url is None
     assert "http" not in notice.lower()
+
+
+def test_pro_limit_notice_includes_reset_date_without_plan_change_prompt():
+    handler = _build_handler()
+    handler._build_multilingual_interface_message = lambda base, _gid: base  # type: ignore[assignment]
+
+    notice, url = handler._build_limit_reached_notice_text(
+        "group1",
+        plan_key="pro",
+        limit=8000,
+        period_end=datetime(2026, 2, 28, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert url is None
+    assert "translation has stopped" in notice
+    assert "2026-02-28" in notice
+    assert "change your plan" not in notice.lower()
+
+
+def test_standard_limit_notice_includes_reset_date_and_pro_upgrade_prompt():
+    handler = _build_handler()
+    handler._build_multilingual_interface_message = lambda base, _gid: base  # type: ignore[assignment]
+    handler._subscription_service.create_checkout_url = lambda _gid: "https://short.example.com/cs"  # type: ignore[attr-defined]
+
+    notice, url = handler._build_limit_reached_notice_text(
+        "group1",
+        plan_key="standard",
+        limit=4000,
+        period_end=datetime(2026, 3, 15, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert url == "https://short.example.com/cs"
+    assert "2026-03-15" in notice
+    assert "upgrade to the Pro plan" in notice

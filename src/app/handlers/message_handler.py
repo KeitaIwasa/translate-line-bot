@@ -8,6 +8,7 @@ import re
 import time
 from functools import partial
 from datetime import datetime, timezone
+from calendar import monthrange
 from typing import Dict, List, Optional, Sequence, Tuple
 from concurrent.futures import ThreadPoolExecutor, Future
 
@@ -542,6 +543,7 @@ class MessageHandler:
                     flow.decision.limit,
                     flow.decision.plan_key,
                     flow.decision.period_key,
+                    runtime.period_end,
                 )
             return True
 
@@ -697,6 +699,7 @@ class MessageHandler:
         limit: int,
         plan_key: str,
         period_key: str,
+        period_end: Optional[datetime] = None,
     ) -> None:
         """プラン別に月1回だけ上限通知を送る。"""
         previous_plan = getattr(self._repo, "get_limit_notice_plan", lambda *_: None)(event.group_id, period_key)
@@ -704,15 +707,35 @@ class MessageHandler:
             # 同一プランで既に通知済み
             return
 
-        self._send_limit_reached_notice(event, plan_key, limit)
+        self._send_limit_reached_notice(
+            event,
+            plan_key,
+            limit,
+            period_key=period_key,
+            period_end=period_end,
+        )
 
         setter = getattr(self._repo, "set_limit_notice_plan", None)
         if setter:
             setter(event.group_id, period_key, plan_key)
 
-    def _send_limit_reached_notice(self, event: models.MessageEvent, plan_key: str, limit: int) -> None:
+    def _send_limit_reached_notice(
+        self,
+        event: models.MessageEvent,
+        plan_key: str,
+        limit: int,
+        *,
+        period_key: Optional[str] = None,
+        period_end: Optional[datetime] = None,
+    ) -> None:
         """上限到達/超過時の統一通知。"""
-        notice_text, url = self._build_limit_reached_notice_text(event.group_id, plan_key, limit)
+        notice_text, url = self._build_limit_reached_notice_text(
+            event.group_id,
+            plan_key,
+            limit,
+            period_key=period_key,
+            period_end=period_end,
+        )
         if not event.reply_token:
             return
 
@@ -728,6 +751,8 @@ class MessageHandler:
         plan_key: Optional[str] = None,
         limit: int = 0,
         *,
+        period_key: Optional[str] = None,
+        period_end: Optional[datetime] = None,
         paid: Optional[bool] = None,
     ) -> tuple[str, Optional[str]]:
         normalized = normalize_plan_key(plan_key)
@@ -743,25 +768,58 @@ class MessageHandler:
             )
             url = self._subscription_service.create_checkout_url(group_id)
         elif normalized == STANDARD_PLAN:
+            reset_date = self._resolve_quota_reset_date(period_key=period_key, period_end=period_end)
+            reset_line = (
+                f"Translation will resume automatically on {reset_date} (UTC) when the monthly quota resets."
+                if reset_date
+                else "Translation will resume automatically when the monthly quota resets."
+            )
             base = (
                 f"The Standard plan monthly limit ({limit:,} messages) has been reached and translation is paused.\n"
-                "Please review plans from the link below."
+                f"{reset_line}\n"
+                "To unlock a higher limit now, upgrade to the Pro plan from the link below."
             )
             url = self._subscription_service.create_checkout_url(group_id)
         else:
-            base = (
-                f"The Pro plan monthly limit ({limit:,} messages) has been reached and translation is paused.\n"
-                "Please wait for the next monthly cycle or change your plan from the link below."
+            reset_date = self._resolve_quota_reset_date(period_key=period_key, period_end=period_end)
+            reset_line = (
+                f"It will resume automatically on {reset_date} (UTC) when the monthly quota resets."
+                if reset_date
+                else "It will resume automatically when the monthly quota resets."
             )
-            # 後方互換: paid=True で呼ばれる旧テストは URL なしを想定
-            url = None if paid is True else self._subscription_service.create_checkout_url(group_id)
+            base = (
+                f"The Pro plan monthly limit ({limit:,} messages) has been reached and translation has stopped.\n"
+                f"{reset_line}"
+            )
+            url = None
 
         return self._build_multilingual_notice(
             base,
             group_id,
             url,
-            add_missing_link_notice=(paid is not True),
+            add_missing_link_notice=(paid is not True and normalized != PRO_PLAN),
         )
+
+    def _resolve_quota_reset_date(
+        self,
+        *,
+        period_key: Optional[str],
+        period_end: Optional[datetime],
+    ) -> Optional[str]:
+        if period_end:
+            return period_end.astimezone(timezone.utc).date().isoformat()
+
+        if not period_key:
+            return None
+
+        try:
+            start = datetime.strptime(period_key, "%Y-%m-%d")
+            year = start.year + (1 if start.month == 12 else 0)
+            month = 1 if start.month == 12 else start.month + 1
+            day = min(start.day, monthrange(year, month)[1])
+            return datetime(year, month, day).date().isoformat()
+        except (TypeError, ValueError):
+            return None
 
     def _build_subscription_menu_message(
         self,
@@ -842,7 +900,7 @@ class MessageHandler:
         # 上限超過が原因で停止している場合
         if usage >= limit:
             # 翻訳停止中パスでも月1回通知フラグ(limit_notice_plan)を更新する
-            self._maybe_send_limit_notice(event, limit, plan_key, period_key)
+            self._maybe_send_limit_notice(event, limit, plan_key, period_key, period_end)
             return
 
         if plan_key in {STANDARD_PLAN, PRO_PLAN}:

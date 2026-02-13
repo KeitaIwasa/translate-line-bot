@@ -7,17 +7,11 @@ import pytest
 from src.domain.services.subscription_service import SubscriptionService
 
 
-def _fake_stripe_module(delete_result=None, modify_result=None, delete_raises=False):
+def _fake_stripe_module(modify_result=None):
     """Stripe モジュールの簡易モックを生成する。"""
     module = types.ModuleType("stripe")
 
     class Subscription:
-        @staticmethod
-        def delete(_subscription_id):
-            if delete_raises:
-                raise Exception("delete failed")
-            return delete_result or {}
-
         @staticmethod
         def modify(_subscription_id, cancel_at_period_end=True):  # noqa: ARG003
             return modify_result or {}
@@ -52,33 +46,37 @@ def cleanup_stripe(monkeypatch):
         sys.modules["stripe"] = original
 
 
-def test_cancel_subscription_updates_status_and_disables_translation(monkeypatch):
+def test_cancel_subscription_reserves_cancellation_and_keeps_translation_enabled(monkeypatch):
     repo = _RepoStub()
-    stripe_mod = _fake_stripe_module(delete_result={"status": "canceled", "current_period_end": 1_700_000_000})
-    monkeypatch.setitem(sys.modules, "stripe", stripe_mod)
-
-    service = SubscriptionService(repo, stripe_secret_key="sk_test", stripe_price_monthly_id="price_123")
-
-    assert service.cancel_subscription("gid") is True
-    assert repo.updated[0][1] == "canceled"
-    # 翻訳停止が呼ばれること
-    assert repo.enabled_calls == [("gid", False)]
-    # period_end が datetime に変換されていること
-    assert isinstance(repo.updated[0][2], datetime)
-
-
-def test_cancel_subscription_fallback_sets_canceled_when_active_at_period_end(monkeypatch):
-    repo = _RepoStub()
-    # delete が失敗し、modify が active + cancel_at_period_end=True を返すケース
     stripe_mod = _fake_stripe_module(
-        delete_raises=True,
-        modify_result={"status": "active", "cancel_at_period_end": True, "current_period_end": 1_700_000_000},
+        modify_result={"status": "active", "cancel_at_period_end": True, "current_period_end": 1_700_000_000}
     )
     monkeypatch.setitem(sys.modules, "stripe", stripe_mod)
 
     service = SubscriptionService(repo, stripe_secret_key="sk_test", stripe_price_monthly_id="price_123")
 
     assert service.cancel_subscription("gid") is True
-    # DB には canceled として記録する
-    assert repo.updated[0][1] == "canceled"
-    assert repo.enabled_calls == [("gid", False)]
+    assert repo.updated[0][1] == "active"
+    # 予約解約では翻訳停止はしない
+    assert repo.enabled_calls == []
+    # period_end が datetime に変換されていること
+    assert isinstance(repo.updated[0][2], datetime)
+
+
+def test_cancel_subscription_returns_false_when_modify_fails(monkeypatch):
+    repo = _RepoStub()
+    stripe_mod = _fake_stripe_module()
+    original_modify = stripe_mod.Subscription.modify
+
+    def _raise(*_args, **_kwargs):
+        raise Exception("modify failed")
+
+    stripe_mod.Subscription.modify = _raise
+    monkeypatch.setitem(sys.modules, "stripe", stripe_mod)
+
+    service = SubscriptionService(repo, stripe_secret_key="sk_test", stripe_price_monthly_id="price_123")
+
+    assert service.cancel_subscription("gid") is False
+    assert repo.updated == []
+    assert repo.enabled_calls == []
+    stripe_mod.Subscription.modify = original_modify
