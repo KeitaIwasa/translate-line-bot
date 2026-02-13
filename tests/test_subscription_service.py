@@ -80,3 +80,18 @@ def test_cancel_subscription_returns_false_when_modify_fails(monkeypatch):
     assert repo.updated == []
     assert repo.enabled_calls == []
     stripe_mod.Subscription.modify = original_modify
+
+
+def test_build_subscription_summary_text_for_standard_plan():
+    period_end = datetime(2026, 2, 28, 0, 0)
+    text = SubscriptionService.build_subscription_summary_text(
+        "active",
+        period_end,
+        plan_key="standard",
+    )
+    assert text == "Plan: Standard (active) (renews on 2026-02-28)"
+
+
+def test_build_subscription_summary_text_defaults_to_pro_when_plan_unspecified():
+    text = SubscriptionService.build_subscription_summary_text("active", None)
+    assert text == "Plan: Pro (active)"

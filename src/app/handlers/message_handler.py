@@ -658,6 +658,7 @@ class MessageHandler:
             group_id=event.group_id,
             instruction_lang=instruction_lang,
             status=status,
+            effective_plan=effective_plan,
             period_end=period_end,
             portal_url=portal_url,
             upgrade_url=upgrade_url,

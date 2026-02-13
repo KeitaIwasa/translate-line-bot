@@ -172,12 +172,24 @@ class SubscriptionService:
             return False
 
     @staticmethod
-    def build_subscription_summary_text(status: Optional[str], period_end: Optional[datetime]) -> str:
+    def build_subscription_summary_text(
+        status: Optional[str],
+        period_end: Optional[datetime],
+        *,
+        plan_key: Optional[str] = None,
+    ) -> str:
+        normalized_plan = (plan_key or "").strip().lower()
+        plan_label = "Pro"
+        if normalized_plan == "standard":
+            plan_label = "Standard"
+        elif normalized_plan == "free":
+            plan_label = "Free"
+
         if status in {"active", "trialing"}:
             suffix = ""
             if period_end:
                 suffix = f" (renews on {period_end.date().isoformat()})"
-            return f"Plan: Pro ({status}){suffix}"
+            return f"Plan: {plan_label} ({status}){suffix}"
         if status:
             return f"Plan: Free (status: {status})"
         return "Plan: Free (no subscription)"
