@@ -59,97 +59,18 @@ class QuotaService:
         - stop_translation: free プランで上限超過時に翻訳を停止すべきか
         """
 
-        period_key = self.compute_period_key(paid=paid, period_start=period_start, period_end=period_end)
-        notice_plan = self._repo.get_limit_notice_plan(group_id, period_key)
-        current_usage = self._repo.get_usage(group_id, period_key)
-
-        # Free で今期すでに通知済みなら早期終了（旧実装の挙動を踏襲）
-        if not paid and notice_plan == plan_key:
-            return QuotaDecision(
-                allowed=False,
-                should_notify=False,
-                stop_translation=False,
-                usage=current_usage,
-                limit=limit,
-                period_key=period_key,
-                plan_key=plan_key,
-            )
-
-        # 現在値がすでに上限以上なら即終了
-        if current_usage >= limit:
-            return QuotaDecision(
-                allowed=False,
-                should_notify=notice_plan != plan_key,
-                stop_translation=not paid,
-                usage=current_usage,
-                limit=limit,
-                period_key=period_key,
-                plan_key=plan_key,
-            )
-
-        # 利用カウントを進める
-        usage_after = self._repo.increment_usage(group_id, period_key, increment)
-
-        if paid:
-            if usage_after > limit:
-                return QuotaDecision(
-                    allowed=False,
-                    should_notify=notice_plan != plan_key,
-                    stop_translation=False,
-                    usage=usage_after,
-                    limit=limit,
-                    period_key=period_key,
-                    plan_key=plan_key,
-                )
-            if usage_after == limit:
-                return QuotaDecision(
-                    allowed=True,
-                    should_notify=notice_plan != plan_key,
-                    stop_translation=False,
-                    usage=usage_after,
-                    limit=limit,
-                    period_key=period_key,
-                    plan_key=plan_key,
-                )
-            return QuotaDecision(
-                allowed=True,
-                should_notify=False,
-                stop_translation=False,
-                usage=usage_after,
-                limit=limit,
-                period_key=period_key,
-                plan_key=plan_key,
-            )
-
-        # Free プラン
-        if usage_after > limit:
-            return QuotaDecision(
-                allowed=False,
-                should_notify=notice_plan != plan_key,
-                stop_translation=True,
-                usage=usage_after,
-                limit=limit,
-                period_key=period_key,
-                plan_key=plan_key,
-            )
-        if usage_after == limit:
-            return QuotaDecision(
-                allowed=True,
-                should_notify=notice_plan != plan_key,
-                stop_translation=False,
-                usage=usage_after,
-                limit=limit,
-                period_key=period_key,
-                plan_key=plan_key,
-            )
-        return QuotaDecision(
-            allowed=True,
-            should_notify=False,
-            stop_translation=False,
-            usage=usage_after,
-            limit=limit,
+        period_key = self.compute_period_key(
+            paid=paid,
+            period_start=period_start,
+            period_end=period_end,
+        )
+        return self._repo.reserve_quota_slot(
+            group_id=group_id,
             period_key=period_key,
             plan_key=plan_key,
+            paid=paid,
+            limit=limit,
+            increment=increment,
         )
 
     def rollback(self, *, group_id: str, period_key: str, increment: int = 1) -> None:

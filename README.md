@@ -20,6 +20,7 @@ Gemini 2.5 Flash の Structured Output を用いて、
 * 多言語ユーザーが混在する LINE グループ向け
 * グループで一度だけ希望言語を登録（全メンバーに共有、最大5言語）
 * メッセージの「原文の言語以外」に翻訳を自動生成
+* 個人チャットの質問に、ガードレール付きサポート応答を返却（履歴を文脈に利用）
 * Gemini 2.5 Flash Structured Output による自然＋安定した JSON 生成
 * AWS Lambda による完全サーバレス構成
 * Neon (PostgreSQL) で言語設定とメッセージ履歴を管理
@@ -102,12 +103,25 @@ cd line-multilang-bot
 
 ---
 
-### 2. Install dependencies
+### 2. Install dependencies (always in `.venv`)
 
-Lambda 用の依存を入れます。
+テスト/ローカル実行は必ず `.venv` の Python を使います。
 
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 ```
-pip install -r requirements.txt
+
+### 2-1. Run tests (always in `.venv`)
+
+```bash
+./scripts/test.sh
+```
+
+個別テストを実行する場合:
+
+```bash
+./scripts/test.sh tests/test_contact_form_handler.py -q
 ```
 
 ---
@@ -148,15 +162,56 @@ LINE_CHANNEL_SECRET=xxx
 LINE_CHANNEL_ACCESS_TOKEN=xxx
 NEON_DATABASE_URL=postgres://...
 GEMINI_API_KEY=your_google_ai_key
+OPENAI_API_KEY=your_openai_key
+OPENAI_SUPPORT_MODEL=gpt-5.2
+OPENAI_GUARDRAIL_MODEL=gpt-4.1-mini
+PRIVATE_CHAT_HISTORY_LIMIT=5
 STRIPE_SECRET_KEY=sk_live_or_test
 STRIPE_WEBHOOK_SECRET=whsec_xxx
 STRIPE_PRICE_MONTHLY_ID=price_xxx
+CONTACT_TO_EMAIL=contact@iwasadigital.com
+CONTACT_FROM_EMAIL=no-reply@iwasadigital.com
+CONTACT_ALLOWED_ORIGINS=https://kotori-ai.com,http://localhost:5500
+CONTACT_RATE_LIMIT_MAX=5
+CONTACT_RATE_LIMIT_WINDOW_SECONDS=600
+CONTACT_IP_HASH_SALT=your_random_salt
 # Optional: override default quotas (Free=50, Pro=8000 messages/month)
 # FREE_QUOTA_PER_MONTH=50
 # PRO_QUOTA_PER_MONTH=8000
 ```
 
 Lambda では **環境変数として設定**してください。
+
+お問い合わせフォーム API (`POST /contact`) を有効化する場合は、SES の Identity 検証（`no-reply@iwasadigital.com` または `iwasadigital.com`）が必要です。
+
+Neon のレート制限テーブルも事前作成してください。
+
+```sql
+-- sql/20260211_add_contact_rate_limits.sql
+CREATE TABLE IF NOT EXISTS contact_rate_limits (
+    ip_hash TEXT NOT NULL,
+    window_start TIMESTAMPTZ NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (ip_hash, window_start)
+);
+```
+
+SES Identity の CLI 例（ap-northeast-1）:
+
+```bash
+# ドメイン Identity 作成（推奨）
+aws sesv2 create-email-identity \
+  --profile line-translate-bot \
+  --region ap-northeast-1 \
+  --email-identity iwasadigital.com
+
+# ステータス確認
+aws sesv2 get-email-identity \
+  --profile line-translate-bot \
+  --region ap-northeast-1 \
+  --email-identity iwasadigital.com
+```
 
 ---
 
@@ -180,6 +235,7 @@ Lambda では **環境変数として設定**してください。
   - `LINE_CHANNEL_ACCESS_TOKEN`
   - `GEMINI_API_KEY`
   - `NEON_DATABASE_URL`
+  - `CONTACT_IP_HASH_SALT`
 - `.env` にはローカル検証用の `NEON_DATABASE_URL` / `GEMINI_API_KEY` を入れてテスト可能
 
 ### 1. 依存パッケージの準備
@@ -219,7 +275,13 @@ sam deploy \
 
 ### 3-1. デプロイスクリプト (`scripts/deploy.sh`) の利用
 
-手元の環境変数で上書きしつつ、ビルドからデプロイまで一括実行できます。
+手元の環境変数で上書きしつつ、以下を一括実行できます。
+- `sql/*.sql` の DB マイグレーション適用
+- SAM ビルド
+- SAM デプロイ
+
+`STAGE=stg` のときは `stg/line-translate-bot-secrets` の `NEON_DATABASE_URL` にだけ、
+`STAGE=prod` のときは `prod/line-translate-bot-secrets` の `NEON_DATABASE_URL` にだけ適用されます。
 
 ```bash
 # ステージング（既定値のまま）
@@ -239,6 +301,7 @@ STACK_NAME=translate-line-bot-prod STAGE=prod PROFILE=line-translate-bot ./scrip
 - `STAGE` (既定: stg)
 - `S3_BUCKET`（未指定なら `--resolve-s3` で自動バケット利用）
 - `RUNTIME_SECRET_ARN` ほか Lambda パラメータ
+- `PYTHON_BIN`（既定: `python3`。`.venv/bin/python` があれば自動で優先）
 
 #### デプロイ時のよくあるミス
 - `--stack-name` を付け忘れると SAM がどのスタックを更新するか判断できず即失敗します。常に `translate-line-bot-stg` を指定してください。

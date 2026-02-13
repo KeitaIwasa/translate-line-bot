@@ -103,6 +103,35 @@ class StoredMessage:
     sender_name: str
     text: str
     timestamp: datetime
+    message_role: str = "user"
+
+
+@dataclass(frozen=True)
+class ConversationMessage:
+    role: str
+    sender_name: str
+    text: str
+    timestamp: datetime
+
+
+@dataclass(frozen=True)
+class TranslationRuntimeState:
+    translation_enabled: bool
+    group_languages: List[str]
+    subscription_status: Optional[str]
+    period_start: Optional[datetime]
+    period_end: Optional[datetime]
+    period_key: str
+    usage: int
+    limit_notice_plan: Optional[str]
+
+
+@dataclass(frozen=True)
+class PrivateChatResponse:
+    output_text: str
+    safe_input_text: str
+    safe_output_text: str
+    guardrails_failed: bool = False
 
 
 # === Reply DTO ===

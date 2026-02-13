@@ -16,9 +16,9 @@ Parameters:
     Description: Lambda memory size in MB
   FunctionTimeout:
     Type: Number
-    Default: 20
+    Default: 60
     MinValue: 1
-    MaxValue: 29
+    MaxValue: 900
     Description: Lambda timeout in seconds
   RuntimeSecretArn:
     Type: String
@@ -36,7 +36,7 @@ Parameters:
     Description: Maximum number of context messages sent to Gemini
   TranslationRetry:
     Type: Number
-    Default: 2
+    Default: 1
     MinValue: 1
     MaxValue: 5
     Description: Number of Gemini retries
@@ -95,6 +95,16 @@ Globals:
           - ""
         SUBSCRIPTION_FRONTEND_BASE_URL: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:SUBSCRIPTION_FRONTEND_BASE_URL}}"
         CHECKOUT_API_BASE_URL: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:CHECKOUT_API_BASE_URL}}"
+        OPENAI_API_KEY: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:OPENAI_API_KEY}}"
+        OPENAI_SUPPORT_MODEL: gpt-5.2
+        OPENAI_GUARDRAIL_MODEL: gpt-4.1-mini
+        PRIVATE_CHAT_HISTORY_LIMIT: 5
+        CONTACT_TO_EMAIL: contact@iwasadigital.com
+        CONTACT_FROM_EMAIL: no-reply@iwasadigital.com
+        CONTACT_ALLOWED_ORIGINS: https://kotori-ai.com,http://localhost:5500
+        CONTACT_RATE_LIMIT_MAX: 5
+        CONTACT_RATE_LIMIT_WINDOW_SECONDS: 600
+        CONTACT_IP_HASH_SALT: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:CONTACT_IP_HASH_SALT}}"
 
 Resources:
   LineWebhookApi:
@@ -166,6 +176,34 @@ Resources:
             ApiId: !Ref LineWebhookApi
             Path: /stats/total-users
             Method: GET
+
+  ContactFormFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src.contact_form_handler.lambda_handler
+      Description: Receives homepage contact form and forwards to email inbox
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
+              Resource: "*"
+      Events:
+        ContactFormPost:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LineWebhookApi
+            Path: /contact
+            Method: POST
+        ContactFormOptions:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LineWebhookApi
+            Path: /contact
+            Method: OPTIONS
 
   GroupUsageMonthlyResetFunction:
     Type: AWS::Serverless::Function

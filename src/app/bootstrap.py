@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from ..config import get_settings
 from ..domain.services.translation_service import TranslationService
@@ -12,7 +13,12 @@ from ..infra.command_router import GeminiCommandRouter
 from ..infra.line_api import LineApiAdapter
 from ..infra.neon_client import get_client
 from ..infra.neon_repositories import NeonMessageRepository
+from ..infra.openai_support_agent import OpenAISupportAgent
 from ..domain.services.quota_service import QuotaService
+from ..domain.services.private_chat_support_service import (
+    PrivateChatSupportConfig,
+    PrivateChatSupportService,
+)
 from ..domain.services.language_settings_service import LanguageSettingsService
 from ..domain.services.translation_flow_service import TranslationFlowService
 from .dispatcher import Dispatcher
@@ -66,6 +72,18 @@ def build_dispatcher() -> Dispatcher:
         max_context_messages=settings.max_context_messages,
         translation_retry=settings.translation_retry,
     )
+    prompt_path = str(Path(__file__).resolve().parent / "prompts" / "kotori_support_prompt.txt")
+    private_chat_responder = OpenAISupportAgent(
+        api_key=settings.openai_api_key,
+        support_model=settings.openai_support_model,
+        guardrail_model=settings.openai_guardrail_model,
+        prompt_path=prompt_path,
+    )
+    private_chat_support_service = PrivateChatSupportService(
+        repo=repo,
+        responder=private_chat_responder,
+        config=PrivateChatSupportConfig(history_limit=settings.private_chat_history_limit),
+    )
     # サブスク関連の共通サービス
     from ..domain.services.subscription_service import SubscriptionService
 
@@ -99,6 +117,7 @@ def build_dispatcher() -> Dispatcher:
         quota_service=quota_service,
         translation_flow_service=translation_flow_service,
         language_settings_service=lang_settings_service,
+        private_chat_support_service=private_chat_support_service,
     )
     postback_handler = PostbackHandler(
         line_client,

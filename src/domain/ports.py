@@ -4,11 +4,14 @@ from datetime import datetime
 from typing import List, Optional, Sequence, Tuple, Protocol
 
 from .models import (
+    ConversationMessage,
     ContextMessage,
     LanguageChoice,
     CommandDecision,
     LanguagePreference,
+    PrivateChatResponse,
     StoredMessage,
+    TranslationRuntimeState,
     TranslationRequest,
     TranslationResult,
 )
@@ -39,9 +42,14 @@ class LanguagePreferencePort:
 class MessageRepositoryPort:
     def ensure_group_member(self, group_id: str, user_id: str) -> None: ...
 
+    def get_group_member_display_name(self, group_id: str, user_id: str) -> Optional[str]: ...
+
+    def upsert_group_member_display_name(self, group_id: str, user_id: str, display_name: str) -> None: ...
+
     def fetch_group_languages(self, group_id: str) -> List[str]: ...
 
     def fetch_recent_messages(self, group_id: str, limit: int) -> List[ContextMessage]: ...
+    def fetch_private_conversation(self, user_id: str, limit: int) -> List[ConversationMessage]: ...
 
     def insert_message(self, message: StoredMessage) -> None: ...
 
@@ -60,6 +68,8 @@ class MessageRepositoryPort:
     def set_translation_enabled(self, group_id: str, enabled: bool) -> None: ...
 
     def is_translation_enabled(self, group_id: str) -> bool: ...
+
+    def fetch_translation_runtime_state(self, group_id: str) -> TranslationRuntimeState: ...
 
     def record_bot_joined_at(self, group_id: str, joined_at: datetime) -> None: ...
 
@@ -98,12 +108,26 @@ class MessageRepositoryPort:
     ) -> None: ...
 
 
+class PrivateChatResponderPort(Protocol):
+    def respond(self, input_text: str, history: Sequence[ConversationMessage]) -> PrivateChatResponse: ...
+
+
 class UsageRepositoryPort(Protocol):
     """利用カウント・クオータ管理専用のポート。"""
 
     def increment_usage(self, group_id: str, period_key: str, increment: int = 1) -> int: ...
     def get_usage(self, group_id: str, period_key: str) -> int: ...
     def get_limit_notice_plan(self, group_id: str, period_key: str) -> Optional[str]: ...
+    def reserve_quota_slot(
+        self,
+        *,
+        group_id: str,
+        period_key: str,
+        plan_key: str,
+        paid: bool,
+        limit: int,
+        increment: int,
+    ): ...
     def set_limit_notice_plan(self, group_id: str, period_key: str, plan: str) -> None: ...
     def reset_limit_notice_plan(self, group_id: str) -> None: ...
 

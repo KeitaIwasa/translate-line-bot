@@ -16,8 +16,8 @@ class Settings:
     bot_mention_name: str = "通訳AI"
     max_context_messages: int = 8
     max_group_languages: int = 5
-    gemini_timeout_seconds: int = 10
-    translation_retry: int = 2
+    gemini_timeout_seconds: int = 8
+    translation_retry: int = 1
     log_level: str = "INFO"
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
@@ -26,6 +26,16 @@ class Settings:
     pro_quota_per_month: int = 8000
     subscription_frontend_base_url: str = ""
     checkout_api_base_url: str = ""
+    openai_api_key: str = ""
+    openai_support_model: str = "gpt-5.2"
+    openai_guardrail_model: str = "gpt-4.1-mini"
+    private_chat_history_limit: int = 5
+    contact_to_email: str = "contact@iwasadigital.com"
+    contact_from_email: str = "no-reply@iwasadigital.com"
+    contact_allowed_origins: str = "https://kotori-ai.com,http://localhost:5500"
+    contact_rate_limit_max: int = 5
+    contact_rate_limit_window_seconds: int = 600
+    contact_ip_hash_salt: str = ""
 
 
 @lru_cache(maxsize=1)
@@ -54,8 +64,8 @@ def get_settings() -> Settings:
         bot_mention_name=env.get("BOT_MENTION_NAME", "通訳AI"),
         max_context_messages=int(env.get("MAX_CONTEXT_MESSAGES", "8")),
         max_group_languages=int(env.get("MAX_GROUP_LANGUAGES", "5")),
-        gemini_timeout_seconds=int(env.get("GEMINI_TIMEOUT_SECONDS", "10")),
-        translation_retry=int(env.get("TRANSLATION_RETRY", "2")),
+        gemini_timeout_seconds=int(env.get("GEMINI_TIMEOUT_SECONDS", "8")),
+        translation_retry=int(env.get("TRANSLATION_RETRY", "1")),
         log_level=env.get("LOG_LEVEL", "INFO"),
         stripe_secret_key=env.get("STRIPE_SECRET_KEY", ""),
         stripe_webhook_secret=env.get("STRIPE_WEBHOOK_SECRET", ""),
@@ -68,4 +78,17 @@ def get_settings() -> Settings:
         checkout_api_base_url=(
             env.get("CHECKOUT_API_BASE_URL")
         ),
+        openai_api_key=env.get("OPENAI_API_KEY", ""),
+        openai_support_model=env.get("OPENAI_SUPPORT_MODEL", "gpt-5.2"),
+        openai_guardrail_model=env.get("OPENAI_GUARDRAIL_MODEL", "gpt-4.1-mini"),
+        private_chat_history_limit=int(env.get("PRIVATE_CHAT_HISTORY_LIMIT", "5")),
+        contact_to_email=env.get("CONTACT_TO_EMAIL", "contact@iwasadigital.com"),
+        contact_from_email=env.get("CONTACT_FROM_EMAIL", "no-reply@iwasadigital.com"),
+        contact_allowed_origins=env.get(
+            "CONTACT_ALLOWED_ORIGINS",
+            "https://kotori-ai.com,http://localhost:5500",
+        ),
+        contact_rate_limit_max=int(env.get("CONTACT_RATE_LIMIT_MAX", "5")),
+        contact_rate_limit_window_seconds=int(env.get("CONTACT_RATE_LIMIT_WINDOW_SECONDS", "600")),
+        contact_ip_hash_salt=env.get("CONTACT_IP_HASH_SALT", ""),
     )

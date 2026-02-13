@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Sequence, Tuple
 
 from psycopg import errors, sql
 
-from ..domain.models import ContextMessage, StoredMessage
+from ..domain.models import ContextMessage, ConversationMessage, StoredMessage, TranslationRuntimeState
 from ..domain.ports import MessageRepositoryPort
+from ..domain.services.quota_service import QuotaDecision
 from .neon_client import NeonClient
 
 BOT_JOIN_MARKER = "__bot_join__"
 GROUP_LANG_MARKER = "__group_lang__"
+PRIVATE_ASSISTANT_MARKER = "__assistant__"
 logger = logging.getLogger(__name__)
 
 
@@ -33,14 +35,47 @@ class NeonMessageRepository(MessageRepositoryPort):
     def ensure_group_member(self, group_id: str, user_id: str) -> None:
         query = sql.SQL(
             """
-            INSERT INTO group_members (group_id, user_id)
-            VALUES (%s, %s)
+            INSERT INTO group_members (group_id, user_id, display_name, display_name_updated_at)
+            VALUES (%s, %s, NULL, NULL)
             ON CONFLICT (group_id, user_id)
-            DO UPDATE SET joined_at = NOW()
+            DO NOTHING
             """
         )
         with self._client.cursor() as cur:
             cur.execute(query, (group_id, user_id))
+
+    def get_group_member_display_name(self, group_id: str, user_id: str) -> Optional[str]:
+        with self._client.cursor() as cur:
+            cur.execute(
+                """
+                SELECT display_name
+                FROM group_members
+                WHERE group_id = %s AND user_id = %s
+                """,
+                (group_id, user_id),
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        return (row[0] or "").strip() or None
+
+    def upsert_group_member_display_name(self, group_id: str, user_id: str, display_name: str) -> None:
+        normalized = (display_name or "").strip()
+        if not normalized:
+            return
+        with self._client.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO group_members (group_id, user_id, display_name, display_name_updated_at)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (group_id, user_id)
+                DO UPDATE SET
+                    display_name = EXCLUDED.display_name,
+                    display_name_updated_at = NOW(),
+                    joined_at = group_members.joined_at
+                """,
+                (group_id, user_id, normalized),
+            )
 
     def fetch_group_languages(self, group_id: str) -> List[str]:
         query = sql.SQL(
@@ -75,11 +110,36 @@ class NeonMessageRepository(MessageRepositoryPort):
         messages.reverse()
         return messages
 
+    def fetch_private_conversation(self, user_id: str, limit: int) -> List[ConversationMessage]:
+        query = sql.SQL(
+            """
+            SELECT sender_name, text, timestamp, COALESCE(message_role, 'user')
+            FROM messages
+            WHERE group_id = %s
+            ORDER BY timestamp DESC
+            LIMIT %s
+            """
+        )
+        with self._client.cursor() as cur:
+            cur.execute(query, (user_id, limit))
+            rows = cur.fetchall()
+        history = [
+            ConversationMessage(
+                role=(row[3] or "user"),
+                sender_name=row[0] or "",
+                text=row[1] or "",
+                timestamp=row[2],
+            )
+            for row in rows
+        ]
+        history.reverse()
+        return history
+
     def insert_message(self, message: StoredMessage) -> None:
         query = sql.SQL(
             """
-            INSERT INTO messages (group_id, user_id, sender_name, text, timestamp)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO messages (group_id, user_id, sender_name, text, timestamp, message_role)
+            VALUES (%s, %s, %s, %s, %s, %s)
             """
         )
         ts = message.timestamp
@@ -88,20 +148,27 @@ class NeonMessageRepository(MessageRepositoryPort):
         with self._client.cursor() as cur:
             cur.execute(
                 query,
-                (message.group_id, message.user_id, message.sender_name, message.text, ts),
+                (
+                    message.group_id,
+                    message.user_id,
+                    message.sender_name,
+                    message.text,
+                    ts,
+                    message.message_role or "user",
+                ),
             )
 
     def record_language_prompt(self, group_id: str) -> None:
         query = sql.SQL(
             """
-            INSERT INTO group_members (group_id, user_id, last_prompted_at)
-            VALUES (%s, %s, NOW())
+            INSERT INTO group_members (group_id, user_id, display_name, display_name_updated_at, last_prompted_at)
+            VALUES (%s, %s, %s, NOW(), NOW())
             ON CONFLICT (group_id, user_id)
             DO UPDATE SET last_prompted_at = NOW(), last_completed_at = NULL
             """
         )
         with self._client.cursor() as cur:
-            cur.execute(query, (group_id, GROUP_LANG_MARKER))
+            cur.execute(query, (group_id, GROUP_LANG_MARKER, GROUP_LANG_MARKER))
 
     def try_complete_group_languages(
         self,
@@ -114,11 +181,11 @@ class NeonMessageRepository(MessageRepositoryPort):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO group_members (group_id, user_id)
-                    VALUES (%s, %s)
+                    INSERT INTO group_members (group_id, user_id, display_name, display_name_updated_at)
+                    VALUES (%s, %s, %s, NOW())
                     ON CONFLICT (group_id, user_id) DO NOTHING
                     """,
-                    (group_id, GROUP_LANG_MARKER),
+                    (group_id, GROUP_LANG_MARKER, GROUP_LANG_MARKER),
                 )
                 cur.execute(
                     """
@@ -159,11 +226,11 @@ class NeonMessageRepository(MessageRepositoryPort):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO group_members (group_id, user_id)
-                    VALUES (%s, %s)
+                    INSERT INTO group_members (group_id, user_id, display_name, display_name_updated_at)
+                    VALUES (%s, %s, %s, NOW())
                     ON CONFLICT (group_id, user_id) DO NOTHING
                     """,
-                    (group_id, GROUP_LANG_MARKER),
+                    (group_id, GROUP_LANG_MARKER, GROUP_LANG_MARKER),
                 )
                 cur.execute(
                     """
@@ -273,6 +340,41 @@ class NeonMessageRepository(MessageRepositoryPort):
             row = cur.fetchone()
         return int(row[0]) if row else 0
 
+    def increment_contact_rate_limit(
+        self,
+        ip_hash: str,
+        window_start: datetime,
+        prune_before: Optional[datetime] = None,
+    ) -> int:
+        if window_start.tzinfo is None:
+            window_start = window_start.replace(tzinfo=timezone.utc)
+        if prune_before and prune_before.tzinfo is None:
+            prune_before = prune_before.replace(tzinfo=timezone.utc)
+
+        try:
+            with self._client.connection() as conn:
+                with conn.cursor() as cur:
+                    if prune_before:
+                        cur.execute(
+                            "DELETE FROM contact_rate_limits WHERE updated_at < %s",
+                            (prune_before,),
+                        )
+                    cur.execute(
+                        """
+                        INSERT INTO contact_rate_limits (ip_hash, window_start, count, updated_at)
+                        VALUES (%s, %s, 1, NOW())
+                        ON CONFLICT (ip_hash, window_start)
+                        DO UPDATE SET count = contact_rate_limits.count + 1, updated_at = NOW()
+                        RETURNING count
+                        """,
+                        (ip_hash, window_start),
+                    )
+                    row = cur.fetchone()
+            return int(row[0]) if row else 0
+        except errors.UndefinedTable:
+            logger.warning("contact_rate_limits table missing; skip contact rate limit", extra={"ip_hash": ip_hash})
+            return 0
+
     # === Stripe usage/subscription helpers ===
     def increment_usage(self, group_id: str, period_key: str, increment: int = 1) -> int:
         query = sql.SQL(
@@ -322,6 +424,81 @@ class NeonMessageRepository(MessageRepositoryPort):
         except errors.UndefinedTable:
             logger.warning("group_usage_counters table missing; treating as no notice", extra={"group_id": group_id})
             return None
+
+    def reserve_quota_slot(
+        self,
+        *,
+        group_id: str,
+        period_key: str,
+        plan_key: str,
+        paid: bool,
+        limit: int,
+        increment: int,
+    ) -> QuotaDecision:
+        with self._client.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT translation_count, limit_notice_plan
+                    FROM group_usage_counters
+                    WHERE group_id = %s AND period_key = %s
+                    FOR UPDATE
+                    """,
+                    (group_id, period_key),
+                )
+                row = cur.fetchone()
+                current_usage = int(row[0]) if row else 0
+                notice_plan = row[1] if row else None
+
+                if not paid and notice_plan == plan_key:
+                    return QuotaDecision(
+                        allowed=False,
+                        should_notify=False,
+                        stop_translation=False,
+                        usage=current_usage,
+                        limit=limit,
+                        period_key=period_key,
+                        plan_key=plan_key,
+                    )
+
+                if current_usage >= limit:
+                    return QuotaDecision(
+                        allowed=False,
+                        should_notify=notice_plan != plan_key,
+                        stop_translation=not paid,
+                        usage=current_usage,
+                        limit=limit,
+                        period_key=period_key,
+                        plan_key=plan_key,
+                    )
+
+                cur.execute(
+                    """
+                    INSERT INTO group_usage_counters (group_id, period_key, translation_count, created_at, updated_at)
+                    VALUES (%s, %s, %s, NOW(), NOW())
+                    ON CONFLICT (group_id, period_key)
+                    DO UPDATE SET
+                        translation_count = group_usage_counters.translation_count + EXCLUDED.translation_count,
+                        updated_at = NOW()
+                    RETURNING translation_count
+                    """,
+                    (group_id, period_key, increment),
+                )
+                usage_after_row = cur.fetchone()
+                usage_after = int(usage_after_row[0]) if usage_after_row else current_usage
+
+        if paid:
+            if usage_after > limit:
+                return QuotaDecision(False, notice_plan != plan_key, False, usage_after, limit, period_key, plan_key)
+            if usage_after == limit:
+                return QuotaDecision(True, notice_plan != plan_key, False, usage_after, limit, period_key, plan_key)
+            return QuotaDecision(True, False, False, usage_after, limit, period_key, plan_key)
+
+        if usage_after > limit:
+            return QuotaDecision(False, notice_plan != plan_key, True, usage_after, limit, period_key, plan_key)
+        if usage_after == limit:
+            return QuotaDecision(True, notice_plan != plan_key, False, usage_after, limit, period_key, plan_key)
+        return QuotaDecision(True, False, False, usage_after, limit, period_key, plan_key)
 
     def set_limit_notice_plan(self, group_id: str, period_key: str, plan: str) -> None:
         try:
@@ -508,6 +685,99 @@ class NeonMessageRepository(MessageRepositoryPort):
             logger.exception("Failed to fetch translation_enabled", extra={"group_id": group_id})
             raise
 
+    def fetch_translation_runtime_state(self, group_id: str) -> TranslationRuntimeState:
+        with self._client.cursor() as cur:
+            cur.execute(
+                """
+                WITH base AS (
+                    SELECT
+                        %s::text AS group_id,
+                        COALESCE(gs.translation_enabled, TRUE) AS translation_enabled,
+                        sub.status AS subscription_status,
+                        sub.current_period_start AS period_start,
+                        sub.current_period_end AS period_end,
+                        COALESCE(gl.lang_codes, ARRAY[]::text[]) AS group_languages
+                    FROM (SELECT 1) AS one
+                    LEFT JOIN group_settings gs ON gs.group_id = %s
+                    LEFT JOIN LATERAL (
+                        SELECT status, current_period_start, current_period_end
+                        FROM group_subscriptions
+                        WHERE group_id = %s
+                        LIMIT 1
+                    ) sub ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT ARRAY_AGG(lang_code ORDER BY lang_code) AS lang_codes
+                        FROM group_languages
+                        WHERE group_id = %s
+                    ) gl ON TRUE
+                ),
+                periodized AS (
+                    SELECT
+                        group_id,
+                        translation_enabled,
+                        subscription_status,
+                        period_start,
+                        period_end,
+                        group_languages,
+                        CASE
+                            WHEN subscription_status IN ('active', 'trialing') THEN
+                                COALESCE(
+                                    (
+                                        CASE
+                                            WHEN period_start IS NOT NULL THEN ((period_start AT TIME ZONE 'UTC')::date)::text
+                                            WHEN period_end IS NOT NULL THEN (((period_end - INTERVAL '31 days') AT TIME ZONE 'UTC')::date)::text
+                                            ELSE NULL
+                                        END
+                                    ),
+                                    (date_trunc('month', NOW() AT TIME ZONE 'UTC')::date)::text
+                                )
+                            ELSE (date_trunc('month', NOW() AT TIME ZONE 'UTC')::date)::text
+                        END AS period_key
+                    FROM base
+                )
+                SELECT
+                    p.translation_enabled,
+                    p.group_languages,
+                    p.subscription_status,
+                    p.period_start,
+                    p.period_end,
+                    p.period_key,
+                    COALESCE(uc.translation_count, 0) AS usage,
+                    uc.limit_notice_plan
+                FROM periodized p
+                LEFT JOIN group_usage_counters uc
+                    ON uc.group_id = p.group_id
+                    AND uc.period_key = p.period_key
+                """,
+                (group_id, group_id, group_id, group_id),
+            )
+            row = cur.fetchone()
+
+        if not row:
+            now = datetime.now(timezone.utc)
+            fallback_period_key = f"{now.year:04d}-{now.month:02d}-01"
+            return TranslationRuntimeState(
+                translation_enabled=True,
+                group_languages=[],
+                subscription_status=None,
+                period_start=None,
+                period_end=None,
+                period_key=fallback_period_key,
+                usage=0,
+                limit_notice_plan=None,
+            )
+
+        return TranslationRuntimeState(
+            translation_enabled=bool(row[0]),
+            group_languages=list(row[1] or []),
+            subscription_status=row[2],
+            period_start=row[3],
+            period_end=row[4],
+            period_key=row[5],
+            usage=int(row[6]),
+            limit_notice_plan=row[7],
+        )
+
     def reset_group_language_settings(self, group_id: str) -> None:
         with self._client.cursor() as cur:
             cur.execute("DELETE FROM group_languages WHERE group_id = %s", (group_id,))
@@ -537,14 +807,14 @@ class NeonMessageRepository(MessageRepositoryPort):
             ts = ts.replace(tzinfo=timezone.utc)
         query = sql.SQL(
             """
-            INSERT INTO group_members (group_id, user_id, joined_at)
-            VALUES (%s, %s, %s)
+            INSERT INTO group_members (group_id, user_id, display_name, display_name_updated_at, joined_at)
+            VALUES (%s, %s, %s, NOW(), %s)
             ON CONFLICT (group_id, user_id)
             DO UPDATE SET joined_at = EXCLUDED.joined_at
             """
         )
         with self._client.cursor() as cur:
-            cur.execute(query, (group_id, BOT_JOIN_MARKER, ts))
+            cur.execute(query, (group_id, BOT_JOIN_MARKER, BOT_JOIN_MARKER, ts))
 
     def fetch_bot_joined_at(self, group_id: str) -> Optional[datetime]:
         with self._client.cursor() as cur:
@@ -554,3 +824,19 @@ class NeonMessageRepository(MessageRepositoryPort):
             )
             row = cur.fetchone()
         return row[0] if row else None
+
+    @staticmethod
+    def _compute_period_key(
+        *,
+        paid: bool,
+        period_start: Optional[datetime],
+        period_end: Optional[datetime],
+    ) -> str:
+        now = datetime.now(timezone.utc)
+        if paid:
+            anchor = period_start
+            if not anchor and period_end:
+                anchor = period_end - timedelta(days=31)
+            if anchor:
+                return anchor.astimezone(timezone.utc).date().isoformat()
+        return f"{now.year:04d}-{now.month:02d}-01"
