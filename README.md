@@ -103,12 +103,25 @@ cd line-multilang-bot
 
 ---
 
-### 2. Install dependencies
+### 2. Install dependencies (always in `.venv`)
 
-Lambda 用の依存を入れます。
+テスト/ローカル実行は必ず `.venv` の Python を使います。
 
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 ```
-pip install -r requirements.txt
+
+### 2-1. Run tests (always in `.venv`)
+
+```bash
+./scripts/test.sh
+```
+
+個別テストを実行する場合:
+
+```bash
+./scripts/test.sh tests/test_contact_form_handler.py -q
 ```
 
 ---
