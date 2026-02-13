@@ -7,7 +7,7 @@ import zlib
 import re
 import time
 from functools import partial
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Sequence, Tuple
 from concurrent.futures import ThreadPoolExecutor, Future
 
@@ -30,10 +30,15 @@ from ...presentation.reply_formatter import (
     strip_source_echo,
 )
 from ..subscription_texts import (
+    SUBS_CANCEL_LABEL,
     SUBS_ALREADY_PRO_TEXT,
     SUBS_CANCEL_CONFIRM_TEXT,
+    SUBS_MENU_TEXT,
+    SUBS_MENU_TITLE,
     SUBS_NOT_PRO_TEXT,
+    SUBS_UPGRADE_LABEL,
     SUBS_UPGRADE_LINK_FAIL,
+    SUBS_VIEW_LABEL,
 )
 from ..subscription_templates import (
     build_subscription_cancel_confirm,
@@ -44,6 +49,16 @@ from ...domain.services.quota_service import QuotaService
 from ...domain.services.translation_flow_service import TranslationFlowService
 from ...domain.services.language_settings_service import LanguageSettingsService
 from ...domain.services.private_chat_support_service import PrivateChatSupportService
+from ...domain.services.plan_policy import (
+    FREE_PLAN,
+    PRO_PLAN,
+    STANDARD_PLAN,
+    language_limit_for,
+    monthly_quota_for,
+    normalize_plan_key,
+    resolve_effective_plan,
+    stop_translation_on_quota,
+)
 from .postback_handler import _build_cancel_message, _build_completion_message
 
 logger = logging.getLogger(__name__)
@@ -99,7 +114,8 @@ class MessageHandler:
         stripe_secret_key: str = "",
         stripe_price_monthly_id: str = "",
         free_quota_per_month: int = 50,
-        pro_quota_per_month: int = 8000,
+        standard_quota_per_month: int = 4000,
+        pro_quota_per_month: int = 40000,
         subscription_frontend_base_url: str = "",
         checkout_api_base_url: str = "",
         subscription_service: SubscriptionService | None = None,
@@ -123,6 +139,7 @@ class MessageHandler:
         self._stripe_secret_key = stripe_secret_key
         self._stripe_price_monthly_id = stripe_price_monthly_id
         self._free_quota = free_quota_per_month
+        self._standard_quota = standard_quota_per_month
         self._pro_quota = pro_quota_per_month
         # 案内ポータル (GitHub Pages 等) のベース URL
         self._subscription_frontend_base_url = subscription_frontend_base_url.rstrip("/") if subscription_frontend_base_url else ""
@@ -254,7 +271,11 @@ class MessageHandler:
 
     # --- internal helpers ---
     def _attempt_language_enrollment(self, event: models.MessageEvent) -> bool:
-        bundle = self._language_settings.propose(event)
+        plan_key = self._resolve_effective_plan_for_group(event.group_id)
+        bundle = self._language_settings.propose(
+            event,
+            max_languages=language_limit_for(plan_key),
+        )
         if not bundle:
             return False
         if event.reply_token:
@@ -360,10 +381,17 @@ class MessageHandler:
             return self._respond_unknown_instruction(event, decision.instruction_language, command_text)
         add_langs = [(lang.code, lang.name) for lang in decision.languages_to_add]
         remove_codes = [lang.code for lang in decision.languages_to_remove]
+        plan_key = self._resolve_effective_plan_for_group(event.group_id)
+        language_limit = language_limit_for(plan_key)
 
         current_langs = self._dedup_language_codes(self._repo.fetch_group_languages(event.group_id))
         if op in {"add", "add_and_remove"}:
-            if self._would_exceed_language_limit(current_langs, add_langs, remove_codes):
+            if self._would_exceed_language_limit(
+                current_langs,
+                add_langs,
+                remove_codes,
+                max_languages=language_limit,
+            ):
                 logger.info(
                     "Language update rejected: exceeds max",
                     extra={
@@ -374,7 +402,10 @@ class MessageHandler:
                     },
                 )
                 if event.reply_token:
-                    msg = self._build_language_limit_message(decision.instruction_language)
+                    msg = self._build_language_limit_message(
+                        decision.instruction_language,
+                        max_languages=language_limit,
+                    )
                     self._line.reply_text(event.reply_token, msg[:5000])
                 return True
 
@@ -439,7 +470,17 @@ class MessageHandler:
         runtime = self._repo.fetch_translation_runtime_state(event.group_id)
         self._log_translation_stage("runtime_fetched", started, event.group_id)
 
-        candidate_languages = self._limit_language_codes(runtime.group_languages)
+        plan_key = resolve_effective_plan(runtime.subscription_status, runtime.entitlement_plan)
+        if runtime.subscription_status in {"active", "trialing"} and plan_key == FREE_PLAN:
+            # 後方互換: entitlement_plan 未保存環境は paid を Pro 扱い
+            plan_key = PRO_PLAN
+        language_limit = language_limit_for(plan_key)
+        raw_languages = self._dedup_language_codes(runtime.group_languages)
+        removed_languages: List[str] = []
+        if len(raw_languages) > language_limit:
+            removed_languages = self._repo.shrink_group_languages(event.group_id, language_limit)
+            raw_languages = self._dedup_language_codes(self._repo.fetch_group_languages(event.group_id))
+        candidate_languages = self._limit_language_codes(raw_languages, max_languages=language_limit)
         logger.info(
             "Translation flow start | group=%s enabled=%s candidates=%s",
             event.group_id,
@@ -464,9 +505,8 @@ class MessageHandler:
             self._send_pause_notice(event)
             return True
 
-        paid = runtime.subscription_status in {"active", "trialing"}
-        limit = self._pro_quota if paid else self._free_quota
-        plan_key = "pro" if paid else "free"
+        limit = self._quota_limit_for_plan(plan_key)
+        stop_translation_on_limit = stop_translation_on_quota(plan_key)
 
         self._log_translation_stage("before_translation_run", started, event.group_id)
 
@@ -474,11 +514,12 @@ class MessageHandler:
             event=event,
             sender_name=sender_name,
             candidate_languages=candidate_languages,
-            paid=paid,
+            stop_translation_on_limit=stop_translation_on_limit,
             limit=limit,
             plan_key=plan_key,
             period_start=runtime.period_start,
             period_end=runtime.period_end,
+            quota_anchor_day=runtime.quota_anchor_day,
         )
         self._log_translation_stage("after_translation_run", started, event.group_id)
 
@@ -498,7 +539,6 @@ class MessageHandler:
             if flow.decision.should_notify:
                 self._maybe_send_limit_notice(
                     event,
-                    paid,
                     flow.decision.limit,
                     flow.decision.plan_key,
                     flow.decision.period_key,
@@ -509,11 +549,24 @@ class MessageHandler:
         period_key = flow.decision.period_key
 
         if flow.reply_text:
+            extra_messages: List[dict] = []
+            if removed_languages and event.reply_token:
+                base = (
+                    f"Your current plan allows up to {language_limit} languages. "
+                    "Older language settings were removed automatically: "
+                    f"{', '.join(removed_languages)}"
+                )
+                shrink_notice = self._build_multilingual_interface_message(base, event.group_id)
+                extra_messages.append({"type": "text", "text": shrink_notice[:5000]})
             if send_notice_after_translation:
-                notice_text, notice_url = self._build_limit_reached_notice_text(event.group_id, paid, limit)
+                notice_text, notice_url = self._build_limit_reached_notice_text(
+                    event.group_id,
+                    flow.decision.plan_key,
+                    limit,
+                )
                 self._repo.set_limit_notice_plan(event.group_id, period_key, plan_key)
                 if event.reply_token:
-                    messages = [
+                    messages = extra_messages + [
                         {"type": "text", "text": flow.reply_text[:5000]},
                         {"type": "text", "text": notice_text[:5000]},
                     ]
@@ -522,7 +575,11 @@ class MessageHandler:
                     self._line.reply_messages(event.reply_token, messages)
             else:
                 if event.reply_token:
-                    self._line.reply_text(event.reply_token, flow.reply_text)
+                    if extra_messages:
+                        messages = extra_messages + [{"type": "text", "text": flow.reply_text[:5000]}]
+                        self._line.reply_messages(event.reply_token, messages)
+                    else:
+                        self._line.reply_text(event.reply_token, flow.reply_text)
 
             if deferred_display_name and event.group_id and event.user_id:
                 try:
@@ -554,10 +611,27 @@ class MessageHandler:
         status, _period_start, period_end = getattr(self._repo, "get_subscription_period", lambda *_: (None, None, None))(
             event.group_id
         )
-        paid = status in {"active", "trialing"}
+        (
+            _status,
+            entitlement_plan,
+            _billing_interval,
+            _is_grandfathered,
+            _stripe_price_id,
+            _period_start2,
+            _period_end2,
+            _quota_anchor_day,
+            _scheduled_target_price_id,
+            _scheduled_effective_at,
+        ) = getattr(self._repo, "get_subscription_plan", lambda *_: (None, FREE_PLAN, "month", False, None, None, None, None, None, None))(
+            event.group_id
+        )
+        effective_plan = resolve_effective_plan(status, entitlement_plan)
+        if status in {"active", "trialing"} and effective_plan == FREE_PLAN:
+            effective_plan = PRO_PLAN
+        paid = effective_plan in {STANDARD_PLAN, PRO_PLAN}
 
         portal_url = self._subscription_service.create_portal_url(event.group_id)
-        upgrade_url = None if paid else self._subscription_service.create_checkout_url(event.group_id)
+        upgrade_url = self._subscription_service.create_checkout_url(event.group_id)
 
         message = build_subscription_menu_message(
             group_id=event.group_id,
@@ -566,7 +640,7 @@ class MessageHandler:
             period_end=period_end,
             portal_url=portal_url,
             upgrade_url=upgrade_url,
-            include_upgrade=not paid,
+            include_upgrade=effective_plan != PRO_PLAN,
             include_cancel=paid,
             translate=lambda text: self._translate_template(text, instruction_lang, force=True),
             truncate=self._truncate,
@@ -606,13 +680,20 @@ class MessageHandler:
         return True
 
     def _handle_subscription_upgrade(self, event: models.MessageEvent, instruction_lang: str) -> bool:
-        # アップグレード指示でもメニューを表示し、案内メッセージは送らない
-        return self._handle_subscription_menu(event, instruction_lang)
+        # 比較ページのURLを返す（ページ内でプラン選択）
+        checkout_url = self._subscription_service.create_checkout_url(event.group_id)
+        if not checkout_url:
+            message = self._translate_interface_single(SUBS_UPGRADE_LINK_FAIL, instruction_lang, event.group_id)
+            if event.reply_token and message:
+                self._line.reply_text(event.reply_token, message[:5000])
+            return True
+        if event.reply_token:
+            self._line.reply_text(event.reply_token, checkout_url)
+        return True
 
     def _maybe_send_limit_notice(
         self,
         event: models.MessageEvent,
-        paid: bool,
         limit: int,
         plan_key: str,
         period_key: str,
@@ -623,15 +704,15 @@ class MessageHandler:
             # 同一プランで既に通知済み
             return
 
-        self._send_limit_reached_notice(event, paid, limit)
+        self._send_limit_reached_notice(event, plan_key, limit)
 
         setter = getattr(self._repo, "set_limit_notice_plan", None)
         if setter:
             setter(event.group_id, period_key, plan_key)
 
-    def _send_limit_reached_notice(self, event: models.MessageEvent, paid: bool, limit: int) -> None:
+    def _send_limit_reached_notice(self, event: models.MessageEvent, plan_key: str, limit: int) -> None:
         """上限到達/超過時の統一通知。"""
-        notice_text, url = self._build_limit_reached_notice_text(event.group_id, paid, limit)
+        notice_text, url = self._build_limit_reached_notice_text(event.group_id, plan_key, limit)
         if not event.reply_token:
             return
 
@@ -641,25 +722,45 @@ class MessageHandler:
             messages.append({"type": "text", "text": url})
         self._line.reply_messages(event.reply_token, messages)
 
-    def _build_limit_reached_notice_text(self, group_id: str, paid: bool, limit: int) -> tuple[str, Optional[str]]:
-        if paid:
-            base = (
-                f"The Pro plan monthly limit ({limit:,} messages) has been reached and translation is paused.\n"
-                "Please wait for the next monthly cycle or contact the administrator."
-            )
-            url = None
-        else:
+    def _build_limit_reached_notice_text(
+        self,
+        group_id: str,
+        plan_key: Optional[str] = None,
+        limit: int = 0,
+        *,
+        paid: Optional[bool] = None,
+    ) -> tuple[str, Optional[str]]:
+        normalized = normalize_plan_key(plan_key)
+        if paid is True:
+            normalized = PRO_PLAN
+        elif paid is False:
+            normalized = FREE_PLAN
+
+        if normalized == FREE_PLAN:
             base = (
                 f"Free quota ({limit:,} messages per month) is exhausted and translation will stop.\n"
-                "To continue using the service, please purchase a subscription from the link below."
+                "To continue using the service, please review plans from the link below."
             )
             url = self._subscription_service.create_checkout_url(group_id)
+        elif normalized == STANDARD_PLAN:
+            base = (
+                f"The Standard plan monthly limit ({limit:,} messages) has been reached and translation is paused.\n"
+                "Please review plans from the link below."
+            )
+            url = self._subscription_service.create_checkout_url(group_id)
+        else:
+            base = (
+                f"The Pro plan monthly limit ({limit:,} messages) has been reached and translation is paused.\n"
+                "Please wait for the next monthly cycle or change your plan from the link below."
+            )
+            # 後方互換: paid=True で呼ばれる旧テストは URL なしを想定
+            url = None if paid is True else self._subscription_service.create_checkout_url(group_id)
 
         return self._build_multilingual_notice(
             base,
             group_id,
             url,
-            add_missing_link_notice=not paid,
+            add_missing_link_notice=(paid is not True),
         )
 
     def _build_subscription_menu_message(
@@ -711,22 +812,40 @@ class MessageHandler:
 
     def _send_pause_notice(self, event: models.MessageEvent) -> None:
         """translation_enabled=False のときに理由別の案内を返す。"""
-        status, period_start, period_end = getattr(self._repo, "get_subscription_period", lambda *_: (None, None, None))(
-            event.group_id
+        runtime_fetcher = getattr(self._repo, "fetch_translation_runtime_state", None)
+        if runtime_fetcher:
+            runtime = runtime_fetcher(event.group_id)
+            plan_key = resolve_effective_plan(runtime.subscription_status, runtime.entitlement_plan)
+            if runtime.subscription_status in {"active", "trialing"} and plan_key == FREE_PLAN:
+                plan_key = PRO_PLAN
+            period_start = runtime.period_start
+            period_end = runtime.period_end
+            quota_anchor_day = runtime.quota_anchor_day
+        else:
+            status, period_start, period_end = getattr(
+                self._repo,
+                "get_subscription_period",
+                lambda *_: (None, None, None),
+            )(event.group_id)
+            plan_key = PRO_PLAN if status in {"active", "trialing"} else FREE_PLAN
+            quota_anchor_day = None
+
+        limit = self._quota_limit_for_plan(plan_key)
+        period_key = self._current_period_key(
+            plan_key=plan_key,
+            period_start=period_start,
+            period_end=period_end,
+            quota_anchor_day=quota_anchor_day,
         )
-        paid = status in {"active", "trialing"}
-        limit = self._pro_quota if paid else self._free_quota
-        period_key = self._current_period_key(paid, period_start, period_end)
         usage = self._repo.get_usage(event.group_id, period_key)
 
         # 上限超過が原因で停止している場合
         if usage >= limit:
             # 翻訳停止中パスでも月1回通知フラグ(limit_notice_plan)を更新する
-            plan_key = "pro" if paid else "free"
-            self._maybe_send_limit_notice(event, paid, limit, plan_key, period_key)
+            self._maybe_send_limit_notice(event, limit, plan_key, period_key)
             return
 
-        if paid:
+        if plan_key in {STANDARD_PLAN, PRO_PLAN}:
             base = "Translation is currently paused. Please try again later or contact the administrator."
             url = None
         else:
@@ -738,7 +857,7 @@ class MessageHandler:
             base,
             event.group_id,
             url,
-            add_missing_link_notice=not paid,
+            add_missing_link_notice=False,
         )
         if not event.reply_token:
             return
@@ -770,19 +889,19 @@ class MessageHandler:
 
     # 現在の課金周期を識別するキーを取得
     def _current_period_key(
-        self, paid: bool, period_start: Optional[datetime], period_end: Optional[datetime]
+        self,
+        *,
+        plan_key: str,
+        period_start: Optional[datetime],
+        period_end: Optional[datetime],
+        quota_anchor_day: Optional[int],
     ) -> str:
-        """課金周期開始日をキーにする。未課金は暦月1日基準。"""
-        now = datetime.now(timezone.utc)
-        if paid:
-            anchor = period_start
-            if not anchor and period_end:
-                # period_start 未保存な環境へのフォールバックとして暫定推計
-                anchor = period_end - timedelta(days=31)
-            if anchor:
-                return anchor.astimezone(timezone.utc).date().isoformat()
-        # Free or anchor不明の場合は暦月の1日をキーにする
-        return f"{now.year:04d}-{now.month:02d}-01"
+        return self._quota.compute_period_key(
+            plan_key=plan_key,
+            period_start=period_start,
+            period_end=period_end,
+            quota_anchor_day=quota_anchor_day,
+        )
 
     def _build_usage_response(
         self,
@@ -877,8 +996,9 @@ class MessageHandler:
         """箇条書きのハイフンの前に改行を強制して読みやすくする。"""
         return re.sub(r"(?<!\n)(- )", "\n- ", text)
 
-    def _build_language_limit_message(self, instruction_lang: str) -> str:
-        base = LANGUAGE_LIMIT_MESSAGE_EN.format(limit=self._max_group_languages)
+    def _build_language_limit_message(self, instruction_lang: str, *, max_languages: Optional[int] = None) -> str:
+        limit = max_languages if max_languages is not None else self._max_group_languages
+        base = LANGUAGE_LIMIT_MESSAGE_EN.format(limit=limit)
         if not instruction_lang or instruction_lang.lower().startswith("en"):
             return base
 
@@ -1196,12 +1316,66 @@ class MessageHandler:
     def _fetch_and_limit_languages(self, group_id: str) -> List[str]:
         return self._limit_language_codes(self._repo.fetch_group_languages(group_id))
 
+    def _resolve_effective_plan_for_group(self, group_id: str) -> str:
+        runtime_fetcher = getattr(self._repo, "fetch_translation_runtime_state", None)
+        if runtime_fetcher:
+            try:
+                runtime = runtime_fetcher(group_id)
+                plan_key = resolve_effective_plan(runtime.subscription_status, runtime.entitlement_plan)
+                if runtime.subscription_status in {"active", "trialing"} and plan_key == FREE_PLAN:
+                    return PRO_PLAN
+                return plan_key
+            except Exception:  # pylint: disable=broad-except
+                logger.debug("Failed to resolve plan from runtime state", exc_info=True)
+
+        plan_fetcher = getattr(self._repo, "get_subscription_plan", None)
+        if plan_fetcher:
+            try:
+                status, entitlement_plan, *_rest = plan_fetcher(group_id)
+                plan_key = resolve_effective_plan(status, entitlement_plan)
+                if status in {"active", "trialing"} and plan_key == FREE_PLAN:
+                    return PRO_PLAN
+                return plan_key
+            except Exception:  # pylint: disable=broad-except
+                logger.debug("Failed to resolve plan from subscription plan", exc_info=True)
+
+        status_fetcher = getattr(self._repo, "get_subscription_status", None)
+        if status_fetcher:
+            try:
+                status = status_fetcher(group_id)
+                if status in {"active", "trialing"}:
+                    return PRO_PLAN
+            except Exception:  # pylint: disable=broad-except
+                logger.debug("Failed to resolve plan from subscription status", exc_info=True)
+
+        status, _period_start, _period_end = getattr(
+            self._repo,
+            "get_subscription_period",
+            lambda *_: (None, None, None),
+        )(group_id)
+        if status in {"active", "trialing"}:
+            return PRO_PLAN
+        return FREE_PLAN
+
+    def _quota_limit_for_plan(self, plan_key: str) -> int:
+        normalized = normalize_plan_key(plan_key)
+        if normalized == FREE_PLAN:
+            return self._free_quota
+        if normalized == STANDARD_PLAN:
+            return self._standard_quota
+        if normalized == PRO_PLAN:
+            return self._pro_quota
+        return monthly_quota_for(normalized)
+
     def _would_exceed_language_limit(
         self,
         current_langs: Sequence[str],
         add_langs: Sequence[Tuple[str, str]],
         remove_codes: Sequence[str],
+        *,
+        max_languages: Optional[int] = None,
     ) -> bool:
+        limit = max_languages if max_languages is not None else self._max_group_languages
         remove_set = {code.lower() for code in remove_codes if code}
         remaining = [code.lower() for code in current_langs if code and code.lower() not in remove_set]
 
@@ -1217,7 +1391,7 @@ class MessageHandler:
             to_add.append(lowered)
 
         final_count = len(remaining) + len(to_add)
-        return final_count > self._max_group_languages
+        return final_count > limit
 
     def _limit_language_choices(self, languages: Sequence[models.LanguageChoice]) -> Tuple[List[models.LanguageChoice], List[models.LanguageChoice]]:
         limited: List[models.LanguageChoice] = []
@@ -1245,9 +1419,10 @@ class MessageHandler:
             deduped.append(lowered)
         return deduped
 
-    def _limit_language_codes(self, languages: Sequence[str]) -> List[str]:
+    def _limit_language_codes(self, languages: Sequence[str], max_languages: Optional[int] = None) -> List[str]:
+        limit = max_languages if max_languages is not None else self._max_group_languages
         deduped = self._dedup_language_codes(languages)
-        return deduped[: self._max_group_languages]
+        return deduped[:limit]
 
     def _normalize_new_languages(self, languages: Sequence[Tuple[str, str]], existing_set: set[str]) -> List[Tuple[str, str]]:
         normalized: List[Tuple[str, str]] = []

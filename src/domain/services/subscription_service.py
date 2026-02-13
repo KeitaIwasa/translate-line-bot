@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import importlib
 import logging
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote_plus
-from datetime import datetime, timezone
 from typing import Optional
 
 from ..ports import MessageRepositoryPort
+from ...infra.signed_token import issue_token
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ class SubscriptionService:
         stripe_price_monthly_id: str,
         subscription_frontend_base_url: str = "",
         checkout_api_base_url: str = "",
+        subscription_token_secret: str = "",
     ) -> None:
         self._repo = repo
         self._stripe_secret_key = stripe_secret_key
@@ -29,8 +31,35 @@ class SubscriptionService:
         self._subscription_frontend_base_url = subscription_frontend_base_url.rstrip("/") if subscription_frontend_base_url else ""
         # API Gateway 側のベース URL (/checkout リダイレクトを提供)
         self._checkout_api_base_url = checkout_api_base_url.rstrip("/") if checkout_api_base_url else ""
+        self._subscription_token_secret = subscription_token_secret or ""
 
     def create_checkout_url(self, group_id: str) -> Optional[str]:
+        token_url = self._build_plan_url(group_id, scope="checkout")
+        if token_url:
+            return token_url
+        # 後方互換: 旧設定では session_id 導線を返す
+        return self._create_legacy_checkout_url(group_id)
+
+    def create_support_contact_url(self, group_id: str) -> Optional[str]:
+        return self._build_plan_url(group_id, scope="support", page_path="/contact.html")
+
+    def _build_plan_url(self, group_id: str, *, scope: str, page_path: str = "/pro.html") -> Optional[str]:
+        if not group_id:
+            return None
+        if not self._subscription_frontend_base_url or not self._subscription_token_secret:
+            return None
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+        token = issue_token(
+            {
+                "group_id": group_id,
+                "scope": scope,
+                "exp": int(expires_at.timestamp()),
+            },
+            self._subscription_token_secret,
+        )
+        return f"{self._subscription_frontend_base_url}{page_path}?st={quote_plus(token)}"
+
+    def _create_legacy_checkout_url(self, group_id: str) -> Optional[str]:
         stripe = self._load_stripe()
         if not stripe:
             return None
@@ -63,10 +92,7 @@ class SubscriptionService:
                 if (not self._checkout_api_base_url) and checkout_url:
                     checkout_param = f"&checkout_url={quote_plus(checkout_url)}"
 
-                return (
-                    f"{self._subscription_frontend_base_url}/pro.html"
-                    f"?session_id={session_id}{api_base_param}{checkout_param}"
-                )
+                return f"{self._subscription_frontend_base_url}/pro.html?session_id={session_id}{api_base_param}{checkout_param}"
 
             return checkout_url
         except Exception as exc:  # pylint: disable=broad-except

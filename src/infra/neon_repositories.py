@@ -9,7 +9,9 @@ from psycopg import errors, sql
 
 from ..domain.models import ContextMessage, ConversationMessage, StoredMessage, TranslationRuntimeState
 from ..domain.ports import MessageRepositoryPort
+from ..domain.services.plan_policy import FREE_PLAN, PRO_PLAN, resolve_effective_plan
 from ..domain.services.quota_service import QuotaDecision
+from .message_crypto import decrypt_text, encrypt_text
 from .neon_client import NeonClient
 
 BOT_JOIN_MARKER = "__bot_join__"
@@ -28,9 +30,16 @@ class _MessageRow:
 class NeonMessageRepository(MessageRepositoryPort):
     """Neon(PostgreSQL) への永続化を担うリポジトリ実装。"""
 
-    def __init__(self, client: NeonClient, max_group_languages: int = 5) -> None:
+    def __init__(
+        self,
+        client: NeonClient,
+        max_group_languages: int = 5,
+        message_encryption_key: str = "",
+    ) -> None:
         self._client = client
         self._max_group_languages = max_group_languages
+        self._message_encryption_key = (message_encryption_key or "").strip()
+        self._message_encryption_version = "v1"
 
     def ensure_group_member(self, group_id: str, user_id: str) -> None:
         query = sql.SQL(
@@ -92,71 +101,162 @@ class NeonMessageRepository(MessageRepositoryPort):
         return [row[0] for row in rows]
 
     def fetch_recent_messages(self, group_id: str, limit: int) -> List[ContextMessage]:
-        query = sql.SQL(
-            """
-            SELECT sender_name, text, timestamp
-            FROM messages
-            WHERE group_id = %s
-            ORDER BY timestamp DESC
-            LIMIT %s
-            """
-        )
-        with self._client.cursor() as cur:
-            cur.execute(query, (group_id, limit))
-            rows = cur.fetchall()
-        messages = [
-            ContextMessage(sender_name=row[0], text=row[1], timestamp=row[2]) for row in rows
-        ]
+        rows = []
+        try:
+            query = sql.SQL(
+                """
+                SELECT sender_name, text, timestamp, is_encrypted, encrypted_body
+                FROM messages
+                WHERE group_id = %s
+                ORDER BY timestamp DESC
+                LIMIT %s
+                """
+            )
+            with self._client.cursor() as cur:
+                cur.execute(query, (group_id, limit))
+                rows = cur.fetchall()
+            messages = [
+                ContextMessage(
+                    sender_name=row[0],
+                    text=self._restore_message_text(row[1], bool(row[3]), row[4]),
+                    timestamp=row[2],
+                )
+                for row in rows
+            ]
+        except errors.UndefinedColumn:
+            query = sql.SQL(
+                """
+                SELECT sender_name, text, timestamp
+                FROM messages
+                WHERE group_id = %s
+                ORDER BY timestamp DESC
+                LIMIT %s
+                """
+            )
+            with self._client.cursor() as cur:
+                cur.execute(query, (group_id, limit))
+                rows = cur.fetchall()
+            messages = [ContextMessage(sender_name=row[0], text=row[1], timestamp=row[2]) for row in rows]
         messages.reverse()
         return messages
 
     def fetch_private_conversation(self, user_id: str, limit: int) -> List[ConversationMessage]:
-        query = sql.SQL(
-            """
-            SELECT sender_name, text, timestamp, COALESCE(message_role, 'user')
-            FROM messages
-            WHERE group_id = %s
-            ORDER BY timestamp DESC
-            LIMIT %s
-            """
-        )
-        with self._client.cursor() as cur:
-            cur.execute(query, (user_id, limit))
-            rows = cur.fetchall()
-        history = [
-            ConversationMessage(
-                role=(row[3] or "user"),
-                sender_name=row[0] or "",
-                text=row[1] or "",
-                timestamp=row[2],
+        rows = []
+        try:
+            query = sql.SQL(
+                """
+                SELECT sender_name, text, timestamp, COALESCE(message_role, 'user'), is_encrypted, encrypted_body
+                FROM messages
+                WHERE group_id = %s
+                ORDER BY timestamp DESC
+                LIMIT %s
+                """
             )
-            for row in rows
-        ]
+            with self._client.cursor() as cur:
+                cur.execute(query, (user_id, limit))
+                rows = cur.fetchall()
+            history = [
+                ConversationMessage(
+                    role=(row[3] or "user"),
+                    sender_name=row[0] or "",
+                    text=self._restore_message_text(
+                        row[1] or "",
+                        bool(row[4]) if len(row) > 4 else False,
+                        row[5] if len(row) > 5 else None,
+                    ),
+                    timestamp=row[2],
+                )
+                for row in rows
+            ]
+        except errors.UndefinedColumn:
+            query = sql.SQL(
+                """
+                SELECT sender_name, text, timestamp, COALESCE(message_role, 'user')
+                FROM messages
+                WHERE group_id = %s
+                ORDER BY timestamp DESC
+                LIMIT %s
+                """
+            )
+            with self._client.cursor() as cur:
+                cur.execute(query, (user_id, limit))
+                rows = cur.fetchall()
+            history = [
+                ConversationMessage(
+                    role=(row[3] or "user"),
+                    sender_name=row[0] or "",
+                    text=row[1] or "",
+                    timestamp=row[2],
+                )
+                for row in rows
+            ]
         history.reverse()
         return history
 
     def insert_message(self, message: StoredMessage) -> None:
-        query = sql.SQL(
-            """
-            INSERT INTO messages (group_id, user_id, sender_name, text, timestamp, message_role)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            """
-        )
+        text_to_store = message.text
+        encrypted_body = message.encrypted_body
+        is_encrypted = bool(message.is_encrypted)
+        encryption_version = message.encryption_version
+        if not is_encrypted and self._should_encrypt_group_message(message.group_id):
+            try:
+                encrypted_body = encrypt_text(message.text, key_secret=self._message_encryption_key)
+                text_to_store = "[encrypted]"
+                is_encrypted = True
+                encryption_version = self._message_encryption_version
+            except Exception:
+                logger.warning("Failed to encrypt message; fallback to plain text", exc_info=True)
+                encrypted_body = None
+                is_encrypted = False
+                encryption_version = None
+
         ts = message.timestamp
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
-        with self._client.cursor() as cur:
-            cur.execute(
-                query,
-                (
-                    message.group_id,
-                    message.user_id,
-                    message.sender_name,
-                    message.text,
-                    ts,
-                    message.message_role or "user",
-                ),
+        try:
+            query = sql.SQL(
+                """
+                INSERT INTO messages (
+                    group_id, user_id, sender_name, text, timestamp, is_encrypted, encrypted_body, encryption_version, message_role
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """
             )
+            with self._client.cursor() as cur:
+                cur.execute(
+                    query,
+                    (
+                        message.group_id,
+                        message.user_id,
+                        message.sender_name,
+                        text_to_store,
+                        ts,
+                        is_encrypted,
+                        encrypted_body,
+                        encryption_version,
+                        message.message_role or "user",
+                    ),
+                )
+        except errors.UndefinedColumn:
+            # 後方互換: 暗号化カラム未導入環境では従来挙動で保存
+            query = sql.SQL(
+                """
+                INSERT INTO messages (group_id, user_id, sender_name, text, timestamp, message_role)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """
+            )
+            with self._client.cursor() as cur:
+                cur.execute(
+                    query,
+                    (
+                        message.group_id,
+                        message.user_id,
+                        message.sender_name,
+                        message.text,
+                        ts,
+                        message.message_role or "user",
+                    ),
+                )
 
     def record_language_prompt(self, group_id: str) -> None:
         query = sql.SQL(
@@ -285,6 +385,33 @@ class NeonMessageRepository(MessageRepositoryPort):
                 "DELETE FROM group_languages WHERE group_id = %s AND lang_code = ANY(%s)",
                 (group_id, list({code.lower() for code in lang_codes})),
             )
+
+    def shrink_group_languages(self, group_id: str, keep_limit: int) -> List[str]:
+        """古い登録順で言語を絞り込む。削除した言語コードを返す。"""
+        if keep_limit < 0:
+            keep_limit = 0
+        with self._client.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT lang_code
+                    FROM group_languages
+                    WHERE group_id = %s
+                    ORDER BY created_at ASC, lang_code ASC
+                    """,
+                    (group_id,),
+                )
+                rows = cur.fetchall()
+                all_codes = [row[0] for row in rows if row and row[0]]
+                if len(all_codes) <= keep_limit:
+                    return []
+
+                remove_codes = all_codes[keep_limit:]
+                cur.execute(
+                    "DELETE FROM group_languages WHERE group_id = %s AND lang_code = ANY(%s)",
+                    (group_id, remove_codes),
+                )
+                return remove_codes
 
     def set_translation_enabled(self, group_id: str, enabled: bool) -> None:
         try:
@@ -431,7 +558,7 @@ class NeonMessageRepository(MessageRepositoryPort):
         group_id: str,
         period_key: str,
         plan_key: str,
-        paid: bool,
+        stop_translation_on_limit: bool,
         limit: int,
         increment: int,
     ) -> QuotaDecision:
@@ -450,22 +577,11 @@ class NeonMessageRepository(MessageRepositoryPort):
                 current_usage = int(row[0]) if row else 0
                 notice_plan = row[1] if row else None
 
-                if not paid and notice_plan == plan_key:
-                    return QuotaDecision(
-                        allowed=False,
-                        should_notify=False,
-                        stop_translation=False,
-                        usage=current_usage,
-                        limit=limit,
-                        period_key=period_key,
-                        plan_key=plan_key,
-                    )
-
                 if current_usage >= limit:
                     return QuotaDecision(
                         allowed=False,
                         should_notify=notice_plan != plan_key,
-                        stop_translation=not paid,
+                        stop_translation=stop_translation_on_limit,
                         usage=current_usage,
                         limit=limit,
                         period_key=period_key,
@@ -487,15 +603,16 @@ class NeonMessageRepository(MessageRepositoryPort):
                 usage_after_row = cur.fetchone()
                 usage_after = int(usage_after_row[0]) if usage_after_row else current_usage
 
-        if paid:
-            if usage_after > limit:
-                return QuotaDecision(False, notice_plan != plan_key, False, usage_after, limit, period_key, plan_key)
-            if usage_after == limit:
-                return QuotaDecision(True, notice_plan != plan_key, False, usage_after, limit, period_key, plan_key)
-            return QuotaDecision(True, False, False, usage_after, limit, period_key, plan_key)
-
         if usage_after > limit:
-            return QuotaDecision(False, notice_plan != plan_key, True, usage_after, limit, period_key, plan_key)
+            return QuotaDecision(
+                False,
+                notice_plan != plan_key,
+                stop_translation_on_limit,
+                usage_after,
+                limit,
+                period_key,
+                plan_key,
+            )
         if usage_after == limit:
             return QuotaDecision(True, notice_plan != plan_key, False, usage_after, limit, period_key, plan_key)
         return QuotaDecision(True, False, False, usage_after, limit, period_key, plan_key)
@@ -588,6 +705,76 @@ class NeonMessageRepository(MessageRepositoryPort):
             logger.warning("group_subscriptions table missing; subscription not tracked", extra={"group_id": group_id})
             return (None, None, None)
 
+    def get_subscription_plan(
+        self, group_id: str
+    ) -> Tuple[
+        Optional[str],
+        str,
+        str,
+        bool,
+        Optional[str],
+        Optional[datetime],
+        Optional[datetime],
+        Optional[int],
+        Optional[str],
+        Optional[datetime],
+    ]:
+        """購読状態とプラン情報を取得する。"""
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        status,
+                        COALESCE(entitlement_plan, 'free'),
+                        COALESCE(billing_interval, 'month'),
+                        COALESCE(is_grandfathered, FALSE),
+                        stripe_price_id,
+                        current_period_start,
+                        current_period_end,
+                        quota_anchor_day,
+                        scheduled_target_price_id,
+                        scheduled_effective_at
+                    FROM group_subscriptions
+                    WHERE group_id = %s
+                    """,
+                    (group_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return (None, FREE_PLAN, "month", False, None, None, None, None, None, None)
+                return (
+                    row[0],
+                    (row[1] or FREE_PLAN),
+                    (row[2] or "month"),
+                    bool(row[3]),
+                    row[4],
+                    row[5],
+                    row[6],
+                    row[7],
+                    row[8],
+                    row[9],
+                )
+        except errors.UndefinedColumn:
+            status, period_start, period_end = self.get_subscription_period(group_id)
+            legacy_plan = PRO_PLAN if status in {"active", "trialing"} else FREE_PLAN
+            legacy_interval = "legacy_month" if legacy_plan == PRO_PLAN else "month"
+            legacy_grandfathered = legacy_plan == PRO_PLAN
+            return (
+                status,
+                legacy_plan,
+                legacy_interval,
+                legacy_grandfathered,
+                None,
+                period_start,
+                period_end,
+                period_start.day if period_start else None,
+                None,
+                None,
+            )
+        except errors.UndefinedTable:
+            return (None, FREE_PLAN, "month", False, None, None, None, None, None, None)
+
     def get_subscription_detail(self, group_id: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """Stripe 顧客/サブスク ID とステータスを取得する。"""
         try:
@@ -616,8 +803,70 @@ class NeonMessageRepository(MessageRepositoryPort):
         status: str,
         current_period_start: Optional[datetime],
         current_period_end: Optional[datetime],
+        *,
+        stripe_price_id: Optional[str] = None,
+        entitlement_plan: str = "free",
+        billing_interval: str = "month",
+        is_grandfathered: bool = False,
+        quota_anchor_day: Optional[int] = None,
+        scheduled_target_price_id: Optional[str] = None,
+        scheduled_effective_at: Optional[datetime] = None,
     ) -> None:
         try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO group_subscriptions (
+                        group_id,
+                        stripe_customer_id,
+                        stripe_subscription_id,
+                        status,
+                        current_period_start,
+                        current_period_end,
+                        stripe_price_id,
+                        entitlement_plan,
+                        billing_interval,
+                        is_grandfathered,
+                        quota_anchor_day,
+                        scheduled_target_price_id,
+                        scheduled_effective_at,
+                        created_at,
+                        updated_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                    ON CONFLICT (group_id)
+                    DO UPDATE SET
+                        stripe_customer_id = EXCLUDED.stripe_customer_id,
+                        stripe_subscription_id = EXCLUDED.stripe_subscription_id,
+                        status = EXCLUDED.status,
+                        current_period_start = EXCLUDED.current_period_start,
+                        current_period_end = EXCLUDED.current_period_end,
+                        stripe_price_id = EXCLUDED.stripe_price_id,
+                        entitlement_plan = EXCLUDED.entitlement_plan,
+                        billing_interval = EXCLUDED.billing_interval,
+                        is_grandfathered = EXCLUDED.is_grandfathered,
+                        quota_anchor_day = EXCLUDED.quota_anchor_day,
+                        scheduled_target_price_id = EXCLUDED.scheduled_target_price_id,
+                        scheduled_effective_at = EXCLUDED.scheduled_effective_at,
+                        updated_at = NOW()
+                    """,
+                    (
+                        group_id,
+                        stripe_customer_id,
+                        stripe_subscription_id,
+                        status,
+                        current_period_start,
+                        current_period_end,
+                        stripe_price_id,
+                        entitlement_plan,
+                        billing_interval,
+                        is_grandfathered,
+                        quota_anchor_day,
+                        scheduled_target_price_id,
+                        scheduled_effective_at,
+                    ),
+                )
+        except errors.UndefinedColumn:
+            # 後方互換: 新カラムが無い環境では旧カラムのみ更新
             with self._client.cursor() as cur:
                 cur.execute(
                     """
@@ -686,96 +935,87 @@ class NeonMessageRepository(MessageRepositoryPort):
             raise
 
     def fetch_translation_runtime_state(self, group_id: str) -> TranslationRuntimeState:
-        with self._client.cursor() as cur:
-            cur.execute(
-                """
-                WITH base AS (
-                    SELECT
-                        %s::text AS group_id,
-                        COALESCE(gs.translation_enabled, TRUE) AS translation_enabled,
-                        sub.status AS subscription_status,
-                        sub.current_period_start AS period_start,
-                        sub.current_period_end AS period_end,
-                        COALESCE(gl.lang_codes, ARRAY[]::text[]) AS group_languages
-                    FROM (SELECT 1) AS one
-                    LEFT JOIN group_settings gs ON gs.group_id = %s
-                    LEFT JOIN LATERAL (
-                        SELECT status, current_period_start, current_period_end
-                        FROM group_subscriptions
-                        WHERE group_id = %s
-                        LIMIT 1
-                    ) sub ON TRUE
-                    LEFT JOIN LATERAL (
-                        SELECT ARRAY_AGG(lang_code ORDER BY lang_code) AS lang_codes
-                        FROM group_languages
-                        WHERE group_id = %s
-                    ) gl ON TRUE
-                ),
-                periodized AS (
-                    SELECT
-                        group_id,
-                        translation_enabled,
-                        subscription_status,
-                        period_start,
-                        period_end,
-                        group_languages,
-                        CASE
-                            WHEN subscription_status IN ('active', 'trialing') THEN
-                                COALESCE(
-                                    (
-                                        CASE
-                                            WHEN period_start IS NOT NULL THEN ((period_start AT TIME ZONE 'UTC')::date)::text
-                                            WHEN period_end IS NOT NULL THEN (((period_end - INTERVAL '31 days') AT TIME ZONE 'UTC')::date)::text
-                                            ELSE NULL
-                                        END
-                                    ),
-                                    (date_trunc('month', NOW() AT TIME ZONE 'UTC')::date)::text
-                                )
-                            ELSE (date_trunc('month', NOW() AT TIME ZONE 'UTC')::date)::text
-                        END AS period_key
-                    FROM base
+        translation_enabled = True
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    "SELECT translation_enabled FROM group_settings WHERE group_id = %s",
+                    (group_id,),
                 )
-                SELECT
-                    p.translation_enabled,
-                    p.group_languages,
-                    p.subscription_status,
-                    p.period_start,
-                    p.period_end,
-                    p.period_key,
-                    COALESCE(uc.translation_count, 0) AS usage,
-                    uc.limit_notice_plan
-                FROM periodized p
-                LEFT JOIN group_usage_counters uc
-                    ON uc.group_id = p.group_id
-                    AND uc.period_key = p.period_key
-                """,
-                (group_id, group_id, group_id, group_id),
-            )
-            row = cur.fetchone()
+                row = cur.fetchone()
+                if row is not None:
+                    translation_enabled = bool(row[0])
+        except errors.UndefinedTable:
+            translation_enabled = True
 
-        if not row:
-            now = datetime.now(timezone.utc)
-            fallback_period_key = f"{now.year:04d}-{now.month:02d}-01"
-            return TranslationRuntimeState(
-                translation_enabled=True,
-                group_languages=[],
-                subscription_status=None,
-                period_start=None,
-                period_end=None,
-                period_key=fallback_period_key,
-                usage=0,
-                limit_notice_plan=None,
-            )
+        group_languages: List[str] = []
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT lang_code
+                    FROM group_languages
+                    WHERE group_id = %s
+                    ORDER BY created_at ASC, lang_code ASC
+                    """,
+                    (group_id,),
+                )
+                rows = cur.fetchall()
+                group_languages = [row[0] for row in rows if row and row[0]]
+        except errors.UndefinedColumn:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT lang_code
+                    FROM group_languages
+                    WHERE group_id = %s
+                    ORDER BY lang_code ASC
+                    """,
+                    (group_id,),
+                )
+                rows = cur.fetchall()
+                group_languages = [row[0] for row in rows if row and row[0]]
+        except errors.UndefinedTable:
+            group_languages = []
+
+        (
+            status,
+            entitlement_plan,
+            billing_interval,
+            is_grandfathered,
+            _stripe_price_id,
+            period_start,
+            period_end,
+            quota_anchor_day,
+            scheduled_target_price_id,
+            scheduled_effective_at,
+        ) = self.get_subscription_plan(group_id)
+
+        effective_plan = resolve_effective_plan(status, entitlement_plan)
+        period_key = self._compute_period_key(
+            plan_key=effective_plan,
+            period_start=period_start,
+            period_end=period_end,
+            quota_anchor_day=quota_anchor_day,
+        )
+        usage = self.get_usage(group_id, period_key)
+        notice_plan = self.get_limit_notice_plan(group_id, period_key)
 
         return TranslationRuntimeState(
-            translation_enabled=bool(row[0]),
-            group_languages=list(row[1] or []),
-            subscription_status=row[2],
-            period_start=row[3],
-            period_end=row[4],
-            period_key=row[5],
-            usage=int(row[6]),
-            limit_notice_plan=row[7],
+            translation_enabled=translation_enabled,
+            group_languages=group_languages,
+            subscription_status=status,
+            period_start=period_start,
+            period_end=period_end,
+            period_key=period_key,
+            usage=usage,
+            limit_notice_plan=notice_plan,
+            entitlement_plan=effective_plan,
+            billing_interval=billing_interval,
+            is_grandfathered=is_grandfathered,
+            quota_anchor_day=quota_anchor_day,
+            scheduled_target_price_id=scheduled_target_price_id,
+            scheduled_effective_at=scheduled_effective_at,
         )
 
     def reset_group_language_settings(self, group_id: str) -> None:
@@ -825,18 +1065,73 @@ class NeonMessageRepository(MessageRepositoryPort):
             row = cur.fetchone()
         return row[0] if row else None
 
+    def delete_expired_encrypted_messages(self, *, retention_days: int = 7) -> int:
+        if retention_days < 1:
+            retention_days = 1
+        threshold = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM messages
+                    WHERE is_encrypted = TRUE
+                      AND timestamp < %s
+                    """,
+                    (threshold,),
+                )
+                return cur.rowcount or 0
+        except errors.UndefinedColumn:
+            return 0
+        except errors.UndefinedTable:
+            return 0
+
+    def _restore_message_text(self, text: str, is_encrypted: bool, encrypted_body: Optional[str]) -> str:
+        if not is_encrypted or not encrypted_body:
+            return text or ""
+        if not self._message_encryption_key:
+            return text or ""
+        try:
+            return decrypt_text(encrypted_body, key_secret=self._message_encryption_key)
+        except Exception:  # pylint: disable=broad-except
+            logger.warning("Failed to decrypt message; fallback to stored text", exc_info=True)
+            return text or ""
+
+    def _should_encrypt_group_message(self, group_id: str) -> bool:
+        if not self._message_encryption_key:
+            return False
+        if not group_id:
+            return False
+        try:
+            status, entitlement_plan, *_ = self.get_subscription_plan(group_id)
+            effective_plan = resolve_effective_plan(status, entitlement_plan)
+            return effective_plan == PRO_PLAN
+        except Exception:  # pylint: disable=broad-except
+            logger.warning("Failed to resolve plan for message encryption", exc_info=True)
+            return False
+
     @staticmethod
     def _compute_period_key(
         *,
-        paid: bool,
+        plan_key: str,
         period_start: Optional[datetime],
         period_end: Optional[datetime],
+        quota_anchor_day: Optional[int],
     ) -> str:
         now = datetime.now(timezone.utc)
-        if paid:
-            anchor = period_start
-            if not anchor and period_end:
-                anchor = period_end - timedelta(days=31)
-            if anchor:
-                return anchor.astimezone(timezone.utc).date().isoformat()
+        if plan_key == FREE_PLAN:
+            return f"{now.year:04d}-{now.month:02d}-01"
+
+        anchor = period_start
+        if not anchor and period_end:
+            anchor = period_end - timedelta(days=31)
+        if anchor:
+            return anchor.astimezone(timezone.utc).date().isoformat()
+
+        if quota_anchor_day:
+            normalized_day = min(max(int(quota_anchor_day), 1), 31)
+            if now.day >= normalized_day:
+                return f"{now.year:04d}-{now.month:02d}-{normalized_day:02d}"
+            prev = now.replace(day=1) - timedelta(days=1)
+            safe_day = min(normalized_day, prev.day)
+            return f"{prev.year:04d}-{prev.month:02d}-{safe_day:02d}"
         return f"{now.year:04d}-{now.month:02d}-01"

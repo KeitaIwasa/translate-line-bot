@@ -104,6 +104,9 @@ class StoredMessage:
     text: str
     timestamp: datetime
     message_role: str = "user"
+    is_encrypted: bool = False
+    encrypted_body: Optional[str] = None
+    encryption_version: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -124,6 +127,12 @@ class TranslationRuntimeState:
     period_key: str
     usage: int
     limit_notice_plan: Optional[str]
+    entitlement_plan: str = "free"
+    billing_interval: str = "month"
+    is_grandfathered: bool = False
+    quota_anchor_day: Optional[int] = None
+    scheduled_target_price_id: Optional[str] = None
+    scheduled_effective_at: Optional[datetime] = None
 
 
 @dataclass(frozen=True)

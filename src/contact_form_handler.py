@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional
 from .config import get_settings
 from .infra.neon_client import get_client
 from .infra.neon_repositories import NeonMessageRepository
+from .infra.signed_token import TokenError, verify_token
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -61,7 +62,13 @@ def lambda_handler(event: Dict[str, Any], _context) -> Dict[str, Any]:
         return _json_response(500, {"message": "Internal Server Error"}, origin)
 
     try:
-        _send_contact_email(email=email, message=message, locale=locale, event=event)
+        _send_contact_email(
+            email=email,
+            message=message,
+            locale=locale,
+            event=event,
+            payload=payload,
+        )
         return _json_response(200, {"ok": True}, origin)
     except Exception:  # pylint: disable=broad-except
         logger.exception("Failed to send contact email")
@@ -164,20 +171,24 @@ def _floor_window(now: datetime, window_seconds: int) -> datetime:
     return datetime.fromtimestamp(floored, tz=timezone.utc)
 
 
-def _send_contact_email(*, email: str, message: str, locale: str, event: Dict[str, Any]) -> None:
+def _send_contact_email(*, email: str, message: str, locale: str, event: Dict[str, Any], payload: Dict[str, Any]) -> None:
     ses = _get_ses_client()
     sent_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     client_ip = _extract_client_ip(event) or "unknown"
     user_agent = _extract_user_agent(event)
     safe_message = _strip_control_characters(message)
+    priority, priority_group_id = _resolve_priority_support(payload)
 
-    subject = f"[KOTORI Contact][{locale}] {sent_at}"
+    priority_part = "[PRIORITY]" if priority else ""
+    subject = f"[KOTORI Contact]{priority_part}[{locale}] {sent_at}"
     text_body = (
         f"Email: {email}\n"
         f"Locale: {locale}\n"
         f"SentAt: {sent_at}\n"
         f"IP: {client_ip}\n"
         f"User-Agent: {user_agent}\n\n"
+        f"PrioritySupport: {priority}\n"
+        f"GroupId: {priority_group_id or 'n/a'}\n\n"
         f"Message:\n{safe_message}\n"
     )
 
@@ -192,6 +203,46 @@ def _send_contact_email(*, email: str, message: str, locale: str, event: Dict[st
             }
         },
     )
+
+
+def _resolve_priority_support(payload: Dict[str, Any]) -> tuple[bool, Optional[str]]:
+    token = str(payload.get("st") or "").strip()
+    if not token:
+        return (False, None)
+    if not settings.subscription_token_secret:
+        return (False, None)
+    verified = None
+    for scope in ("support", "checkout"):
+        try:
+            verified = verify_token(token, settings.subscription_token_secret, scope=scope)
+            break
+        except TokenError:
+            continue
+    if not verified:
+        return (False, None)
+
+    group_id = str(verified.get("group_id") or "").strip()
+    if not group_id:
+        return (False, None)
+    try:
+        (
+            status,
+            entitlement_plan,
+            _billing_interval,
+            _is_grandfathered,
+            _stripe_price_id,
+            _period_start,
+            _period_end,
+            _quota_anchor_day,
+            _scheduled_target_price_id,
+            _scheduled_effective_at,
+        ) = _get_repo().get_subscription_plan(group_id)
+    except Exception:  # pylint: disable=broad-except
+        logger.warning("Failed to resolve subscription for priority support", exc_info=True)
+        return (False, group_id)
+
+    is_pro = status in {"active", "trialing"} and (entitlement_plan or "").lower() == "pro"
+    return (is_pro, group_id)
 
 
 def _strip_control_characters(value: str) -> str:
@@ -253,7 +304,11 @@ def _get_repo() -> NeonMessageRepository:
     global _repo
     if _repo is None:
         client = get_client(settings.neon_database_url)
-        _repo = NeonMessageRepository(client, max_group_languages=settings.max_group_languages)
+        _repo = NeonMessageRepository(
+            client,
+            max_group_languages=settings.max_group_languages,
+            message_encryption_key=settings.message_encryption_key,
+        )
     return _repo
 
 

@@ -11,3 +11,10 @@
 [x] 翻訳停止中（quota到達など）に返信が返らない不具合（`_send_over_quota_message` 参照のAttributeError）を修正
 [x] 翻訳停止中に上限通知を出した場合でも limit_notice_plan を更新する
 [x] LPで累計利用者数（ユニークユーザー）を表示するAPIを追加
+[x] 料金プラン再編（Free/Standard/Pro）向けのドメイン定義を追加
+[x] `/checkout` を `mode=status/start` + `st` トークン対応へ更新
+[x] Stripe Webhook を price.id ベースで entitlement 同期するよう更新
+[x] Pro向けメッセージ暗号化・7日削除ジョブの実装を追加
+[x] 料金比較ページ（`/pro.html` 4言語）を新UIに再構成
+[ ] 法務文書（terms/privacy/consumer）の最終文面レビュー
+[ ] ステージング反映（migration + backend + homepage）の最終実施

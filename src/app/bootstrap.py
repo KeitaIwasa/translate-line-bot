@@ -56,7 +56,11 @@ def build_dispatcher() -> Dispatcher:
         timeout_seconds=settings.gemini_timeout_seconds,
     )
     db_client = get_client(settings.neon_database_url)
-    repo = NeonMessageRepository(db_client, max_group_languages=settings.max_group_languages)
+    repo = NeonMessageRepository(
+        db_client,
+        max_group_languages=settings.max_group_languages,
+        message_encryption_key=settings.message_encryption_key,
+    )
     quota_service = QuotaService(repo)
     lang_settings_service = LanguageSettingsService(
         repo,
@@ -93,6 +97,7 @@ def build_dispatcher() -> Dispatcher:
         stripe_price_monthly_id=settings.stripe_price_monthly_id,
         subscription_frontend_base_url=settings.subscription_frontend_base_url,
         checkout_api_base_url=settings.checkout_api_base_url,
+        subscription_token_secret=settings.subscription_token_secret,
     )
 
     message_handler = MessageHandler(
@@ -110,6 +115,7 @@ def build_dispatcher() -> Dispatcher:
         stripe_secret_key=settings.stripe_secret_key,
         stripe_price_monthly_id=settings.stripe_price_monthly_id,
         free_quota_per_month=settings.free_quota_per_month,
+        standard_quota_per_month=settings.standard_quota_per_month,
         pro_quota_per_month=settings.pro_quota_per_month,
         subscription_frontend_base_url=settings.subscription_frontend_base_url,
         checkout_api_base_url=settings.checkout_api_base_url,

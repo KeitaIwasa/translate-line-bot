@@ -23,7 +23,8 @@ class LanguageSettingsService:
         self._interface_translation = interface_translation
         self._max_group_languages = max_group_languages
 
-    def propose(self, event: models.MessageEvent) -> models.ReplyBundle | None:
+    def propose(self, event: models.MessageEvent, *, max_languages: int | None = None) -> models.ReplyBundle | None:
+        limit = self._resolved_limit(max_languages)
         try:
             result = self._pref.analyze(event.text)
         except Exception:  # pylint: disable=broad-except
@@ -36,17 +37,17 @@ class LanguageSettingsService:
         unsupported = result.unsupported
 
         detected_total = len(supported) + len(unsupported)
-        if detected_total > self._max_group_languages:
-            message = self._build_language_limit_message(result.primary_language)
+        if detected_total > limit:
+            message = self._build_language_limit_message(result.primary_language, max_languages=limit)
             self._repo.set_translation_enabled(event.group_id, False)
             return models.ReplyBundle(texts=[message[:5000]])
 
         messages: List[Dict] = []
-        limited_supported, dropped = self._limit_language_choices(supported)
+        limited_supported, dropped = self._limit_language_choices(supported, max_languages=limit)
         if unsupported:
             messages.append({"type": "text", "text": self._format_unsupported_message(unsupported, result.primary_language)})
         if dropped:
-            notice = self._build_language_limit_message(result.primary_language)
+            notice = self._build_language_limit_message(result.primary_language, max_languages=limit)
             messages.append({"type": "text", "text": notice})
             self._repo.set_translation_enabled(event.group_id, False)
             if messages:
@@ -66,7 +67,7 @@ class LanguageSettingsService:
                 "languages": [{"code": lang.code, "name": lang.name} for lang in limited_supported],
                 "primary_language": prompt_texts["primary_language"],
                 "completion_text": prompt_texts["completion_text"],
-                "limit_text": self._build_language_limit_message(result.primary_language),
+                "limit_text": self._build_language_limit_message(result.primary_language, max_languages=limit),
             }
         )
         cancel_payload = self._encode_postback_payload(
@@ -104,10 +105,12 @@ class LanguageSettingsService:
         primary_language: str,
         completion_text: str | None = None,
         limit_text: str | None = None,
+        max_languages: int | None = None,
     ) -> models.ReplyBundle | None:
+        limit = self._resolved_limit(max_languages)
         tuples = self._dedup_languages(languages)
-        if len(tuples) > self._max_group_languages:
-            warning = limit_text or self._build_language_limit_message(primary_language)
+        if len(tuples) > limit:
+            warning = limit_text or self._build_language_limit_message(primary_language, max_languages=limit)
             return models.ReplyBundle(texts=[warning])
 
         completed = self._repo.try_complete_group_languages(group_id, tuples)
@@ -129,8 +132,12 @@ class LanguageSettingsService:
 
     # --- helpers ---
     def _limit_language_choices(
-        self, languages: Sequence[models.LanguageChoice]
+        self,
+        languages: Sequence[models.LanguageChoice],
+        *,
+        max_languages: int | None = None,
     ) -> Tuple[List[models.LanguageChoice], List[models.LanguageChoice]]:
+        limit = self._resolved_limit(max_languages)
         limited: List[models.LanguageChoice] = []
         dropped: List[models.LanguageChoice] = []
         seen = set()
@@ -139,7 +146,7 @@ class LanguageSettingsService:
             if not code or code in seen:
                 continue
             seen.add(code)
-            if len(limited) < self._max_group_languages:
+            if len(limited) < limit:
                 limited.append(models.LanguageChoice(code=code, name=lang.name))
             else:
                 dropped.append(models.LanguageChoice(code=code, name=lang.name))
@@ -154,12 +161,20 @@ class LanguageSettingsService:
         translated = self._translate_template(base, instruction_lang, force=True)
         return translated or base
 
-    def _build_language_limit_message(self, instruction_lang: str) -> str:
-        base = f"You can set up to {self._max_group_languages} translation languages. Please specify {self._max_group_languages} or fewer."
+    def _build_language_limit_message(self, instruction_lang: str, *, max_languages: int | None = None) -> str:
+        limit = self._resolved_limit(max_languages)
+        base = f"You can set up to {limit} translation languages. Please specify {limit} or fewer."
         if not instruction_lang or instruction_lang.lower().startswith("en"):
             return base
         translated = self._translate_template(base, instruction_lang, force=True)
         return translated or base
+
+    def _resolved_limit(self, max_languages: int | None) -> int:
+        if max_languages is None:
+            return self._max_group_languages
+        if max_languages < 1:
+            return 1
+        return max_languages
 
     def _prepare_language_prompt_texts(self, supported, preference: models.LanguagePreference) -> Dict[str, str]:
         primary_lang = (preference.primary_language or "").lower()

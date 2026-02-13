@@ -65,6 +65,8 @@ class MessageRepositoryPort:
 
     def remove_group_languages(self, group_id: str, lang_codes: Sequence[str]) -> None: ...
 
+    def shrink_group_languages(self, group_id: str, keep_limit: int) -> List[str]: ...
+
     def set_translation_enabled(self, group_id: str, enabled: bool) -> None: ...
 
     def is_translation_enabled(self, group_id: str) -> bool: ...
@@ -93,6 +95,21 @@ class MessageRepositoryPort:
         self, group_id: str
     ) -> Tuple[Optional[str], Optional[datetime], Optional[datetime]]: ...
 
+    def get_subscription_plan(
+        self, group_id: str
+    ) -> Tuple[
+        Optional[str],
+        str,
+        str,
+        bool,
+        Optional[str],
+        Optional[datetime],
+        Optional[datetime],
+        Optional[int],
+        Optional[str],
+        Optional[datetime],
+    ]: ...
+
     def upsert_subscription(
         self,
         group_id: str,
@@ -101,6 +118,14 @@ class MessageRepositoryPort:
         status: str,
         current_period_start: Optional[datetime],
         current_period_end: Optional[datetime],
+        *,
+        stripe_price_id: Optional[str] = None,
+        entitlement_plan: str = "free",
+        billing_interval: str = "month",
+        is_grandfathered: bool = False,
+        quota_anchor_day: Optional[int] = None,
+        scheduled_target_price_id: Optional[str] = None,
+        scheduled_effective_at: Optional[datetime] = None,
     ) -> None: ...
 
     def update_subscription_status(
@@ -124,7 +149,7 @@ class UsageRepositoryPort(Protocol):
         group_id: str,
         period_key: str,
         plan_key: str,
-        paid: bool,
+        stop_translation_on_limit: bool,
         limit: int,
         increment: int,
     ): ...
@@ -143,6 +168,21 @@ class SubscriptionRepositoryPort(Protocol):
         self, group_id: str
     ) -> Tuple[Optional[str], Optional[datetime], Optional[datetime]]: ...
 
+    def get_subscription_plan(
+        self, group_id: str
+    ) -> Tuple[
+        Optional[str],
+        str,
+        str,
+        bool,
+        Optional[str],
+        Optional[datetime],
+        Optional[datetime],
+        Optional[int],
+        Optional[str],
+        Optional[datetime],
+    ]: ...
+
     def upsert_subscription(
         self,
         group_id: str,
@@ -151,6 +191,14 @@ class SubscriptionRepositoryPort(Protocol):
         status: str,
         current_period_start: Optional[datetime],
         current_period_end: Optional[datetime],
+        *,
+        stripe_price_id: Optional[str] = None,
+        entitlement_plan: str = "free",
+        billing_interval: str = "month",
+        is_grandfathered: bool = False,
+        quota_anchor_day: Optional[int] = None,
+        scheduled_target_price_id: Optional[str] = None,
+        scheduled_effective_at: Optional[datetime] = None,
     ) -> None: ...
 
     def update_subscription_status(
