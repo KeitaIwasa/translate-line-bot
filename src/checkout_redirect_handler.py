@@ -30,6 +30,8 @@ def lambda_handler(event: Dict[str, Any], _context) -> Dict[str, Any]:
         return _handle_status(event)
     if mode == "start":
         return _handle_start(event)
+    if mode == "portal":
+        return _handle_portal(event)
 
     # 互換: 旧 session_id リダイレクト
     session_id = _extract_session_id(event)
@@ -178,6 +180,53 @@ def _handle_start(event: Dict[str, Any]) -> Dict[str, Any]:
             "mode": "start",
             "result": "scheduled",
             "scheduledEffectiveAt": scheduled_at.isoformat().replace("+00:00", "Z"),
+        },
+    )
+
+
+def _handle_portal(event: Dict[str, Any]) -> Dict[str, Any]:
+    token = _extract_token(event)
+    if not token:
+        return _json_response(400, {"message": "st is required"})
+
+    try:
+        payload = verify_token(token, secret=settings.subscription_token_secret, scope="checkout")
+    except TokenError:
+        return _json_response(401, {"message": "invalid token"})
+
+    group_id = str(payload.get("group_id") or "").strip()
+    if not group_id:
+        return _json_response(400, {"message": "token missing group_id"})
+
+    stripe = _import_stripe()
+    if not stripe or not settings.stripe_secret_key:
+        logger.warning("Stripe SDK unavailable or secret not set")
+        return _json_response(503, {"message": "Stripe is not available"})
+
+    repo = _get_repo()
+    customer_id, _subscription_id, _status = repo.get_subscription_detail(group_id)
+    if not customer_id:
+        return _json_response(404, {"message": "customer not found"})
+
+    stripe.api_key = settings.stripe_secret_key
+    try:
+        session = stripe.billing_portal.Session.create(
+            customer=customer_id,
+            return_url="https://line.me/R/nv/chat",
+        )
+        redirect_url = getattr(session, "url", None)
+        if not redirect_url:
+            raise ValueError("portal session missing url")
+    except Exception:  # pylint: disable=broad-except
+        logger.warning("Failed to create billing portal session", exc_info=True)
+        return _json_response(500, {"message": "failed to create billing portal session"})
+
+    return _json_response(
+        200,
+        {
+            "mode": "portal",
+            "result": "portal_created",
+            "redirectUrl": redirect_url,
         },
     )
 

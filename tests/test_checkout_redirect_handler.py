@@ -136,3 +136,51 @@ def test_status_returns_translation_count_for_current_period(monkeypatch):
     assert body["effectivePlan"] == "standard"
     assert body["periodKey"] == "2026-02-13"
     assert body["translationCount"] == 123
+
+
+def test_portal_returns_billing_portal_url(monkeypatch):
+    module = _import_handler(monkeypatch)
+
+    class _Repo:
+        @staticmethod
+        def get_subscription_detail(_group_id):
+            return ("cus_123", "sub_123", "active")
+
+    calls = []
+
+    class _SessionApi:
+        @staticmethod
+        def create(**kwargs):
+            calls.append(kwargs)
+            return types.SimpleNamespace(url="https://billing.stripe.com/p/session/test")
+
+    fake_stripe = types.SimpleNamespace(
+        api_key="",
+        billing_portal=types.SimpleNamespace(Session=_SessionApi),
+    )
+
+    monkeypatch.setattr(module, "verify_token", lambda *_args, **_kwargs: {"group_id": "gid_1"})
+    monkeypatch.setattr(module, "_get_repo", lambda: _Repo())
+    monkeypatch.setattr(module, "_import_stripe", lambda: fake_stripe)
+
+    event = {"queryStringParameters": {"mode": "portal", "st": "token"}}
+    response = module.lambda_handler(event, None)
+    assert response["statusCode"] == 200
+
+    body = json.loads(response["body"])
+    assert body["result"] == "portal_created"
+    assert body["redirectUrl"] == "https://billing.stripe.com/p/session/test"
+    assert calls and calls[0]["customer"] == "cus_123"
+
+
+def test_portal_returns_401_when_token_is_invalid(monkeypatch):
+    module = _import_handler(monkeypatch)
+
+    def _raise_token_error(*_args, **_kwargs):
+        raise module.TokenError("invalid token")
+
+    monkeypatch.setattr(module, "verify_token", _raise_token_error)
+
+    event = {"queryStringParameters": {"mode": "portal", "st": "token"}}
+    response = module.lambda_handler(event, None)
+    assert response["statusCode"] == 401
