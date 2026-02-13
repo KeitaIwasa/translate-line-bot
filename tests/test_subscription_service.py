@@ -1,6 +1,7 @@
 import sys
 import types
 from datetime import datetime
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -95,3 +96,41 @@ def test_build_subscription_summary_text_for_standard_plan():
 def test_build_subscription_summary_text_defaults_to_pro_when_plan_unspecified():
     text = SubscriptionService.build_subscription_summary_text("active", None)
     assert text == "Plan: Pro (active)"
+
+
+def test_create_checkout_url_token_flow_includes_api_base():
+    repo = _RepoStub()
+    service = SubscriptionService(
+        repo,
+        stripe_secret_key="sk_test",
+        stripe_price_monthly_id="price_123",
+        subscription_frontend_base_url="https://kotori-ai.com",
+        checkout_api_base_url="https://api.example.com/prod",
+        subscription_token_secret="secret",
+    )
+
+    url = service.create_checkout_url("gid_1")
+    assert url is not None
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    assert parsed.path == "/pro.html"
+    assert "st" in query and query["st"][0]
+    assert query.get("api_base") == ["https://api.example.com/prod"]
+
+
+def test_create_checkout_url_token_flow_omits_api_base_when_unset():
+    repo = _RepoStub()
+    service = SubscriptionService(
+        repo,
+        stripe_secret_key="sk_test",
+        stripe_price_monthly_id="price_123",
+        subscription_frontend_base_url="https://kotori-ai.com",
+        checkout_api_base_url="",
+        subscription_token_secret="secret",
+    )
+
+    url = service.create_checkout_url("gid_2")
+    assert url is not None
+    query = parse_qs(urlparse(url).query)
+    assert "st" in query and query["st"][0]
+    assert "api_base" not in query

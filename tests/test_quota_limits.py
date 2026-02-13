@@ -257,6 +257,7 @@ def test_free_notice_not_repeated_after_upgrade_then_pro_notice_sent():
 
     # Pro課金状態に切り替え、usageを上限近くまで進めて通知
     repo.paid = True
+    repo.translation_enabled = True
     repo.usage = 7999
     line.sent_texts.clear()
     handler._handle_translation_flow(_build_event("again"), sender_name="user", translation_enabled=True)
@@ -293,3 +294,16 @@ def test_free_plan_sends_notice_after_50th_translation():
     assert translation.calls == 1  # 50通目は翻訳実行
     assert repo.notice_plan == "free"  # 通知フラグ更新
     assert any("Free quota" in text for text in line.sent_texts)
+
+
+def test_free_plan_under_limit_allows_translation_even_if_notice_flag_exists():
+    line = RecordingLineClient()
+    translation = RecordingTranslationService()
+    repo = ProQuotaRepo(initial_usage=10, paid=False, notice_plan="free")
+    handler = _build_handler(repo, line, translation)
+
+    handled = handler._handle_translation_flow(_build_event("msg"), sender_name="user", translation_enabled=True)
+
+    assert handled is True
+    assert translation.calls == 1
+    assert repo.usage == 11

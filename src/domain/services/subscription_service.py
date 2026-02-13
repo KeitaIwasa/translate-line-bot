@@ -57,7 +57,12 @@ class SubscriptionService:
             },
             secret=self._subscription_token_secret,
         )
-        return f"{self._subscription_frontend_base_url}{page_path}?st={quote_plus(token)}"
+        api_base = (
+            f"&api_base={quote_plus(self._checkout_api_base_url)}"
+            if self._checkout_api_base_url
+            else ""
+        )
+        return f"{self._subscription_frontend_base_url}{page_path}?st={quote_plus(token)}{api_base}"
 
     def _create_legacy_checkout_url(self, group_id: str) -> Optional[str]:
         stripe = self._load_stripe()

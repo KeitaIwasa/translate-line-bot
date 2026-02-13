@@ -88,13 +88,12 @@ class QuotaService:
                 increment=increment,
             )
         except TypeError:
-            # 後方互換: 旧シグネチャ(paid)を受ける実装へフォールバック
-            paid = normalize_plan_key(plan_key) != FREE_PLAN
-            return self._repo.reserve_quota_slot(
+            # 後方互換: 旧実装向けに、translation_count ベースで同等判定を行う
+            return self._evaluate_with_usage_counter(
                 group_id=group_id,
                 period_key=period_key,
                 plan_key=plan_key,
-                paid=paid,  # type: ignore[call-arg]
+                stop_translation_on_limit=stop_translation_on_limit,
                 limit=limit,
                 increment=increment,
             )
@@ -109,6 +108,60 @@ class QuotaService:
         prev = (now.replace(day=1) - timedelta(days=1))
         safe_day = min(normalized_day, prev.day)
         return f"{prev.year:04d}-{prev.month:02d}-{safe_day:02d}"
+
+    def _evaluate_with_usage_counter(
+        self,
+        *,
+        group_id: str,
+        period_key: str,
+        plan_key: str,
+        stop_translation_on_limit: bool,
+        limit: int,
+        increment: int,
+    ) -> QuotaDecision:
+        current_usage = self._repo.get_usage(group_id, period_key)
+        notice_plan = self._repo.get_limit_notice_plan(group_id, period_key)
+        if current_usage >= limit:
+            return QuotaDecision(
+                allowed=False,
+                should_notify=notice_plan != plan_key,
+                stop_translation=stop_translation_on_limit,
+                usage=current_usage,
+                limit=limit,
+                period_key=period_key,
+                plan_key=plan_key,
+            )
+
+        usage_after = self._repo.increment_usage(group_id, period_key, increment)
+        if usage_after > limit:
+            return QuotaDecision(
+                allowed=False,
+                should_notify=notice_plan != plan_key,
+                stop_translation=stop_translation_on_limit,
+                usage=usage_after,
+                limit=limit,
+                period_key=period_key,
+                plan_key=plan_key,
+            )
+        if usage_after == limit:
+            return QuotaDecision(
+                allowed=True,
+                should_notify=notice_plan != plan_key,
+                stop_translation=False,
+                usage=usage_after,
+                limit=limit,
+                period_key=period_key,
+                plan_key=plan_key,
+            )
+        return QuotaDecision(
+            allowed=True,
+            should_notify=False,
+            stop_translation=False,
+            usage=usage_after,
+            limit=limit,
+            period_key=period_key,
+            plan_key=plan_key,
+        )
 
     def rollback(self, *, group_id: str, period_key: str, increment: int = 1) -> None:
         """翻訳失敗時に利用カウントを巻き戻す。

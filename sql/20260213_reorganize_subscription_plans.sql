@@ -18,11 +18,9 @@ ALTER TABLE group_subscriptions
 
 UPDATE group_subscriptions
 SET
-  entitlement_plan = COALESCE(NULLIF(entitlement_plan, ''), 'free'),
   billing_interval = COALESCE(NULLIF(billing_interval, ''), 'month'),
   is_grandfathered = COALESCE(is_grandfathered, FALSE)
-WHERE entitlement_plan IS NULL
-   OR billing_interval IS NULL
+WHERE billing_interval IS NULL
    OR is_grandfathered IS NULL;
 
 DO $$

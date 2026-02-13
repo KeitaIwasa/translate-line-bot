@@ -169,6 +169,9 @@ def _already_applied_checks() -> Dict[str, str]:
                 WHERE table_name = 'messages' AND column_name = 'encryption_version'
               )
         """,
+        "20260214_backfill_legacy_active_entitlement_plan.sql": """
+            SELECT TRUE
+        """,
     }
 
 
