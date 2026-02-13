@@ -12,6 +12,7 @@ from .domain.services.plan_policy import (
     STANDARD_PLAN,
     parse_target_price_key,
 )
+from .domain.services.quota_service import QuotaService
 from .infra.neon_client import get_client
 from .infra.neon_repositories import NeonMessageRepository
 from .infra.signed_token import TokenError, verify_token
@@ -123,15 +124,16 @@ def _handle_start(event: Dict[str, Any]) -> Dict[str, Any]:
     is_upgrade = _plan_rank(target_plan) > _plan_rank(current_plan)
 
     if is_upgrade:
-        changed = _change_subscription_immediate(
+        hosted_url = _create_upgrade_hosted_url(
             stripe=stripe,
+            customer_id=customer_id,
             subscription_id=subscription_id,
             item_id=current_item_id,
             target_price_id=target_price_id,
         )
-        if not changed:
-            return _json_response(500, {"message": "failed to upgrade subscription"})
-        return _json_response(200, {"mode": "start", "result": "changed_immediately"})
+        if not hosted_url:
+            return _json_response(500, {"message": "failed to create upgrade checkout session"})
+        return _json_response(200, {"mode": "start", "result": "checkout_created", "redirectUrl": hosted_url})
 
     scheduled_at = _schedule_subscription_change(
         stripe=stripe,
@@ -202,11 +204,22 @@ def _status_from_db(group_id: str) -> Dict[str, Any]:
             # 後方互換: entitlement 未保存環境
             effective_plan = PRO_PLAN
 
+    quota = QuotaService(repo)
+    period_key = quota.compute_period_key(
+        plan_key=effective_plan,
+        period_start=current_period_start,
+        period_end=current_period_end,
+        quota_anchor_day=quota_anchor_day,
+    )
+    translation_count = repo.get_usage(group_id, period_key)
+
     body = {
         "groupId": group_id,
         "subscriptionStatus": status,
         "entitlementPlan": entitlement_plan,
         "effectivePlan": effective_plan,
+        "periodKey": period_key,
+        "translationCount": translation_count,
         "billingInterval": billing_interval,
         "isGrandfathered": bool(is_grandfathered),
         "stripePriceId": stripe_price_id,
@@ -290,20 +303,58 @@ def _create_checkout_session(*, stripe, group_id: str, price_id: str, customer_i
     return getattr(session, "url", None)
 
 
-def _change_subscription_immediate(*, stripe, subscription_id: str, item_id: Optional[str], target_price_id: str) -> bool:
-    if not item_id:
-        return False
+def _create_upgrade_hosted_url(
+    *,
+    stripe,
+    customer_id: Optional[str],
+    subscription_id: str,
+    item_id: Optional[str],
+    target_price_id: str,
+) -> Optional[str]:
+    if not customer_id:
+        return None
+
+    return_url = "https://line.me/R/nv/chat"
+
+    flow_data = {
+        "type": "subscription_update_confirm",
+        "subscription_update_confirm": {
+            "subscription": subscription_id,
+            "items": [
+                {
+                    "price": target_price_id,
+                }
+            ],
+        },
+    }
+    if item_id:
+        flow_data["subscription_update_confirm"]["items"][0]["id"] = item_id
+
     try:
-        stripe.Subscription.modify(
-            subscription_id,
-            items=[{"id": item_id, "price": target_price_id}],
-            proration_behavior="always_invoice",
-            billing_cycle_anchor="unchanged",
+        session = stripe.billing_portal.Session.create(
+            customer=customer_id,
+            return_url=return_url,
+            flow_data=flow_data,
         )
-        return True
+        return getattr(session, "url", None)
     except Exception:  # pylint: disable=broad-except
-        logger.warning("Failed immediate subscription change", exc_info=True)
-        return False
+        logger.warning("Failed to create hosted upgrade confirmation flow", exc_info=True)
+
+    try:
+        session = stripe.billing_portal.Session.create(
+            customer=customer_id,
+            return_url=return_url,
+            flow_data={
+                "type": "subscription_update",
+                "subscription_update": {
+                    "subscription": subscription_id,
+                },
+            },
+        )
+        return getattr(session, "url", None)
+    except Exception:  # pylint: disable=broad-except
+        logger.warning("Failed to create hosted upgrade flow", exc_info=True)
+        return None
 
 
 def _schedule_subscription_change(*, stripe, subscription: Dict[str, Any], subscription_id: str, target_price_id: str) -> Optional[datetime]:
