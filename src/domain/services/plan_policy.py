@@ -83,9 +83,11 @@ def resolve_effective_plan(subscription_status: Optional[str], entitlement_plan:
 
 
 def stop_translation_on_quota(plan_key: Optional[str]) -> bool:
-    """上限超過時の翻訳停止判定。"""
+    """上限超過時に translation_enabled を落とすか判定する。"""
     normalized = normalize_plan_key(plan_key)
-    return normalized in {FREE_PLAN, STANDARD_PLAN, PRO_PLAN}
+    # Standard/Pro は translation_enabled を維持し、クオータ判定でのみ翻訳を抑止する。
+    # これにより月次リセット後は自動で翻訳が再開される。
+    return normalized == FREE_PLAN
 
 
 def parse_target_price_key(value: Optional[str]) -> Optional[str]:

@@ -82,3 +82,20 @@ def test_standard_limit_notice_includes_reset_date_and_pro_upgrade_prompt():
     assert url == "https://short.example.com/cs"
     assert "2026-03-15" in notice
     assert "upgrade to the Pro plan" in notice
+
+
+def test_free_limit_notice_includes_reset_date():
+    handler = _build_handler()
+    handler._build_multilingual_interface_message = lambda base, _gid: base  # type: ignore[assignment]
+    handler._subscription_service.create_checkout_url = lambda _gid: "https://short.example.com/cs"  # type: ignore[attr-defined]
+
+    notice, url = handler._build_limit_reached_notice_text(
+        "group1",
+        plan_key="free",
+        limit=50,
+        period_end=datetime(2026, 2, 28, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert url == "https://short.example.com/cs"
+    assert "2026-02-28" in notice
+    assert "Free quota" in notice

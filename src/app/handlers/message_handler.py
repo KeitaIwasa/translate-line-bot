@@ -774,8 +774,15 @@ class MessageHandler:
             normalized = FREE_PLAN
 
         if normalized == FREE_PLAN:
+            reset_date = self._resolve_quota_reset_date(period_key=period_key, period_end=period_end)
+            reset_line = (
+                f"Translation will resume automatically on {reset_date} (UTC) when the monthly quota resets."
+                if reset_date
+                else "Translation will resume automatically when the monthly quota resets."
+            )
             base = (
                 f"Free quota ({limit:,} messages per month) is exhausted and translation will stop.\n"
+                f"{reset_line}\n"
                 "To continue using the service, please review plans from the link below."
             )
             url = self._subscription_service.create_checkout_url(group_id)
