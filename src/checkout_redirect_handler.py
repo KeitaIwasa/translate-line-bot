@@ -339,21 +339,6 @@ def _create_upgrade_hosted_url(
         return getattr(session, "url", None)
     except Exception:  # pylint: disable=broad-except
         logger.warning("Failed to create hosted upgrade confirmation flow", exc_info=True)
-
-    try:
-        session = stripe.billing_portal.Session.create(
-            customer=customer_id,
-            return_url=return_url,
-            flow_data={
-                "type": "subscription_update",
-                "subscription_update": {
-                    "subscription": subscription_id,
-                },
-            },
-        )
-        return getattr(session, "url", None)
-    except Exception:  # pylint: disable=broad-except
-        logger.warning("Failed to create hosted upgrade flow", exc_info=True)
         return None
 
 
