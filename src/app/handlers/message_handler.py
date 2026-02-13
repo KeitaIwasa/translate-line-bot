@@ -565,6 +565,8 @@ class MessageHandler:
                     event.group_id,
                     flow.decision.plan_key,
                     limit,
+                    period_key=period_key,
+                    period_end=runtime.period_end,
                 )
                 self._repo.set_limit_notice_plan(event.group_id, period_key, plan_key)
                 if event.reply_token:
