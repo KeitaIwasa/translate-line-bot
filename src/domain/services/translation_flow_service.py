@@ -15,6 +15,7 @@ from .quota_service import QuotaService, QuotaDecision
 from ...presentation.reply_formatter import build_translation_reply
 from ...infra.gemini_translation import GeminiRateLimitError
 from .retry_policy import RetryPolicy
+from .plan_policy import FREE_PLAN
 
 logger = logging.getLogger(__name__)
 
@@ -51,21 +52,31 @@ class TranslationFlowService:
         event: models.MessageEvent,
         sender_name: str,
         candidate_languages: Sequence[str],
-        paid: bool,
-        limit: int,
         plan_key: str,
+        stop_translation_on_limit: bool | None = None,
+        limit: int,
         period_start: datetime | None,
         period_end: datetime | None,
+        quota_anchor_day: int | None = None,
+        paid: bool | None = None,
     ) -> TranslationFlowResult:
         """クオータ判定→翻訳実行→返信文生成までを一括で行う。"""
 
+        if stop_translation_on_limit is None:
+            if paid is not None:
+                # 旧呼び出し互換
+                stop_translation_on_limit = not paid
+            else:
+                stop_translation_on_limit = plan_key == FREE_PLAN
+
         decision = self._quota.evaluate(
             group_id=event.group_id or "",
-            paid=paid,
+            plan_key=plan_key,
+            stop_translation_on_limit=stop_translation_on_limit,
             limit=limit,
             period_start=period_start,
             period_end=period_end,
-            plan_key=plan_key,
+            quota_anchor_day=quota_anchor_day,
             increment=1,
         )
 

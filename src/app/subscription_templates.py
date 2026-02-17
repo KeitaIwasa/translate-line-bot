@@ -23,6 +23,7 @@ def build_subscription_menu_message(
     group_id: str,
     instruction_lang: str,
     status: Optional[str],
+    effective_plan: Optional[str],
     period_end: Optional[datetime],
     portal_url: Optional[str],
     upgrade_url: Optional[str],
@@ -32,7 +33,11 @@ def build_subscription_menu_message(
     truncate: TruncateFn,
     normalize_text: NormalizeFn,
 ) -> Optional[Dict]:
-    summary = SubscriptionService.build_subscription_summary_text(status, period_end)
+    summary = SubscriptionService.build_subscription_summary_text(
+        status,
+        period_end,
+        plan_key=effective_plan,
+    )
     translated_summary = translate(summary) or summary
     body_text = truncate(normalize_text(translated_summary), 120)
 

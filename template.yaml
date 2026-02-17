@@ -93,8 +93,30 @@ Globals:
           - UseStripe
           - !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:STRIPE_PRICE_MONTHLY_ID}}"
           - ""
+        STRIPE_PRICE_STANDARD_MONTHLY_ID: !If
+          - UseStripe
+          - !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:STRIPE_PRICE_STANDARD_MONTHLY_ID}}"
+          - ""
+        STRIPE_PRICE_STANDARD_YEARLY_ID: !If
+          - UseStripe
+          - !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:STRIPE_PRICE_STANDARD_YEARLY_ID}}"
+          - ""
+        STRIPE_PRICE_PRO_MONTHLY_ID: !If
+          - UseStripe
+          - !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:STRIPE_PRICE_PRO_MONTHLY_ID}}"
+          - ""
+        STRIPE_PRICE_PRO_YEARLY_ID: !If
+          - UseStripe
+          - !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:STRIPE_PRICE_PRO_YEARLY_ID}}"
+          - ""
+        STRIPE_PRICE_PRO_LEGACY_MONTHLY_ID: !If
+          - UseStripe
+          - !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:STRIPE_PRICE_PRO_LEGACY_MONTHLY_ID}}"
+          - ""
         SUBSCRIPTION_FRONTEND_BASE_URL: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:SUBSCRIPTION_FRONTEND_BASE_URL}}"
         CHECKOUT_API_BASE_URL: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:CHECKOUT_API_BASE_URL}}"
+        SUBSCRIPTION_TOKEN_SECRET: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:SUBSCRIPTION_TOKEN_SECRET}}"
+        MESSAGE_ENCRYPTION_KEY: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:MESSAGE_ENCRYPTION_KEY}}"
         OPENAI_API_KEY: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:OPENAI_API_KEY}}"
         OPENAI_SUPPORT_MODEL: gpt-5.2
         OPENAI_GUARDRAIL_MODEL: gpt-4.1-mini
@@ -150,7 +172,7 @@ Resources:
     Properties:
       CodeUri: .
       Handler: src.checkout_redirect_handler.lambda_handler
-      Description: Issues short checkout redirects for Stripe sessions
+      Description: Checkout status/start API with signed token routing
       Policies:
         - AWSLambdaBasicExecutionRole
       Events:
@@ -221,6 +243,23 @@ Resources:
             Name: !Sub "group-usage-monthly-reset-${StageName}"
             Description: Monthly counter initializer (00:00 UTC on 1st)
             Schedule: cron(0 0 1 * ? *)
+
+  EncryptedMessageCleanupFunction:
+    Type: AWS::Serverless::Function
+    Condition: UseStripe
+    Properties:
+      CodeUri: .
+      Handler: src.encrypted_message_cleanup_handler.lambda_handler
+      Description: Deletes expired encrypted messages for Pro groups
+      Policies:
+        - AWSLambdaBasicExecutionRole
+      Events:
+        DailyCleanup:
+          Type: Schedule
+          Properties:
+            Name: !Sub "encrypted-message-cleanup-${StageName}"
+            Description: Delete encrypted messages older than 7 days (00:00 UTC daily)
+            Schedule: cron(0 0 * * ? *)
 
 Outputs:
   FunctionArn:

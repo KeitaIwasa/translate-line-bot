@@ -53,7 +53,7 @@ LINE → API Gateway → Lambda (Python)
 ### 主要コンポーネント
 - **TranslationFlowService**: QuotaServiceで判定→Gemini翻訳→返信文生成を一括で実行。
 - **LanguageSettingsService**: 入力解析→確認テンプレート生成→Postback確認/キャンセル→言語保存を一元管理。
-- **QuotaService**: 無料/有料ごとの上限管理と通知要否を決定。
+- **QuotaService**: Free/Standard/Proごとの上限管理と通知要否を決定。
 - **RetryPolicy**: 翻訳系のリトライを共通化（指数バックオフ簡易版）。
 - **ReplyBuilder**: LINE送信用メッセージ辞書を組み立てるユーティリティ。
 
@@ -168,16 +168,23 @@ OPENAI_GUARDRAIL_MODEL=gpt-4.1-mini
 PRIVATE_CHAT_HISTORY_LIMIT=5
 STRIPE_SECRET_KEY=sk_live_or_test
 STRIPE_WEBHOOK_SECRET=whsec_xxx
-STRIPE_PRICE_MONTHLY_ID=price_xxx
+STRIPE_PRICE_STANDARD_MONTHLY_ID=price_xxx
+STRIPE_PRICE_STANDARD_YEARLY_ID=price_xxx
+STRIPE_PRICE_PRO_MONTHLY_ID=price_xxx
+STRIPE_PRICE_PRO_YEARLY_ID=price_xxx
+STRIPE_PRICE_PRO_LEGACY_MONTHLY_ID=price_xxx
+SUBSCRIPTION_TOKEN_SECRET=your_random_hmac_secret
+MESSAGE_ENCRYPTION_KEY=your_base64_or_raw_encryption_key
 CONTACT_TO_EMAIL=contact@iwasadigital.com
 CONTACT_FROM_EMAIL=no-reply@iwasadigital.com
 CONTACT_ALLOWED_ORIGINS=https://kotori-ai.com,http://localhost:5500
 CONTACT_RATE_LIMIT_MAX=5
 CONTACT_RATE_LIMIT_WINDOW_SECONDS=600
 CONTACT_IP_HASH_SALT=your_random_salt
-# Optional: override default quotas (Free=50, Pro=8000 messages/month)
+# Optional: override default quotas (Free=50, Standard=4000, Pro=40000 messages/month)
 # FREE_QUOTA_PER_MONTH=50
-# PRO_QUOTA_PER_MONTH=8000
+# STANDARD_QUOTA_PER_MONTH=4000
+# PRO_QUOTA_PER_MONTH=40000
 ```
 
 Lambda では **環境変数として設定**してください。
@@ -235,6 +242,15 @@ aws sesv2 get-email-identity \
   - `LINE_CHANNEL_ACCESS_TOKEN`
   - `GEMINI_API_KEY`
   - `NEON_DATABASE_URL`
+  - `STRIPE_SECRET_KEY`
+  - `STRIPE_WEBHOOK_SECRET`
+  - `STRIPE_PRICE_STANDARD_MONTHLY_ID`
+  - `STRIPE_PRICE_STANDARD_YEARLY_ID`
+  - `STRIPE_PRICE_PRO_MONTHLY_ID`
+  - `STRIPE_PRICE_PRO_YEARLY_ID`
+  - `STRIPE_PRICE_PRO_LEGACY_MONTHLY_ID`
+  - `SUBSCRIPTION_TOKEN_SECRET`
+  - `MESSAGE_ENCRYPTION_KEY`
   - `CONTACT_IP_HASH_SALT`
 - `.env` にはローカル検証用の `NEON_DATABASE_URL` / `GEMINI_API_KEY` を入れてテスト可能
 

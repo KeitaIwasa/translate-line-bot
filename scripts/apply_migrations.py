@@ -126,6 +126,52 @@ def _already_applied_checks() -> Dict[str, str]:
                   AND column_default IS NULL
               )
         """,
+        "20260213_reorganize_subscription_plans.sql": """
+            SELECT
+              EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'group_subscriptions' AND column_name = 'stripe_price_id'
+              )
+              AND EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'group_subscriptions' AND column_name = 'entitlement_plan'
+              )
+              AND EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'group_subscriptions' AND column_name = 'billing_interval'
+              )
+              AND EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'group_subscriptions' AND column_name = 'is_grandfathered'
+              )
+              AND EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'group_subscriptions' AND column_name = 'quota_anchor_day'
+              )
+              AND EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'group_subscriptions' AND column_name = 'scheduled_target_price_id'
+              )
+              AND EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'group_subscriptions' AND column_name = 'scheduled_effective_at'
+              )
+              AND EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'messages' AND column_name = 'is_encrypted'
+              )
+              AND EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'messages' AND column_name = 'encrypted_body'
+              )
+              AND EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'messages' AND column_name = 'encryption_version'
+              )
+        """,
+        "20260214_backfill_legacy_active_entitlement_plan.sql": """
+            SELECT TRUE
+        """,
     }
 
 
