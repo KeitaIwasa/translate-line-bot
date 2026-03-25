@@ -757,7 +757,7 @@ class MessageHandler:
         effective_plan = self._resolve_effective_plan_key(status, entitlement_plan)
         paid = effective_plan in {STANDARD_PLAN, PRO_PLAN}
 
-        portal_url = self._subscription_service.create_portal_url(event.group_id)
+        portal_url = self._subscription_service.create_checkout_url(event.group_id)
         upgrade_url = self._subscription_service.create_checkout_url(event.group_id)
 
         message = build_subscription_menu_message(

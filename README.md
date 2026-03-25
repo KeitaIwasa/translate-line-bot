@@ -283,7 +283,7 @@ sam deploy \
     StageName=stg \
     FunctionMemorySize=512 \
     FunctionTimeout=15 \
-    GeminiModel=gemini-2.5-flash \
+    GeminiModel=gemini-flash-latest \
     MaxContextMessages=20 \
     TranslationRetry=3 \
     RuntimeSecretArn=arn:aws:secretsmanager:ap-northeast-1:215896857123:secret:prod/line-translate-bot-secrets-Uqg35U

@@ -25,7 +25,7 @@ Parameters:
     Description: ARN of the Secrets Manager secret that stores sensitive runtime config (JSON)
   GeminiModel:
     Type: String
-    Default: gemini-2.5-flash
+    Default: gemini-flash-latest
     AllowedPattern: ".+"
     Description: Gemini model name
   MaxContextMessages:

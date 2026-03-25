@@ -1,6 +1,6 @@
 SUBS_MENU_TITLE = "Subscription"
 SUBS_MENU_TEXT = "Manage your plan. Choose an action below."
-SUBS_VIEW_LABEL = "View current plan"
+SUBS_VIEW_LABEL = "Manage billing"
 SUBS_CANCEL_LABEL = "Cancel subscription"
 SUBS_UPGRADE_LABEL = "Upgrade to Pro"
 SUBS_ALREADY_PRO_TEXT = "You are already on the Pro plan."
@@ -9,4 +9,4 @@ SUBS_CANCEL_CONFIRM_TEXT = "Are you sure you want to cancel your subscription? I
 SUBS_CANCEL_DONE_TEXT = "Your subscription has been scheduled to cancel at the end of the current period."
 SUBS_CANCEL_FAIL_TEXT = "Failed to cancel the subscription. Please try again later."
 SUBS_NOT_PRO_TEXT = "You are not on the Pro plan."
-SUBS_OWNER_ONLY_TEXT = "Only the billing owner can manage this subscription."
+SUBS_OWNER_ONLY_TEXT = "Only the billing owner can open billing management."

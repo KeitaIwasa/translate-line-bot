@@ -431,7 +431,7 @@ def _get_interface_translation_service() -> InterfaceTranslationService | None:
         logger.warning("GEMINI_API_KEY missing; skip interface translation")
         return None
 
-    model = settings.gemini_model or "gemini-2.5-flash"
+    model = settings.gemini_model or "gemini-flash-latest"
     timeout_seconds = int(getattr(settings, "gemini_timeout_seconds", 8) or 8)
     adapter = GeminiTranslationAdapter(api_key=api_key, model=model, timeout_seconds=timeout_seconds)
     return InterfaceTranslationService(adapter)

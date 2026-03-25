@@ -119,7 +119,7 @@ def gemini_adapter():
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         pytest.skip("GEMINI_API_KEY is not set; live Gemini test skipped")
-    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    model = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
     return GeminiTranslationAdapter(api_key=api_key, model=model, timeout_seconds=20)
 
 

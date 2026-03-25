@@ -59,7 +59,7 @@ def test_message_cancel_rejects_non_owner():
     )
 
     handler._handle_subscription_cancel(event, "")
-    assert line.last_text == "Only the billing owner can manage this subscription."
+    assert line.last_text == "Only the billing owner can open billing management."
 
 
 def test_postback_cancel_rejects_non_owner():
@@ -85,5 +85,5 @@ def test_postback_cancel_rejects_non_owner():
     )
 
     handler.handle(event)
-    assert line.last_text == "Only the billing owner can manage this subscription."
+    assert line.last_text == "Only the billing owner can open billing management."
     assert line.last_template is None

@@ -35,6 +35,7 @@ def test_subscription_menu_hides_cancel_for_free():
     assert msg is not None
     labels = [a.get("label") for a in msg["template"]["actions"]]
     assert all("Cancel" not in (label or "") for label in labels)
+    assert labels[0] == "Manage billing"
 
 
 def test_subscription_menu_shows_cancel_for_paid():
@@ -55,4 +56,5 @@ def test_subscription_menu_shows_cancel_for_paid():
 
     assert msg is not None
     labels = [a.get("label") for a in msg["template"]["actions"]]
+    assert labels[0] == "Manage billing"
     assert any("Cancel" in (label or "") for label in labels)

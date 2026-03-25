@@ -11,8 +11,8 @@ class Settings:
     line_channel_access_token: str
     gemini_api_key: str
     neon_database_url: str
-    gemini_model: str = "gemini-2.5-flash"
-    command_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-flash-latest"
+    command_model: str = "gemini-flash-latest"
     bot_mention_name: str = "通訳AI"
     max_context_messages: int = 8
     max_group_languages: int = 5
@@ -73,8 +73,8 @@ def get_settings() -> Settings:
         line_channel_access_token=required["LINE_CHANNEL_ACCESS_TOKEN"],
         gemini_api_key=required["GEMINI_API_KEY"],
         neon_database_url=required["NEON_DATABASE_URL"],
-        gemini_model=env.get("GEMINI_MODEL", "gemini-2.5-flash"),
-        command_model=env.get("COMMAND_MODEL", env.get("GEMINI_MODEL", "gemini-2.5-flash")),
+        gemini_model=env.get("GEMINI_MODEL", "gemini-flash-latest"),
+        command_model=env.get("COMMAND_MODEL", env.get("GEMINI_MODEL", "gemini-flash-latest")),
         bot_mention_name=env.get("BOT_MENTION_NAME", "通訳AI"),
         max_context_messages=int(env.get("MAX_CONTEXT_MESSAGES", "8")),
         max_group_languages=int(env.get("MAX_GROUP_LANGUAGES", "5")),
