@@ -350,3 +350,210 @@ def test_portal_returns_401_when_checkout_session_is_missing(monkeypatch):
     event = {"queryStringParameters": {"mode": "portal", "st": "token"}}
     response = module.lambda_handler(event, None)
     assert response["statusCode"] == 401
+
+
+def test_prepare_upgrade_returns_checkout_redirect_without_owner_claim(monkeypatch):
+    module = _import_handler(monkeypatch)
+
+    class _Catalog:
+        @staticmethod
+        def resolve_target(_target):
+            return "price_target_pro"
+
+    class _Repo:
+        owner_updates = []
+
+        @staticmethod
+        def get_subscription_detail(_group_id):
+            return ("cus_123", "sub_123", "active")
+
+        @classmethod
+        def set_billing_owner_user_id(cls, group_id, user_id):  # pragma: no cover - should not be called
+            cls.owner_updates.append((group_id, user_id))
+
+    calls = []
+
+    class _SessionApi:
+        @staticmethod
+        def create(**kwargs):
+            calls.append(kwargs)
+            return types.SimpleNamespace(url="https://billing.stripe.com/session/prepare-upgrade")
+
+    class _SubApi:
+        @staticmethod
+        def retrieve(_sub_id, expand=None):  # noqa: ARG004
+            return {
+                "items": {
+                    "data": [
+                        {
+                            "id": "si_123",
+                            "price": {"id": "price_current_standard"},
+                        }
+                    ]
+                },
+                "status": "active",
+            }
+
+    fake_stripe = types.SimpleNamespace(
+        api_key="",
+        billing_portal=types.SimpleNamespace(Session=_SessionApi),
+        Subscription=_SubApi,
+    )
+
+    monkeypatch.setattr(module, "_authorize_member", lambda _event: _auth(module, _Repo(), line_user_id="U123"))
+    monkeypatch.setattr(module, "build_price_catalog", lambda _settings: _Catalog())
+    monkeypatch.setattr(module, "_import_stripe", lambda: fake_stripe)
+
+    event = {
+        "queryStringParameters": {
+            "mode": "prepare",
+            "st": "token",
+            "cs": "session",
+            "target": "pro_monthly",
+        }
+    }
+    response = module.lambda_handler(event, None)
+
+    assert response["statusCode"] == 200
+    body = json.loads(response["body"])
+    assert body["result"] == "checkout_created"
+    assert body["redirectUrl"] == "https://billing.stripe.com/session/prepare-upgrade"
+    assert calls and calls[0]["flow_data"]["type"] == "subscription_update_confirm"
+    assert _Repo.owner_updates == []
+
+
+def test_prepare_checkout_for_new_subscription(monkeypatch):
+    module = _import_handler(monkeypatch)
+
+    class _Catalog:
+        @staticmethod
+        def resolve_target(_target):
+            return "price_target_standard"
+
+    class _Repo:
+        @staticmethod
+        def get_subscription_detail(_group_id):
+            return (None, None, None)
+
+    calls = []
+
+    class _CheckoutSessionApi:
+        @staticmethod
+        def create(**kwargs):
+            calls.append(kwargs)
+            return types.SimpleNamespace(url="https://checkout.stripe.com/pay/prepare-new")
+
+    fake_stripe = types.SimpleNamespace(
+        api_key="",
+        checkout=types.SimpleNamespace(Session=_CheckoutSessionApi),
+    )
+
+    monkeypatch.setattr(module, "_authorize_member", lambda _event: _auth(module, _Repo(), line_user_id="U777"))
+    monkeypatch.setattr(module, "build_price_catalog", lambda _settings: _Catalog())
+    monkeypatch.setattr(module, "_import_stripe", lambda: fake_stripe)
+
+    event = {
+        "queryStringParameters": {
+            "mode": "prepare",
+            "st": "token",
+            "cs": "session",
+            "target": "standard_monthly",
+        }
+    }
+    response = module.lambda_handler(event, None)
+
+    assert response["statusCode"] == 200
+    body = json.loads(response["body"])
+    assert body["result"] == "checkout_created"
+    assert body["redirectUrl"] == "https://checkout.stripe.com/pay/prepare-new"
+    assert calls[0]["client_reference_id"] == "U777"
+
+
+def test_start_downgrade_returns_checkout_redirect_without_schedule_call(monkeypatch):
+    module = _import_handler(monkeypatch)
+
+    class _Catalog:
+        @staticmethod
+        def resolve_target(_target):
+            return "price_target_standard"
+
+        @staticmethod
+        def resolve_price(price_id):
+            if price_id == "price_current_pro":
+                return types.SimpleNamespace(plan="pro", interval="month", is_grandfathered=False)
+            return None
+
+    class _Repo:
+        owner_updates = []
+
+        @staticmethod
+        def get_subscription_detail(_group_id):
+            return ("cus_123", "sub_123", "active")
+
+        @classmethod
+        def set_billing_owner_user_id(cls, group_id, user_id):
+            cls.owner_updates.append((group_id, user_id))
+
+    portal_calls = []
+    schedule_calls = []
+
+    class _SessionApi:
+        @staticmethod
+        def create(**kwargs):
+            portal_calls.append(kwargs)
+            return types.SimpleNamespace(url="https://billing.stripe.com/session/start-downgrade")
+
+    class _SubApi:
+        @staticmethod
+        def retrieve(_sub_id, expand=None):  # noqa: ARG004
+            return {
+                "items": {
+                    "data": [
+                        {
+                            "id": "si_123",
+                            "price": {"id": "price_current_pro"},
+                        }
+                    ]
+                },
+                "status": "active",
+            }
+
+    class _ScheduleApi:
+        @staticmethod
+        def create(**kwargs):  # pragma: no cover - should not be called
+            schedule_calls.append(("create", kwargs))
+            return {"id": "sub_sched_123"}
+
+        @staticmethod
+        def modify(*args, **kwargs):  # pragma: no cover - should not be called
+            schedule_calls.append(("modify", args, kwargs))
+            return {}
+
+    fake_stripe = types.SimpleNamespace(
+        api_key="",
+        billing_portal=types.SimpleNamespace(Session=_SessionApi),
+        Subscription=_SubApi,
+        SubscriptionSchedule=_ScheduleApi,
+    )
+
+    monkeypatch.setattr(module, "_authorize_member", lambda _event: _auth(module, _Repo(), line_user_id="U123"))
+    monkeypatch.setattr(module, "build_price_catalog", lambda _settings: _Catalog())
+    monkeypatch.setattr(module, "_import_stripe", lambda: fake_stripe)
+
+    event = {
+        "queryStringParameters": {
+            "mode": "start",
+            "st": "token",
+            "cs": "session",
+            "target": "standard_monthly",
+        }
+    }
+    response = module.lambda_handler(event, None)
+
+    assert response["statusCode"] == 200
+    body = json.loads(response["body"])
+    assert body["result"] == "checkout_created"
+    assert body["redirectUrl"] == "https://billing.stripe.com/session/start-downgrade"
+    assert portal_calls and portal_calls[0]["flow_data"]["type"] == "subscription_update_confirm"
+    assert schedule_calls == []
+    assert _Repo.owner_updates == [("gid_1", "U123")]

@@ -48,6 +48,8 @@ def lambda_handler(event: Dict[str, Any], _context) -> Dict[str, Any]:
         return _handle_auth_callback(event)
     if mode == "status":
         return _handle_status(event)
+    if mode == "prepare":
+        return _handle_prepare(event)
     if mode == "start":
         return _handle_start(event)
     if mode == "portal":
@@ -219,64 +221,78 @@ def _handle_start(event: Dict[str, Any]) -> Dict[str, Any]:
 
     _claim_billing_owner_if_needed(auth)
 
-    is_upgrade = _plan_rank(target_plan) > _plan_rank(current_plan)
-    if is_upgrade:
-        hosted_url = _create_upgrade_hosted_url(
-            stripe=stripe,
-            customer_id=customer_id,
-            subscription_id=subscription_id,
-            item_id=current_item_id,
-            target_price_id=target_price_id,
-        )
-        if not hosted_url:
-            return _json_response(500, {"message": "failed to create upgrade checkout session"})
-        return _json_response(200, {"mode": "start", "result": "checkout_created", "redirectUrl": hosted_url})
-
-    scheduled_at = _schedule_subscription_change(
+    hosted_url = _create_subscription_update_hosted_url(
         stripe=stripe,
-        subscription=subscription,
+        customer_id=customer_id,
         subscription_id=subscription_id,
+        item_id=current_item_id,
         target_price_id=target_price_id,
     )
-    if not scheduled_at:
-        return _json_response(500, {"message": "failed to schedule change"})
+    if not hosted_url:
+        message = "failed to create upgrade checkout session" if _plan_rank(target_plan) > _plan_rank(current_plan) else "failed to create downgrade checkout session"
+        return _json_response(500, {"message": message})
+    return _json_response(200, {"mode": "start", "result": "checkout_created", "redirectUrl": hosted_url})
 
-    period_start = _to_datetime(subscription.get("current_period_start"))
-    period_end = _to_datetime(subscription.get("current_period_end"))
-    quota_anchor_day = (period_start or period_end or datetime.now(timezone.utc)).day
-    price_def = catalog.resolve_price(current_price_id)
-    entitlement_plan = (price_def.plan if price_def else current_plan)
-    billing_interval = (price_def.interval if price_def else "month")
-    is_grandfathered = bool(price_def.is_grandfathered) if price_def else False
+
+def _handle_prepare(event: Dict[str, Any]) -> Dict[str, Any]:
+    target_raw = _extract_target(event)
+    target = parse_target_price_key(target_raw)
+    if not target:
+        return _json_response(400, {"message": "target is invalid"})
+
+    auth = _authorize_member(event)
+    if auth.error_response:
+        return auth.error_response
+    if auth.owner_forbidden:
+        return _json_response(403, {"message": OWNER_ONLY_MESSAGE, "reason": "owner_only"})
+
+    stripe = _import_stripe()
+    if not stripe or not settings.stripe_secret_key:
+        logger.warning("Stripe SDK unavailable or secret not set")
+        return _json_response(503, {"message": "Stripe is not available"})
+
+    catalog = build_price_catalog(settings)
+    target_price_id = catalog.resolve_target(target)
+    if not target_price_id:
+        return _json_response(400, {"message": "target price is not configured"})
+
+    stripe.api_key = settings.stripe_secret_key
+    repo = auth.repo
+    customer_id, subscription_id, status = repo.get_subscription_detail(auth.group_id)
+    is_active = status in {"active", "trialing"}
+
+    if (not customer_id) or (not subscription_id) or (not is_active):
+        session_url = _create_checkout_session(
+            stripe=stripe,
+            group_id=auth.group_id,
+            price_id=target_price_id,
+            customer_id=customer_id,
+            line_user_id=auth.line_user_id,
+        )
+        if not session_url:
+            return _json_response(500, {"message": "failed to create checkout session"})
+        return _json_response(200, {"mode": "prepare", "result": "checkout_created", "redirectUrl": session_url})
 
     try:
-        repo.upsert_subscription(
-            auth.group_id,
-            stripe_customer_id=customer_id or "",
-            stripe_subscription_id=subscription_id,
-            status=subscription.get("status") or status or "active",
-            current_period_start=period_start,
-            current_period_end=period_end,
-            stripe_price_id=current_price_id,
-            entitlement_plan=entitlement_plan,
-            billing_interval=billing_interval,
-            is_grandfathered=is_grandfathered,
-            quota_anchor_day=quota_anchor_day,
-            scheduled_target_price_id=target_price_id,
-            scheduled_effective_at=scheduled_at,
-            billing_owner_user_id=auth.line_user_id,
-        )
-    except Exception:  # pylint: disable=broad-except
-        logger.warning("Failed to persist scheduled change to DB", exc_info=True)
+        subscription = stripe.Subscription.retrieve(subscription_id, expand=["items.data.price"])
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("Failed to retrieve subscription for prepare: %s", exc)
+        return _json_response(404, {"message": "subscription not found"})
 
-    return _json_response(
-        200,
-        {
-            "mode": "start",
-            "result": "scheduled",
-            "scheduledEffectiveAt": scheduled_at.isoformat().replace("+00:00", "Z"),
-        },
+    current_price_id, current_item_id = _extract_subscription_item(subscription)
+    if current_price_id == target_price_id:
+        return _json_response(200, {"mode": "prepare", "result": "already_current"})
+
+    hosted_url = _create_subscription_update_hosted_url(
+        stripe=stripe,
+        customer_id=customer_id,
+        subscription_id=subscription_id,
+        item_id=current_item_id,
+        target_price_id=target_price_id,
     )
+    if not hosted_url:
+        return _json_response(500, {"message": "failed to create checkout session"})
+    return _json_response(200, {"mode": "prepare", "result": "checkout_created", "redirectUrl": hosted_url})
 
 
 def _handle_portal(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -511,7 +527,7 @@ def _create_checkout_session(
     return getattr(session, "url", None)
 
 
-def _create_upgrade_hosted_url(
+def _create_subscription_update_hosted_url(
     *,
     stripe,
     customer_id: Optional[str],
