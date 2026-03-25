@@ -68,6 +68,20 @@ class NeonMessageRepository(MessageRepositoryPort):
             return None
         return (row[0] or "").strip() or None
 
+    def is_group_member(self, group_id: str, user_id: str) -> bool:
+        if not group_id or not user_id:
+            return False
+        with self._client.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM group_members
+                WHERE group_id = %s AND user_id = %s
+                """,
+                (group_id, user_id),
+            )
+            return cur.fetchone() is not None
+
     def upsert_group_member_display_name(self, group_id: str, user_id: str, display_name: str) -> None:
         normalized = (display_name or "").strip()
         if not normalized:
@@ -795,6 +809,45 @@ class NeonMessageRepository(MessageRepositoryPort):
             logger.warning("group_subscriptions table missing; subscription detail unavailable", extra={"group_id": group_id})
             return (None, None, None)
 
+    def get_billing_owner_user_id(self, group_id: str) -> Optional[str]:
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT billing_owner_user_id
+                    FROM group_subscriptions
+                    WHERE group_id = %s
+                    """,
+                    (group_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return (row[0] or "").strip() or None
+        except errors.UndefinedColumn:
+            return None
+        except errors.UndefinedTable:
+            logger.warning("group_subscriptions table missing; billing owner unavailable", extra={"group_id": group_id})
+            return None
+
+    def set_billing_owner_user_id(self, group_id: str, user_id: str) -> None:
+        if not group_id or not user_id:
+            return
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE group_subscriptions
+                    SET billing_owner_user_id = %s, updated_at = NOW()
+                    WHERE group_id = %s
+                    """,
+                    (user_id, group_id),
+                )
+        except errors.UndefinedColumn:
+            logger.warning("billing_owner_user_id column missing; cannot update owner", extra={"group_id": group_id})
+        except errors.UndefinedTable:
+            logger.warning("group_subscriptions table missing; cannot update owner", extra={"group_id": group_id})
+
     def upsert_subscription(
         self,
         group_id: str,
@@ -811,6 +864,7 @@ class NeonMessageRepository(MessageRepositoryPort):
         quota_anchor_day: Optional[int] = None,
         scheduled_target_price_id: Optional[str] = None,
         scheduled_effective_at: Optional[datetime] = None,
+        billing_owner_user_id: Optional[str] = None,
     ) -> None:
         try:
             with self._client.cursor() as cur:
@@ -828,11 +882,12 @@ class NeonMessageRepository(MessageRepositoryPort):
                         billing_interval,
                         is_grandfathered,
                         quota_anchor_day,
+                        billing_owner_user_id,
                         scheduled_target_price_id,
                         scheduled_effective_at,
                         created_at,
                         updated_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
                     ON CONFLICT (group_id)
                     DO UPDATE SET
                         stripe_customer_id = EXCLUDED.stripe_customer_id,
@@ -845,6 +900,7 @@ class NeonMessageRepository(MessageRepositoryPort):
                         billing_interval = EXCLUDED.billing_interval,
                         is_grandfathered = EXCLUDED.is_grandfathered,
                         quota_anchor_day = EXCLUDED.quota_anchor_day,
+                        billing_owner_user_id = COALESCE(group_subscriptions.billing_owner_user_id, EXCLUDED.billing_owner_user_id),
                         scheduled_target_price_id = EXCLUDED.scheduled_target_price_id,
                         scheduled_effective_at = EXCLUDED.scheduled_effective_at,
                         updated_at = NOW()
@@ -861,6 +917,7 @@ class NeonMessageRepository(MessageRepositoryPort):
                         billing_interval,
                         is_grandfathered,
                         quota_anchor_day,
+                        billing_owner_user_id,
                         scheduled_target_price_id,
                         scheduled_effective_at,
                     ),

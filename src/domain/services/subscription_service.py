@@ -51,6 +51,7 @@ class SubscriptionService:
         expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
         token = issue_token(
             {
+                "version": 2,
                 "group_id": group_id,
                 "scope": scope,
                 "exp": int(expires_at.timestamp()),

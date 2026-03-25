@@ -116,9 +116,14 @@ Globals:
         SUBSCRIPTION_FRONTEND_BASE_URL: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:SUBSCRIPTION_FRONTEND_BASE_URL}}"
         CHECKOUT_API_BASE_URL: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:CHECKOUT_API_BASE_URL}}"
         SUBSCRIPTION_TOKEN_SECRET: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:SUBSCRIPTION_TOKEN_SECRET}}"
+        CHECKOUT_SESSION_SECRET: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:CHECKOUT_SESSION_SECRET}}"
+        LINE_LOGIN_CHANNEL_ID: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:LINE_LOGIN_CHANNEL_ID}}"
+        LINE_LOGIN_CHANNEL_SECRET: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:LINE_LOGIN_CHANNEL_SECRET}}"
+        LINE_LOGIN_REDIRECT_URI: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:LINE_LOGIN_REDIRECT_URI}}"
         MESSAGE_ENCRYPTION_KEY: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:MESSAGE_ENCRYPTION_KEY}}"
         OPENAI_API_KEY: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:OPENAI_API_KEY}}"
         OPENAI_SUPPORT_MODEL: gpt-5.2
+        OPENAI_GROUP_MENTION_MODEL: gpt-5.2
         OPENAI_GUARDRAIL_MODEL: gpt-4.1-mini
         PRIVATE_CHAT_HISTORY_LIMIT: 5
         CONTACT_TO_EMAIL: contact@iwasadigital.com

@@ -9,3 +9,4 @@ SUBS_CANCEL_CONFIRM_TEXT = "Are you sure you want to cancel your subscription? I
 SUBS_CANCEL_DONE_TEXT = "Your subscription has been scheduled to cancel at the end of the current period."
 SUBS_CANCEL_FAIL_TEXT = "Failed to cancel the subscription. Please try again later."
 SUBS_NOT_PRO_TEXT = "You are not on the Pro plan."
+SUBS_OWNER_ONLY_TEXT = "Only the billing owner can manage this subscription."

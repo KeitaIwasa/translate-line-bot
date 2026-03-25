@@ -172,6 +172,14 @@ def _already_applied_checks() -> Dict[str, str]:
         "20260214_backfill_legacy_active_entitlement_plan.sql": """
             SELECT TRUE
         """,
+        "20260325_add_billing_owner_user_id.sql": """
+            SELECT EXISTS (
+              SELECT 1
+              FROM information_schema.columns
+              WHERE table_name = 'group_subscriptions'
+                AND column_name = 'billing_owner_user_id'
+            )
+        """,
     }
 
 

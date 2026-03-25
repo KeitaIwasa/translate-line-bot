@@ -2,6 +2,7 @@ import importlib
 import json
 import sys
 import types
+from urllib.parse import parse_qs, urlparse
 
 
 def _import_handler(monkeypatch):
@@ -11,6 +12,11 @@ def _import_handler(monkeypatch):
     monkeypatch.setenv("NEON_DATABASE_URL", "postgres://example")
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_x")
     monkeypatch.setenv("SUBSCRIPTION_TOKEN_SECRET", "token_secret")
+    monkeypatch.setenv("CHECKOUT_SESSION_SECRET", "checkout_secret")
+    monkeypatch.setenv("SUBSCRIPTION_FRONTEND_BASE_URL", "https://kotori-ai.com")
+    monkeypatch.setenv("LINE_LOGIN_CHANNEL_ID", "2001")
+    monkeypatch.setenv("LINE_LOGIN_CHANNEL_SECRET", "line_secret")
+    monkeypatch.setenv("LINE_LOGIN_REDIRECT_URI", "https://api.example.com/checkout?mode=auth_callback")
     sys.modules.setdefault(
         "psycopg_pool",
         types.SimpleNamespace(ConnectionPool=object),
@@ -24,6 +30,153 @@ def _import_handler(monkeypatch):
     )
     sys.modules.pop("src.checkout_redirect_handler", None)
     return importlib.import_module("src.checkout_redirect_handler")
+
+
+def _auth(module, repo, *, owner_user_id=None, owner_forbidden=False, line_user_id="U123", group_id="gid_1"):
+    return module._CheckoutAuth(  # pylint: disable=protected-access
+        repo=repo,
+        group_id=group_id,
+        line_user_id=line_user_id,
+        owner_user_id=owner_user_id,
+        owner_forbidden=owner_forbidden,
+    )
+
+
+def test_auth_start_redirects_to_line_login(monkeypatch):
+    module = _import_handler(monkeypatch)
+    monkeypatch.setattr(module, "_verify_subscription_token", lambda _token: {"group_id": "gid_1"})
+
+    event = {
+        "queryStringParameters": {
+            "mode": "auth_start",
+            "st": "signed-token",
+            "return_to": "/en/pro.html",
+            "api_base": "https://api.example.com",
+        }
+    }
+    response = module.lambda_handler(event, None)
+
+    assert response["statusCode"] == 302
+    parsed = urlparse(response["headers"]["Location"])
+    query = parse_qs(parsed.query)
+    assert parsed.netloc == "access.line.me"
+    assert query["client_id"] == ["2001"]
+    assert query["redirect_uri"] == ["https://api.example.com/checkout?mode=auth_callback"]
+    assert query["scope"] == ["profile openid"]
+    assert query["state"][0]
+
+
+def test_auth_callback_redirects_back_with_checkout_session(monkeypatch):
+    module = _import_handler(monkeypatch)
+
+    class _Repo:
+        @staticmethod
+        def is_group_member(_group_id, _user_id):
+            return True
+
+    monkeypatch.setattr(
+        module,
+        "verify_token",
+        lambda token, **kwargs: (
+            {"st": "signed-token", "return_to": "/th/pro.html", "api_base": "https://api.example.com"}
+            if kwargs.get("scope") == module.CHECKOUT_OAUTH_STATE_SCOPE
+            else {"group_id": "gid_1"}
+        ),
+    )
+    monkeypatch.setattr(module, "_exchange_line_login_code", lambda _code: "access-token")
+    monkeypatch.setattr(module, "_fetch_line_user_id", lambda _token: "U999")
+    monkeypatch.setattr(module, "_get_repo", lambda: _Repo())
+
+    event = {"queryStringParameters": {"mode": "auth_callback", "code": "abc", "state": "state-token"}}
+    response = module.lambda_handler(event, None)
+
+    assert response["statusCode"] == 302
+    parsed = urlparse(response["headers"]["Location"])
+    query = parse_qs(parsed.query)
+    assert parsed.path == "/th/pro.html"
+    assert query["st"] == ["signed-token"]
+    assert query["cs"][0]
+    assert query["api_base"] == ["https://api.example.com"]
+
+
+def test_auth_callback_redirects_with_not_member_error(monkeypatch):
+    module = _import_handler(monkeypatch)
+
+    class _Repo:
+        @staticmethod
+        def is_group_member(_group_id, _user_id):
+            return False
+
+    monkeypatch.setattr(
+        module,
+        "verify_token",
+        lambda token, **kwargs: (
+            {"st": "signed-token", "return_to": "/pro.html", "api_base": ""}
+            if kwargs.get("scope") == module.CHECKOUT_OAUTH_STATE_SCOPE
+            else {"group_id": "gid_1"}
+        ),
+    )
+    monkeypatch.setattr(module, "_exchange_line_login_code", lambda _code: "access-token")
+    monkeypatch.setattr(module, "_fetch_line_user_id", lambda _token: "U999")
+    monkeypatch.setattr(module, "_get_repo", lambda: _Repo())
+
+    event = {"queryStringParameters": {"mode": "auth_callback", "code": "abc", "state": "state-token"}}
+    response = module.lambda_handler(event, None)
+
+    assert response["statusCode"] == 302
+    parsed = urlparse(response["headers"]["Location"])
+    query = parse_qs(parsed.query)
+    assert query["error"] == ["not_member"]
+
+
+def test_status_returns_translation_count_for_current_period(monkeypatch):
+    module = _import_handler(monkeypatch)
+
+    class _Repo:
+        @staticmethod
+        def get_subscription_plan(_group_id):
+            return (
+                "active",
+                "standard",
+                "month",
+                False,
+                "price_standard_monthly",
+                module._to_datetime(1771000000),  # pylint: disable=protected-access
+                module._to_datetime(1773600000),  # pylint: disable=protected-access
+                14,
+                None,
+                None,
+            )
+
+        @staticmethod
+        def get_usage(_group_id, period_key):
+            assert period_key == "2026-02-13"
+            return 123
+
+    monkeypatch.setattr(module, "_get_repo", lambda: _Repo())
+    monkeypatch.setattr(module, "_authorize_member", lambda _event: _auth(module, _Repo(), owner_user_id="U123"))
+
+    event = {"queryStringParameters": {"mode": "status", "st": "token", "cs": "session"}}
+    response = module.lambda_handler(event, None)
+    assert response["statusCode"] == 200
+
+    body = json.loads(response["body"])
+    assert body["effectivePlan"] == "standard"
+    assert body["periodKey"] == "2026-02-13"
+    assert body["translationCount"] == 123
+    assert body["isBillingOwner"] is True
+
+
+def test_start_requires_billing_owner_for_existing_subscription(monkeypatch):
+    module = _import_handler(monkeypatch)
+    monkeypatch.setattr(module, "_authorize_member", lambda _event: _auth(module, object(), owner_user_id="U999", owner_forbidden=True))
+
+    event = {"queryStringParameters": {"mode": "start", "st": "token", "cs": "session", "target": "pro_monthly"}}
+    response = module.lambda_handler(event, None)
+
+    assert response["statusCode"] == 403
+    body = json.loads(response["body"])
+    assert body["reason"] == "owner_only"
 
 
 def test_start_upgrade_returns_checkout_redirect_for_active_subscription(monkeypatch):
@@ -41,6 +194,8 @@ def test_start_upgrade_returns_checkout_redirect_for_active_subscription(monkeyp
             return None
 
     class _Repo:
+        owner_updates = []
+
         @staticmethod
         def get_subscription_detail(_group_id):
             return ("cus_123", "sub_123", "active")
@@ -48,6 +203,10 @@ def test_start_upgrade_returns_checkout_redirect_for_active_subscription(monkeyp
         @staticmethod
         def get_subscription_plan(_group_id):
             return ("active", "standard", "month", False, None, None, None, None, None, None)
+
+        @classmethod
+        def set_billing_owner_user_id(cls, group_id, user_id):
+            cls.owner_updates.append((group_id, user_id))
 
     calls = []
 
@@ -80,15 +239,15 @@ def test_start_upgrade_returns_checkout_redirect_for_active_subscription(monkeyp
         Subscription=_SubApi,
     )
 
-    monkeypatch.setattr(module, "verify_token", lambda *_args, **_kwargs: {"group_id": "gid_1"})
+    monkeypatch.setattr(module, "_authorize_member", lambda _event: _auth(module, _Repo(), line_user_id="U123"))
     monkeypatch.setattr(module, "build_price_catalog", lambda _settings: _Catalog())
-    monkeypatch.setattr(module, "_get_repo", lambda: _Repo())
     monkeypatch.setattr(module, "_import_stripe", lambda: fake_stripe)
 
     event = {
         "queryStringParameters": {
             "mode": "start",
             "st": "token",
+            "cs": "session",
             "target": "pro_monthly",
         }
     }
@@ -99,43 +258,55 @@ def test_start_upgrade_returns_checkout_redirect_for_active_subscription(monkeyp
     assert body["result"] == "checkout_created"
     assert body["redirectUrl"] == "https://billing.stripe.com/session/test"
     assert calls and calls[0]["flow_data"]["type"] == "subscription_update_confirm"
+    assert _Repo.owner_updates == [("gid_1", "U123")]
 
 
-def test_status_returns_translation_count_for_current_period(monkeypatch):
+def test_start_checkout_includes_line_user_id_for_new_subscription(monkeypatch):
     module = _import_handler(monkeypatch)
+
+    class _Catalog:
+        @staticmethod
+        def resolve_target(_target):
+            return "price_target_standard"
 
     class _Repo:
         @staticmethod
-        def get_subscription_plan(_group_id):
-            return (
-                "active",
-                "standard",
-                "month",
-                False,
-                "price_standard_monthly",
-                module._to_datetime(1771000000),
-                module._to_datetime(1773600000),
-                14,
-                None,
-                None,
-            )
+        def get_subscription_detail(_group_id):
+            return (None, None, None)
 
+    calls = []
+
+    class _CheckoutSessionApi:
         @staticmethod
-        def get_usage(_group_id, period_key):
-            assert period_key == "2026-02-13"
-            return 123
+        def create(**kwargs):
+            calls.append(kwargs)
+            return types.SimpleNamespace(url="https://checkout.stripe.com/pay/test")
 
-    monkeypatch.setattr(module, "verify_token", lambda *_args, **_kwargs: {"group_id": "gid_1"})
-    monkeypatch.setattr(module, "_get_repo", lambda: _Repo())
+    fake_stripe = types.SimpleNamespace(
+        api_key="",
+        checkout=types.SimpleNamespace(Session=_CheckoutSessionApi),
+    )
 
-    event = {"queryStringParameters": {"mode": "status", "st": "token"}}
+    monkeypatch.setattr(module, "_authorize_member", lambda _event: _auth(module, _Repo(), line_user_id="U777"))
+    monkeypatch.setattr(module, "build_price_catalog", lambda _settings: _Catalog())
+    monkeypatch.setattr(module, "_import_stripe", lambda: fake_stripe)
+
+    event = {
+        "queryStringParameters": {
+            "mode": "start",
+            "st": "token",
+            "cs": "session",
+            "target": "standard_monthly",
+        }
+    }
     response = module.lambda_handler(event, None)
-    assert response["statusCode"] == 200
 
+    assert response["statusCode"] == 200
     body = json.loads(response["body"])
-    assert body["effectivePlan"] == "standard"
-    assert body["periodKey"] == "2026-02-13"
-    assert body["translationCount"] == 123
+    assert body["redirectUrl"] == "https://checkout.stripe.com/pay/test"
+    assert calls[0]["metadata"]["line_user_id"] == "U777"
+    assert calls[0]["subscription_data"]["metadata"]["line_user_id"] == "U777"
+    assert calls[0]["client_reference_id"] == "U777"
 
 
 def test_portal_returns_billing_portal_url(monkeypatch):
@@ -159,11 +330,10 @@ def test_portal_returns_billing_portal_url(monkeypatch):
         billing_portal=types.SimpleNamespace(Session=_SessionApi),
     )
 
-    monkeypatch.setattr(module, "verify_token", lambda *_args, **_kwargs: {"group_id": "gid_1"})
-    monkeypatch.setattr(module, "_get_repo", lambda: _Repo())
+    monkeypatch.setattr(module, "_authorize_member", lambda _event: _auth(module, _Repo(), owner_user_id="U123"))
     monkeypatch.setattr(module, "_import_stripe", lambda: fake_stripe)
 
-    event = {"queryStringParameters": {"mode": "portal", "st": "token"}}
+    event = {"queryStringParameters": {"mode": "portal", "st": "token", "cs": "session"}}
     response = module.lambda_handler(event, None)
     assert response["statusCode"] == 200
 
@@ -173,13 +343,9 @@ def test_portal_returns_billing_portal_url(monkeypatch):
     assert calls and calls[0]["customer"] == "cus_123"
 
 
-def test_portal_returns_401_when_token_is_invalid(monkeypatch):
+def test_portal_returns_401_when_checkout_session_is_missing(monkeypatch):
     module = _import_handler(monkeypatch)
-
-    def _raise_token_error(*_args, **_kwargs):
-        raise module.TokenError("invalid token")
-
-    monkeypatch.setattr(module, "verify_token", _raise_token_error)
+    monkeypatch.setattr(module, "_verify_subscription_token", lambda _token: {"group_id": "gid_1"})
 
     event = {"queryStringParameters": {"mode": "portal", "st": "token"}}
     response = module.lambda_handler(event, None)

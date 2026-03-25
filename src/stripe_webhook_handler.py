@@ -196,6 +196,7 @@ def _sync_subscription(group_id: str, subscription: Dict[str, Any], *, status_ov
 
     customer_id = str(subscription.get("customer") or "")
     subscription_id = str(subscription.get("id") or "")
+    billing_owner_user_id = _extract_line_user_id(subscription, subscription)
 
     _upsert_subscription(
         group_id=group_id,
@@ -209,6 +210,7 @@ def _sync_subscription(group_id: str, subscription: Dict[str, Any], *, status_ov
         billing_interval=billing_interval,
         is_grandfathered=is_grandfathered,
         quota_anchor_day=quota_anchor_day,
+        billing_owner_user_id=billing_owner_user_id,
     )
 
 
@@ -239,6 +241,19 @@ def _extract_group_id(primary_obj: Dict[str, Any], fallback_obj: Dict[str, Any])
     return None
 
 
+def _extract_line_user_id(primary_obj: Dict[str, Any], fallback_obj: Dict[str, Any]) -> Optional[str]:
+    meta = primary_obj.get("metadata") or {}
+    user_id = meta.get("line_user_id") if isinstance(meta, dict) else None
+    if user_id:
+        return str(user_id)
+    fallback_meta = fallback_obj.get("metadata") or {}
+    if isinstance(fallback_meta, dict):
+        fallback_user = fallback_meta.get("line_user_id")
+        if fallback_user:
+            return str(fallback_user)
+    return None
+
+
 def _to_datetime(value: Any) -> Optional[datetime]:
     if isinstance(value, (int, float)):
         return datetime.fromtimestamp(value, tz=timezone.utc)
@@ -262,6 +277,7 @@ def _upsert_subscription(
     billing_interval: str,
     is_grandfathered: bool,
     quota_anchor_day: Optional[int],
+    billing_owner_user_id: Optional[str],
 ) -> None:
     dsn = settings.neon_database_url
     query_subscription = """
@@ -277,11 +293,12 @@ def _upsert_subscription(
             billing_interval,
             is_grandfathered,
             quota_anchor_day,
+            billing_owner_user_id,
             scheduled_target_price_id,
             scheduled_effective_at,
             created_at,
             updated_at
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, NULL, NOW(), NOW())
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, NULL, NOW(), NOW())
         ON CONFLICT (group_id)
         DO UPDATE SET
             stripe_customer_id = EXCLUDED.stripe_customer_id,
@@ -294,6 +311,7 @@ def _upsert_subscription(
             billing_interval = EXCLUDED.billing_interval,
             is_grandfathered = EXCLUDED.is_grandfathered,
             quota_anchor_day = EXCLUDED.quota_anchor_day,
+            billing_owner_user_id = COALESCE(group_subscriptions.billing_owner_user_id, EXCLUDED.billing_owner_user_id),
             scheduled_target_price_id = EXCLUDED.scheduled_target_price_id,
             scheduled_effective_at = EXCLUDED.scheduled_effective_at,
             updated_at = NOW()
@@ -315,6 +333,7 @@ def _upsert_subscription(
                     billing_interval,
                     is_grandfathered,
                     quota_anchor_day,
+                    billing_owner_user_id,
                 ),
             )
 

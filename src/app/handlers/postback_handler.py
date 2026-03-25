@@ -9,7 +9,13 @@ from ...domain.services.interface_translation_service import InterfaceTranslatio
 from ...domain.services.subscription_service import SubscriptionService
 from ...domain.services.language_settings_service import LanguageSettingsService
 from ...presentation.reply_formatter import strip_source_echo
-from ..subscription_texts import SUBS_CANCEL_CONFIRM_TEXT, SUBS_CANCEL_DONE_TEXT, SUBS_CANCEL_FAIL_TEXT, SUBS_NOT_PRO_TEXT
+from ..subscription_texts import (
+    SUBS_CANCEL_CONFIRM_TEXT,
+    SUBS_CANCEL_DONE_TEXT,
+    SUBS_CANCEL_FAIL_TEXT,
+    SUBS_NOT_PRO_TEXT,
+    SUBS_OWNER_ONLY_TEXT,
+)
 from ..subscription_postback import decode_postback_payload
 from ..subscription_templates import build_subscription_cancel_confirm
 
@@ -177,6 +183,11 @@ class PostbackHandler:
             return
 
         instruction_lang = payload.get("instruction_lang", "")
+        if not self._can_manage_subscription(group_id, event.user_id):
+            message = self._translate_for_instruction_lang(SUBS_OWNER_ONLY_TEXT, instruction_lang, group_id)
+            if event.reply_token:
+                self._line.reply_text(event.reply_token, message)
+            return
         customer_id, subscription_id, status = getattr(self._repo, "get_subscription_detail", lambda *_: (None, None, None))(group_id)
         active = status in {"active", "trialing"}
 
@@ -218,6 +229,15 @@ class PostbackHandler:
             else:
                 if event.reply_token:
                     self._line.reply_text(event.reply_token, self._build_multilingual_message(SUBS_CANCEL_FAIL_TEXT, group_id))
+
+    def _can_manage_subscription(self, group_id: str, user_id: str | None) -> bool:
+        if not user_id:
+            return False
+        owner_id = getattr(self._repo, "get_billing_owner_user_id", lambda *_: None)(group_id)
+        if owner_id:
+            return owner_id == user_id
+        is_member = getattr(self._repo, "is_group_member", lambda *_: True)(group_id, user_id)
+        return bool(is_member)
 
 def _build_completion_message(languages) -> str:
     names = [name or code for code, name in languages if code]

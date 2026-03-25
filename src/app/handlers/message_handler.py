@@ -33,6 +33,7 @@ from ...presentation.reply_formatter import (
 from ..subscription_texts import (
     SUBS_CANCEL_CONFIRM_TEXT,
     SUBS_NOT_PRO_TEXT,
+    SUBS_OWNER_ONLY_TEXT,
     SUBS_UPGRADE_LINK_FAIL,
 )
 from ..subscription_templates import (
@@ -73,6 +74,7 @@ UNKNOWN_INSTRUCTION_BASE = (
     "To interact with this bot, please mention it again and provide one of the following commands:\n"
     "- Change language settings\n- How to use\n- Stop translation\n- Subscription management"
 )
+COMMAND_ROUTER_ERROR_BASE = "Sorry, I couldn't process that request right now. Please try again shortly."
 
 LANGUAGE_LIMIT_MESSAGE_EN = "You can set up to {limit} translation languages. Please specify {limit} or fewer."
 PRIVATE_ASSISTANT_USER_ID = "__assistant__"
@@ -303,15 +305,15 @@ class MessageHandler:
         return stripped or ""
 
     def _handle_command(self, event: models.MessageEvent, command_text: str) -> bool:
-        lang_future: Future[List[str]] | None = None
         instr_future: Future[str] | None = None
         try:
-            lang_future = self._executor.submit(self._fetch_and_limit_languages, event.group_id)
             instr_future = self._executor.submit(self._lang_detector.detect, command_text)
         except Exception:
             logger.debug("Executor submission failed; fallback to sync", exc_info=True)
 
-        decision = self._command_router.decide(command_text)
+        runtime = self._fetch_command_runtime_state(event.group_id)
+        router_input = self._build_command_router_input(command_text, runtime)
+        decision = self._command_router.decide(router_input)
         action = decision.action or "unknown"
         instruction_lang = decision.instruction_language
         if not instruction_lang and instr_future:
@@ -320,34 +322,38 @@ class MessageHandler:
             except Exception:
                 logger.debug("Instruction language detect failed", exc_info=True)
                 instruction_lang = decision.instruction_language
+        if not instruction_lang and command_text:
+            try:
+                instruction_lang = self._lang_detector.detect(command_text)
+            except Exception:
+                logger.debug("Instruction language detect failed (sync)", exc_info=True)
+
+        if action == "error":
+            message = self._build_command_router_error_message(instruction_lang)
+            self._reply_text(event, message)
+            return True
 
         if action == "language_settings":
             return self._handle_language_settings(event, decision, command_text)
 
         if action == "howto":
-            langs: Optional[List[str]] = None
-            if lang_future:
-                try:
-                    langs = lang_future.result()
-                except Exception:
-                    logger.debug("Language fetch future failed", exc_info=True)
-            message = self._build_usage_response(instruction_lang or decision.instruction_language, event.group_id, precomputed_languages=langs)
+            message = (decision.ack_text or "").strip()
+            if not message:
+                message = self._build_usage_response(instruction_lang or decision.instruction_language, event.group_id)
             self._reply_text(event, message)
-            # 説明後は翻訳を再開
-            self._repo.set_translation_enabled(event.group_id, True)
             return True
 
         if action == "pause":
             self._repo.set_translation_enabled(event.group_id, False)
             base_ack = "I will pause translation. Please mention me again when you want to resume."
-            ack = self._build_multilingual_interface_message(base_ack, event.group_id)
+            ack = decision.ack_text or self._safe_translate_for_instruction(base_ack, instruction_lang)
             self._reply_text(event, ack)
             return True
 
         if action == "resume":
             self._repo.set_translation_enabled(event.group_id, True)
             base_ack = "I will resume the translation."
-            ack = self._build_multilingual_interface_message(base_ack, event.group_id)
+            ack = decision.ack_text or self._safe_translate_for_instruction(base_ack, instruction_lang)
             self._reply_text(event, ack)
             return True
 
@@ -361,6 +367,106 @@ class MessageHandler:
             return self._handle_subscription_upgrade(event, instruction_lang or decision.instruction_language)
 
         return self._respond_unknown_instruction(event, instruction_lang or decision.instruction_language, command_text)
+
+    def _fetch_command_runtime_state(self, group_id: str) -> models.TranslationRuntimeState:
+        fetcher = getattr(self._repo, "fetch_translation_runtime_state", None)
+        if fetcher:
+            try:
+                return fetcher(group_id)
+            except Exception:
+                logger.debug("Failed to fetch runtime state for command", exc_info=True)
+
+        status: Optional[str] = None
+        period_start: Optional[datetime] = None
+        period_end: Optional[datetime] = None
+        try:
+            status, period_start, period_end = getattr(
+                self._repo,
+                "get_subscription_period",
+                lambda *_: (None, None, None),
+            )(group_id)
+        except Exception:
+            logger.debug("Failed to fetch subscription period for command runtime", exc_info=True)
+
+        plan_key = self._resolve_effective_plan_key(status, FREE_PLAN)
+        period_key = self._current_period_key(
+            plan_key=plan_key,
+            period_start=period_start,
+            period_end=period_end,
+            quota_anchor_day=None,
+        )
+        usage = 0
+        try:
+            usage = int(getattr(self._repo, "get_usage", lambda *_: 0)(group_id, period_key) or 0)
+        except Exception:
+            logger.debug("Failed to fetch usage for command runtime", exc_info=True)
+
+        translation_enabled = True
+        try:
+            translation_enabled = bool(getattr(self._repo, "is_translation_enabled", lambda *_: True)(group_id))
+        except Exception:
+            logger.debug("Failed to fetch translation_enabled for command runtime", exc_info=True)
+
+        try:
+            languages = list(getattr(self._repo, "fetch_group_languages", lambda *_: [])(group_id))
+        except Exception:
+            logger.debug("Failed to fetch languages for command runtime", exc_info=True)
+            languages = []
+
+        return models.TranslationRuntimeState(
+            translation_enabled=translation_enabled,
+            group_languages=languages,
+            subscription_status=status,
+            period_start=period_start,
+            period_end=period_end,
+            period_key=period_key,
+            usage=usage,
+            limit_notice_plan=None,
+            entitlement_plan=plan_key,
+            billing_interval="month",
+            is_grandfathered=False,
+            quota_anchor_day=None,
+            scheduled_target_price_id=None,
+            scheduled_effective_at=None,
+        )
+
+    def _build_command_router_input(self, command_text: str, runtime: models.TranslationRuntimeState) -> str:
+        effective_plan = self._resolve_effective_plan_key(runtime.subscription_status, runtime.entitlement_plan)
+        payload = {
+            "user_message": command_text,
+            "subscription_status": runtime.subscription_status or "",
+            "effective_plan": effective_plan,
+            "usage_this_cycle": int(runtime.usage or 0),
+            "next_reset_at_utc": self._resolve_next_reset_at_utc(runtime),
+            "current_languages": self._dedup_language_codes(runtime.group_languages),
+            "translation_enabled": bool(runtime.translation_enabled),
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
+    def _resolve_next_reset_at_utc(self, runtime: models.TranslationRuntimeState) -> str:
+        if runtime.period_end:
+            return runtime.period_end.astimezone(timezone.utc).isoformat()
+        reset_date = self._resolve_quota_reset_date(
+            period_key=runtime.period_key,
+            period_end=runtime.period_end,
+        )
+        if not reset_date:
+            return ""
+        return f"{reset_date}T00:00:00+00:00"
+
+    def _build_command_router_error_message(self, instruction_lang: str) -> str:
+        return self._safe_translate_for_instruction(COMMAND_ROUTER_ERROR_BASE, instruction_lang)
+
+    def _safe_translate_for_instruction(self, base_text: str, instruction_lang: str) -> str:
+        if not instruction_lang or instruction_lang.lower().startswith("en"):
+            return base_text
+        try:
+            translated = self._translate_template(base_text, instruction_lang, force=True)
+            if isinstance(translated, str) and translated.strip():
+                return translated
+        except Exception:
+            logger.debug("Failed to translate command reply", exc_info=True)
+        return base_text
 
     def _handle_language_settings(
         self,
@@ -678,6 +784,10 @@ class MessageHandler:
         return True
 
     def _handle_subscription_cancel(self, event: models.MessageEvent, instruction_lang: str) -> bool:
+        if not self._can_manage_subscription(event.group_id, event.user_id):
+            message = self._translate_interface_single(SUBS_OWNER_ONLY_TEXT, instruction_lang, event.group_id)
+            self._reply_text(event, message)
+            return True
         customer_id, subscription_id, status = getattr(self._repo, "get_subscription_detail", lambda *_: (None, None, None))(
             event.group_id
         )
@@ -697,6 +807,15 @@ class MessageHandler:
         if confirm:
             self._reply_messages(event, [confirm])
         return True
+
+    def _can_manage_subscription(self, group_id: str, user_id: str | None) -> bool:
+        if not user_id:
+            return False
+        owner_id = getattr(self._repo, "get_billing_owner_user_id", lambda *_: None)(group_id)
+        if owner_id:
+            return owner_id == user_id
+        is_member = getattr(self._repo, "is_group_member", lambda *_: True)(group_id, user_id)
+        return bool(is_member)
 
     def _handle_subscription_upgrade(self, event: models.MessageEvent, instruction_lang: str) -> bool:
         # 比較ページのURLを返す（ページ内でプラン選択）
