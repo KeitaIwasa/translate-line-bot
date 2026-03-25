@@ -58,12 +58,7 @@ class SubscriptionService:
             },
             secret=self._subscription_token_secret,
         )
-        api_base = (
-            f"&api_base={quote_plus(self._checkout_api_base_url)}"
-            if self._checkout_api_base_url
-            else ""
-        )
-        return f"{self._subscription_frontend_base_url}{page_path}?st={quote_plus(token)}{api_base}"
+        return f"{self._subscription_frontend_base_url}{page_path}?st={quote_plus(token)}"
 
     def _create_legacy_checkout_url(self, group_id: str) -> Optional[str]:
         stripe = self._load_stripe()
@@ -87,18 +82,12 @@ class SubscriptionService:
 
             if self._subscription_frontend_base_url and session_id:
                 # 事前案内ページへ遷移させ、ページ内ボタンから Checkout に進ませる
-                api_base_param = (
-                    f"&api_base={quote_plus(self._checkout_api_base_url)}"
-                    if self._checkout_api_base_url
-                    else ""
-                )
-                # api_base が設定されていれば /checkout リダイレクト経由で短いURLを返す。
-                # 未設定の環境では Stripe の checkout_url を保持しつつ従来挙動を維持する。
+                # /api 経由の同一オリジン呼び出しに統一するため、api_base クエリは付与しない。
                 checkout_param = ""
                 if (not self._checkout_api_base_url) and checkout_url:
                     checkout_param = f"&checkout_url={quote_plus(checkout_url)}"
 
-                return f"{self._subscription_frontend_base_url}/pro.html?session_id={session_id}{api_base_param}{checkout_param}"
+                return f"{self._subscription_frontend_base_url}/pro.html?session_id={session_id}{checkout_param}"
 
             return checkout_url
         except Exception as exc:  # pylint: disable=broad-except
@@ -135,15 +124,10 @@ class SubscriptionService:
         if not self._subscription_frontend_base_url:
             return "https://line.me/R/nv/chat"
 
-        api_base = (
-            f"&api_base={quote_plus(self._checkout_api_base_url)}"
-            if self._checkout_api_base_url
-            else ""
-        )
         # {CHECKOUT_SESSION_ID} は Stripe 側で実セッション ID に置換される
         return (
             f"{self._subscription_frontend_base_url}/pro.html"
-            f"?session_id={{CHECKOUT_SESSION_ID}}{api_base}"
+            f"?session_id={{CHECKOUT_SESSION_ID}}"
         )
 
     def cancel_subscription(self, group_id: str) -> bool:

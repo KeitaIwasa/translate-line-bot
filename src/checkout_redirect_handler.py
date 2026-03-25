@@ -41,6 +41,7 @@ ALLOWED_RETURN_PATHS = {"/pro.html", "/en/pro.html", "/zh-tw/pro.html", "/th/pro
 
 
 def lambda_handler(event: Dict[str, Any], _context) -> Dict[str, Any]:
+    _warn_if_deprecated_api_base(event)
     mode = _extract_mode(event)
 
     if mode == "auth_start":
@@ -81,7 +82,6 @@ def _handle_auth_start(event: Dict[str, Any]) -> Dict[str, Any]:
             "st": token,
             "nonce": secrets.token_urlsafe(16),
             "return_to": _extract_return_to(event),
-            "api_base": _extract_api_base(event),
             "exp": int((datetime.now(timezone.utc) + timedelta(minutes=10)).timestamp()),
         },
         secret=_checkout_session_secret(),
@@ -132,7 +132,6 @@ def _handle_auth_callback(event: Dict[str, Any]) -> Dict[str, Any]:
                 token=token,
                 checkout_session=None,
                 return_to=_sanitize_return_to(state_payload.get("return_to")),
-                api_base=(state_payload.get("api_base") or ""),
                 error="not_member",
             )
         )
@@ -151,7 +150,6 @@ def _handle_auth_callback(event: Dict[str, Any]) -> Dict[str, Any]:
             token=token,
             checkout_session=checkout_session,
             return_to=_sanitize_return_to(state_payload.get("return_to")),
-            api_base=(state_payload.get("api_base") or ""),
         )
     )
 
@@ -710,10 +708,6 @@ def _extract_return_to(event: Dict[str, Any]) -> str:
     return _sanitize_return_to(_query_params(event).get("return_to"))
 
 
-def _extract_api_base(event: Dict[str, Any]) -> str:
-    return (_query_params(event).get("api_base") or _query_params(event).get("apiBase") or "").strip()
-
-
 def _extract_query_param(event: Dict[str, Any], key: str) -> Optional[str]:
     value = _query_params(event).get(key)
     return (value or "").strip() or None
@@ -746,7 +740,6 @@ def _build_frontend_url(
     token: str,
     checkout_session: Optional[str],
     return_to: str,
-    api_base: str,
     error: Optional[str] = None,
 ) -> str:
     base_url = settings.subscription_frontend_base_url.rstrip("/")
@@ -759,8 +752,6 @@ def _build_frontend_url(
     params = [("st", token)]
     if checkout_session:
         params.append(("cs", checkout_session))
-    if api_base:
-        params.append(("api_base", api_base))
     if error:
         params.append(("error", error))
     return f"{url}?{urlencode(params)}"
@@ -807,7 +798,6 @@ def _redirect_response(location: str) -> Dict[str, Any]:
         "statusCode": 302,
         "headers": {
             "Location": location,
-            "Access-Control-Allow-Origin": "*",
         },
         "body": "",
     }
@@ -818,7 +808,14 @@ def _json_response(status: int, body: Dict[str, Any]) -> Dict[str, Any]:
         "statusCode": status,
         "headers": {
             "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
         },
         "body": json.dumps(body, ensure_ascii=False),
     }
+
+
+def _warn_if_deprecated_api_base(event: Dict[str, Any]) -> None:
+    params = _query_params(event)
+    value = (params.get("api_base") or params.get("apiBase") or "").strip()
+    if not value:
+        return
+    logger.warning("Deprecated query parameter ignored: api_base")

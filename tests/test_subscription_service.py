@@ -98,7 +98,7 @@ def test_build_subscription_summary_text_defaults_to_pro_when_plan_unspecified()
     assert text == "Plan: Pro (active)"
 
 
-def test_create_checkout_url_token_flow_includes_api_base():
+def test_create_checkout_url_token_flow_has_only_signed_token():
     repo = _RepoStub()
     service = SubscriptionService(
         repo,
@@ -115,10 +115,10 @@ def test_create_checkout_url_token_flow_includes_api_base():
     query = parse_qs(parsed.query)
     assert parsed.path == "/pro.html"
     assert "st" in query and query["st"][0]
-    assert query.get("api_base") == ["https://api.example.com/prod"]
+    assert "api_base" not in query
 
 
-def test_create_checkout_url_token_flow_omits_api_base_when_unset():
+def test_create_checkout_url_token_flow_still_works_without_api_base():
     repo = _RepoStub()
     service = SubscriptionService(
         repo,

@@ -52,7 +52,6 @@ def test_auth_start_redirects_to_line_login(monkeypatch):
             "mode": "auth_start",
             "st": "signed-token",
             "return_to": "/en/pro.html",
-            "api_base": "https://api.example.com",
         }
     }
     response = module.lambda_handler(event, None)
@@ -67,6 +66,29 @@ def test_auth_start_redirects_to_line_login(monkeypatch):
     assert query["state"][0]
 
 
+def test_auth_start_ignores_api_base_with_warning(monkeypatch):
+    module = _import_handler(monkeypatch)
+    monkeypatch.setattr(module, "_verify_subscription_token", lambda _token: {"group_id": "gid_1"})
+    warned = {}
+
+    def _capture_warning(message, *args, **kwargs):  # noqa: ARG001
+        warned["message"] = message
+
+    monkeypatch.setattr(module.logger, "warning", _capture_warning)
+
+    event = {
+        "queryStringParameters": {
+            "mode": "auth_start",
+            "st": "signed-token",
+            "api_base": "https://attacker.example",
+        }
+    }
+    response = module.lambda_handler(event, None)
+
+    assert response["statusCode"] == 302
+    assert warned["message"] == "Deprecated query parameter ignored: api_base"
+
+
 def test_auth_callback_redirects_back_with_checkout_session(monkeypatch):
     module = _import_handler(monkeypatch)
 
@@ -79,7 +101,7 @@ def test_auth_callback_redirects_back_with_checkout_session(monkeypatch):
         module,
         "verify_token",
         lambda token, **kwargs: (
-            {"st": "signed-token", "return_to": "/th/pro.html", "api_base": "https://api.example.com"}
+            {"st": "signed-token", "return_to": "/th/pro.html"}
             if kwargs.get("scope") == module.CHECKOUT_OAUTH_STATE_SCOPE
             else {"group_id": "gid_1"}
         ),
@@ -97,7 +119,6 @@ def test_auth_callback_redirects_back_with_checkout_session(monkeypatch):
     assert parsed.path == "/th/pro.html"
     assert query["st"] == ["signed-token"]
     assert query["cs"][0]
-    assert query["api_base"] == ["https://api.example.com"]
 
 
 def test_auth_callback_redirects_with_not_member_error(monkeypatch):
@@ -112,7 +133,7 @@ def test_auth_callback_redirects_with_not_member_error(monkeypatch):
         module,
         "verify_token",
         lambda token, **kwargs: (
-            {"st": "signed-token", "return_to": "/pro.html", "api_base": ""}
+            {"st": "signed-token", "return_to": "/pro.html"}
             if kwargs.get("scope") == module.CHECKOUT_OAUTH_STATE_SCOPE
             else {"group_id": "gid_1"}
         ),
@@ -137,7 +158,7 @@ def test_auth_callback_returns_401_when_line_token_exchange_http_error(monkeypat
         module,
         "verify_token",
         lambda token, **kwargs: (
-            {"st": "signed-token", "return_to": "/pro.html", "api_base": ""}
+            {"st": "signed-token", "return_to": "/pro.html"}
             if kwargs.get("scope") == module.CHECKOUT_OAUTH_STATE_SCOPE
             else {"group_id": "gid_1"}
         ),
@@ -163,7 +184,7 @@ def test_auth_callback_returns_401_when_line_profile_fetch_url_error(monkeypatch
         module,
         "verify_token",
         lambda token, **kwargs: (
-            {"st": "signed-token", "return_to": "/pro.html", "api_base": ""}
+            {"st": "signed-token", "return_to": "/pro.html"}
             if kwargs.get("scope") == module.CHECKOUT_OAUTH_STATE_SCOPE
             else {"group_id": "gid_1"}
         ),
