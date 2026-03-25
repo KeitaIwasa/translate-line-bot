@@ -2,6 +2,7 @@ import importlib
 import json
 import sys
 import types
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 
 
@@ -127,6 +128,59 @@ def test_auth_callback_redirects_with_not_member_error(monkeypatch):
     parsed = urlparse(response["headers"]["Location"])
     query = parse_qs(parsed.query)
     assert query["error"] == ["not_member"]
+
+
+def test_auth_callback_returns_401_when_line_token_exchange_http_error(monkeypatch):
+    module = _import_handler(monkeypatch)
+
+    monkeypatch.setattr(
+        module,
+        "verify_token",
+        lambda token, **kwargs: (
+            {"st": "signed-token", "return_to": "/pro.html", "api_base": ""}
+            if kwargs.get("scope") == module.CHECKOUT_OAUTH_STATE_SCOPE
+            else {"group_id": "gid_1"}
+        ),
+    )
+
+    def _raise_http_error(_code):
+        raise HTTPError(module.LINE_TOKEN_URL, 500, "server error", hdrs=None, fp=None)
+
+    monkeypatch.setattr(module, "_exchange_line_login_code", _raise_http_error)
+
+    event = {"queryStringParameters": {"mode": "auth_callback", "code": "abc", "state": "state-token"}}
+    response = module.lambda_handler(event, None)
+
+    assert response["statusCode"] == 401
+    body = json.loads(response["body"])
+    assert body["message"] == "line login failed"
+
+
+def test_auth_callback_returns_401_when_line_profile_fetch_url_error(monkeypatch):
+    module = _import_handler(monkeypatch)
+
+    monkeypatch.setattr(
+        module,
+        "verify_token",
+        lambda token, **kwargs: (
+            {"st": "signed-token", "return_to": "/pro.html", "api_base": ""}
+            if kwargs.get("scope") == module.CHECKOUT_OAUTH_STATE_SCOPE
+            else {"group_id": "gid_1"}
+        ),
+    )
+    monkeypatch.setattr(module, "_exchange_line_login_code", lambda _code: "access-token")
+
+    def _raise_url_error(_token):
+        raise URLError("temporary network error")
+
+    monkeypatch.setattr(module, "_fetch_line_user_id", _raise_url_error)
+
+    event = {"queryStringParameters": {"mode": "auth_callback", "code": "abc", "state": "state-token"}}
+    response = module.lambda_handler(event, None)
+
+    assert response["statusCode"] == 401
+    body = json.loads(response["body"])
+    assert body["message"] == "line login failed"
 
 
 def test_status_returns_translation_count_for_current_period(monkeypatch):

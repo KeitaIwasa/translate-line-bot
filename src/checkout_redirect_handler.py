@@ -6,6 +6,7 @@ import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
@@ -120,7 +121,7 @@ def _handle_auth_callback(event: Dict[str, Any]) -> Dict[str, Any]:
     try:
         access_token = _exchange_line_login_code(code)
         line_user_id = _fetch_line_user_id(access_token)
-    except RuntimeError as exc:
+    except (RuntimeError, HTTPError, URLError) as exc:
         logger.warning("LINE Login callback failed: %s", exc)
         return _json_response(401, {"message": "line login failed"})
 
