@@ -74,6 +74,16 @@ LINE → API Gateway → Lambda (Python)
 
 ---
 
+## Current Production Topology (2026-03-25)
+
+- 公開サイト: `https://kotori-ai.com`（CloudFront + S3、GitHub Pagesは無効化済み）
+- 公開API: `https://kotori-ai.com/api/*`（CloudFront から API Gateway `/prod` へ転送）
+- API Gateway（prod）: `https://h2xf6dwz5e.execute-api.ap-northeast-1.amazonaws.com/prod`
+- API Gateway（stg）: `https://cbvko1l0ml.execute-api.ap-northeast-1.amazonaws.com/stg`
+- `api_base` / `apiBase` クエリは廃止。フロントは相対パス `/api/...` 固定。
+
+---
+
 ## Repository Structure
 ```
 src/
@@ -234,12 +244,15 @@ aws sesv2 get-email-identity \
 
 ## Deployment
 
-本番/ステージングとも AWS SAM でデプロイします。以下はステージング (`translate-line-bot-stg`) の例です。
+本番/ステージングとも AWS SAM でデプロイします。現在は `scripts/deploy.sh` を正規手順として運用します。
 
 ### 前提
 - AWS CLI / SAM CLI / Python 3.12 がローカルにインストール済み
 - `aws configure --profile line-translate-bot` で ap-northeast-1 の資格情報を設定済み
-- Secrets Manager `prod/line-translate-bot-secrets` に以下キーを保存済み（`RuntimeSecretArn` パラメータで参照）
+- Secrets Manager のシークレットを環境ごとに用意済み
+  - `stg/line-translate-bot-secrets`
+  - `prod/line-translate-bot-secrets`
+  - 主要キー:
   - `LINE_CHANNEL_SECRET`
   - `LINE_CHANNEL_ACCESS_TOKEN`
   - `GEMINI_API_KEY`
@@ -251,7 +264,13 @@ aws sesv2 get-email-identity \
   - `STRIPE_PRICE_PRO_MONTHLY_ID`
   - `STRIPE_PRICE_PRO_YEARLY_ID`
   - `STRIPE_PRICE_PRO_LEGACY_MONTHLY_ID`
+  - `SUBSCRIPTION_FRONTEND_BASE_URL`（本番: `https://kotori-ai.com`）
+  - `CHECKOUT_API_BASE_URL`（同一オリジン運用では通常空）
   - `SUBSCRIPTION_TOKEN_SECRET`
+  - `CHECKOUT_SESSION_SECRET`
+  - `LINE_LOGIN_CHANNEL_ID`
+  - `LINE_LOGIN_CHANNEL_SECRET`
+  - `LINE_LOGIN_REDIRECT_URI`
   - `MESSAGE_ENCRYPTION_KEY`
   - `CONTACT_IP_HASH_SALT`
 - `.env` にはローカル検証用の `NEON_DATABASE_URL` / `GEMINI_API_KEY` を入れてテスト可能
@@ -270,7 +289,17 @@ pip install -r requirements.txt
 sam build
 ```
 
-### 3. デプロイ
+### 3. デプロイ（推奨: `scripts/deploy.sh`）
+
+```bash
+# ステージング
+STACK_NAME=translate-line-bot-stg STAGE=stg PROFILE=line-translate-bot GEMINI_MODEL=gemini-2.5-flash ./scripts/deploy.sh
+
+# 本番
+STACK_NAME=translate-line-bot-prod STAGE=prod PROFILE=line-translate-bot GEMINI_MODEL=gemini-2.5-flash ./scripts/deploy.sh
+```
+
+### 3-1. SAM 直接実行の例（必要時のみ）
 
 ```bash
 sam deploy \
@@ -282,16 +311,17 @@ sam deploy \
   --parameter-overrides \
     StageName=stg \
     FunctionMemorySize=512 \
-    FunctionTimeout=15 \
-    GeminiModel=gemini-flash-latest \
-    MaxContextMessages=20 \
-    TranslationRetry=3 \
-    RuntimeSecretArn=arn:aws:secretsmanager:ap-northeast-1:215896857123:secret:prod/line-translate-bot-secrets-Uqg35U
+    FunctionTimeout=60 \
+    GeminiModel=gemini-2.5-flash \
+    MaxContextMessages=8 \
+    TranslationRetry=2 \
+    RuntimeSecretArn=stg/line-translate-bot-secrets \
+    EnableStripe=true
 ```
 
 初回のみ `--guided` で `StageName` や `RuntimeSecretArn` を対話入力し、`samconfig.toml` に保存すると便利です。`--resolve-s3` を付けると SAM が管理 S3 バケットを自動で用意します。
 
-### 3-1. デプロイスクリプト (`scripts/deploy.sh`) の利用
+### 3-2. デプロイスクリプト (`scripts/deploy.sh`) の利用
 
 手元の環境変数で上書きしつつ、以下を一括実行できます。
 - `sql/*.sql` の DB マイグレーション適用
@@ -337,48 +367,26 @@ aws cloudformation describe-stacks \
 
 `HttpApiEndpoint` が表示されたら、LINE Developers の Webhook URL を更新し、`sam logs -n LineWebhookFunction --stack-name translate-line-bot-stg --profile line-translate-bot` で CloudWatch Logs も確認してください。
 
-### 5. Lambda コードのみを差し替えたい場合
+### 5. 補足（同一オリジン）
 
-SAM 全体を更新せずコードだけ入れ替える場合は、`scripts/deploy.sh` を利用します。
-
-```bash
-export LAMBDA_FUNCTION_NAME=translate-line-bot-stg-LineWebhookFunction
-export AWS_REGION=ap-northeast-1
-./scripts/deploy.sh
-```
-
-Dependencies（`requirements.txt`）と `src/` を zip 化して `aws lambda update-function-code` を呼び出します。構成値を変える場合は SAM で再デプロイしてください。
-
-### 6. 新アーキテクチャに切り替える場合
-
-`template.yaml` の Lambda 設定を以下のように変更します（例）:
-
-```yaml
-Resources:
-  LineWebhookFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      CodeUri: src_new        # ルートを src_new に変更
-      Handler: lambda_handler.lambda_handler
-      Runtime: python3.12
-      # 既存の環境変数/ロール/タイムアウトなどはそのまま
-```
-
-もしくは Handler を `src_new.lambda_handler::lambda_handler` に設定する方法でも可。デプロイ前に `sam build` で解決されることを確認してください。
+- ホームページ側 API は `https://kotori-ai.com/api/*` に固定。
+- CloudFront 側で `/api` プレフィックスを除去して API Gateway に転送。
+- そのため GitHub Pages 直配信だけでは `/api/*` は解決できない（現在は GH Pages を廃止）。
 
 ---
 
 ## Message Flow
 
 1. LINE から Webhook イベント受信
-2. Lambda が `200 OK` を即返信（高速化）
-3. Lambda 内で非同期的に以下を実行：
+2. Lambda が署名検証と処理を実行
+3. Lambda 内で以下を実行：
 
    * Neon からグループの翻訳対象言語を取得
    * Neon から過去20件の文脈を取得
    * 翻訳先言語リストを決定
    * Gemini 2.5 Flash に1回だけ Structured Output で翻訳要求
    * LINE Messaging API へ翻訳を送信
+4. 処理完了後に `200 OK` を返却
 
 ---
 
