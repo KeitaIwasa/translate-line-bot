@@ -8,6 +8,7 @@ def test_get_settings_reads_openai_env_vars(monkeypatch):
     monkeypatch.setenv("NEON_DATABASE_URL", "postgres://example")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("OPENAI_SUPPORT_MODEL", "gpt-5.2")
+    monkeypatch.setenv("OPENAI_GROUP_MENTION_MODEL", "gpt-5.2")
     monkeypatch.setenv("OPENAI_GUARDRAIL_MODEL", "gpt-4.1-mini")
     monkeypatch.setenv("PRIVATE_CHAT_HISTORY_LIMIT", "7")
 
@@ -16,6 +17,7 @@ def test_get_settings_reads_openai_env_vars(monkeypatch):
 
     assert settings.openai_api_key == "sk-test"
     assert settings.openai_support_model == "gpt-5.2"
+    assert settings.openai_group_mention_model == "gpt-5.2"
     assert settings.openai_guardrail_model == "gpt-4.1-mini"
     assert settings.private_chat_history_limit == 7
 

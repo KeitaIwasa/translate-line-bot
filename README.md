@@ -21,6 +21,7 @@ Gemini 2.5 Flash の Structured Output を用いて、
 * グループで一度だけ希望言語を登録（全メンバーに共有、最大5言語）
 * メッセージの「原文の言語以外」に翻訳を自動生成
 * 個人チャットの質問に、ガードレール付きサポート応答を返却（履歴を文脈に利用）
+* グループメンション操作を OpenAI Agent SDK + tools で柔軟に判定
 * Gemini 2.5 Flash Structured Output による自然＋安定した JSON 生成
 * AWS Lambda による完全サーバレス構成
 * Neon (PostgreSQL) で言語設定とメッセージ履歴を管理
@@ -164,6 +165,7 @@ NEON_DATABASE_URL=postgres://...
 GEMINI_API_KEY=your_google_ai_key
 OPENAI_API_KEY=your_openai_key
 OPENAI_SUPPORT_MODEL=gpt-5.2
+OPENAI_GROUP_MENTION_MODEL=gpt-5.2
 OPENAI_GUARDRAIL_MODEL=gpt-4.1-mini
 PRIVATE_CHAT_HISTORY_LIMIT=5
 STRIPE_SECRET_KEY=sk_live_or_test
