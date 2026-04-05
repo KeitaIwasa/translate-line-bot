@@ -954,7 +954,7 @@ class NeonMessageRepository(MessageRepositoryPort):
                         pending_billing_owner_user_id,
                         pending_billing_owner_subscription_id,
                         pending_billing_owner_expires_at,
-                        updated_at
+                        pending_billing_owner_created_at
                     FROM group_subscriptions
                     WHERE group_id = %s
                     """,
@@ -1006,6 +1006,7 @@ class NeonMessageRepository(MessageRepositoryPort):
                         pending_billing_owner_user_id = %s,
                         pending_billing_owner_subscription_id = %s,
                         pending_billing_owner_expires_at = %s,
+                        pending_billing_owner_created_at = NOW(),
                         updated_at = NOW()
                     WHERE group_id = %s
                     """,
@@ -1028,6 +1029,7 @@ class NeonMessageRepository(MessageRepositoryPort):
                         pending_billing_owner_user_id = NULL,
                         pending_billing_owner_subscription_id = NULL,
                         pending_billing_owner_expires_at = NULL,
+                        pending_billing_owner_created_at = NULL,
                         updated_at = NOW()
                     WHERE group_id = %s
                     """,
@@ -1051,6 +1053,7 @@ class NeonMessageRepository(MessageRepositoryPort):
                         pending_billing_owner_user_id = NULL,
                         pending_billing_owner_subscription_id = NULL,
                         pending_billing_owner_expires_at = NULL,
+                        pending_billing_owner_created_at = NULL,
                         updated_at = NOW()
                     WHERE
                         group_id = %s

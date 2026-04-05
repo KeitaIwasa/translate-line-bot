@@ -234,6 +234,15 @@ def _already_applied_checks() -> Dict[str, str]:
                   AND column_name = 'renewal_subscription_schedule_id'
               )
         """,
+        "20260406_add_pending_billing_owner_created_at.sql": """
+            SELECT
+              EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = 'group_subscriptions'
+                  AND column_name = 'pending_billing_owner_created_at'
+              )
+        """,
     }
 
 
