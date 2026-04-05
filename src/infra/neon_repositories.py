@@ -42,16 +42,45 @@ class NeonMessageRepository(MessageRepositoryPort):
         self._message_encryption_version = "v1"
 
     def ensure_group_member(self, group_id: str, user_id: str) -> None:
-        query = sql.SQL(
-            """
-            INSERT INTO group_members (group_id, user_id, display_name, display_name_updated_at)
-            VALUES (%s, %s, NULL, NULL)
-            ON CONFLICT (group_id, user_id)
-            DO NOTHING
-            """
-        )
         with self._client.cursor() as cur:
-            cur.execute(query, (group_id, user_id))
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO group_members (group_id, user_id, display_name, display_name_updated_at, active, left_at)
+                    VALUES (%s, %s, NULL, NULL, TRUE, NULL)
+                    ON CONFLICT (group_id, user_id)
+                    DO UPDATE SET
+                        active = TRUE,
+                        left_at = NULL
+                    """,
+                    (group_id, user_id),
+                )
+            except errors.UndefinedColumn:
+                cur.execute(
+                    """
+                    INSERT INTO group_members (group_id, user_id, display_name, display_name_updated_at)
+                    VALUES (%s, %s, NULL, NULL)
+                    ON CONFLICT (group_id, user_id)
+                    DO NOTHING
+                    """,
+                    (group_id, user_id),
+                )
+
+    def mark_group_member_left(self, group_id: str, user_id: str, left_at: Optional[datetime] = None) -> None:
+        if not group_id or not user_id:
+            return
+        with self._client.cursor() as cur:
+            try:
+                cur.execute(
+                    """
+                    UPDATE group_members
+                    SET active = FALSE, left_at = COALESCE(%s, NOW())
+                    WHERE group_id = %s AND user_id = %s
+                    """,
+                    (left_at, group_id, user_id),
+                )
+            except errors.UndefinedColumn:
+                logger.warning("group_members active columns missing; cannot mark member left", extra={"group_id": group_id, "user_id": user_id})
 
     def get_group_member_display_name(self, group_id: str, user_id: str) -> Optional[str]:
         with self._client.cursor() as cur:
@@ -72,14 +101,24 @@ class NeonMessageRepository(MessageRepositoryPort):
         if not group_id or not user_id:
             return False
         with self._client.cursor() as cur:
-            cur.execute(
-                """
-                SELECT 1
-                FROM group_members
-                WHERE group_id = %s AND user_id = %s
-                """,
-                (group_id, user_id),
-            )
+            try:
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM group_members
+                    WHERE group_id = %s AND user_id = %s AND COALESCE(active, TRUE)
+                    """,
+                    (group_id, user_id),
+                )
+            except errors.UndefinedColumn:
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM group_members
+                    WHERE group_id = %s AND user_id = %s
+                    """,
+                    (group_id, user_id),
+                )
             return cur.fetchone() is not None
 
     def upsert_group_member_display_name(self, group_id: str, user_id: str, display_name: str) -> None:
@@ -87,18 +126,34 @@ class NeonMessageRepository(MessageRepositoryPort):
         if not normalized:
             return
         with self._client.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO group_members (group_id, user_id, display_name, display_name_updated_at)
-                VALUES (%s, %s, %s, NOW())
-                ON CONFLICT (group_id, user_id)
-                DO UPDATE SET
-                    display_name = EXCLUDED.display_name,
-                    display_name_updated_at = NOW(),
-                    joined_at = group_members.joined_at
-                """,
-                (group_id, user_id, normalized),
-            )
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO group_members (group_id, user_id, display_name, display_name_updated_at)
+                    VALUES (%s, %s, %s, NOW())
+                    ON CONFLICT (group_id, user_id)
+                    DO UPDATE SET
+                        display_name = EXCLUDED.display_name,
+                        display_name_updated_at = NOW(),
+                        active = TRUE,
+                        left_at = NULL,
+                        joined_at = group_members.joined_at
+                    """,
+                    (group_id, user_id, normalized),
+                )
+            except errors.UndefinedColumn:
+                cur.execute(
+                    """
+                    INSERT INTO group_members (group_id, user_id, display_name, display_name_updated_at)
+                    VALUES (%s, %s, %s, NOW())
+                    ON CONFLICT (group_id, user_id)
+                    DO UPDATE SET
+                        display_name = EXCLUDED.display_name,
+                        display_name_updated_at = NOW(),
+                        joined_at = group_members.joined_at
+                    """,
+                    (group_id, user_id, normalized),
+                )
 
     def fetch_group_languages(self, group_id: str) -> List[str]:
         query = sql.SQL(
@@ -830,6 +885,63 @@ class NeonMessageRepository(MessageRepositoryPort):
             logger.warning("group_subscriptions table missing; billing owner unavailable", extra={"group_id": group_id})
             return None
 
+    def is_billing_owner_lost(self, group_id: str) -> bool:
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT billing_owner_lost_at IS NOT NULL
+                    FROM group_subscriptions
+                    WHERE group_id = %s
+                    """,
+                    (group_id,),
+                )
+                row = cur.fetchone()
+                return bool(row and row[0])
+        except errors.UndefinedColumn:
+            return False
+        except errors.UndefinedTable:
+            return False
+
+    def get_renewal_reservation(
+        self, group_id: str
+    ) -> Tuple[bool, Optional[str], Optional[str], Optional[str], Optional[datetime], Optional[str], Optional[str], Optional[str]]:
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        billing_owner_lost_at IS NOT NULL,
+                        renewal_owner_user_id,
+                        renewal_stripe_customer_id,
+                        renewal_subscription_schedule_id,
+                        renewal_effective_at,
+                        renewal_price_id,
+                        renewal_plan,
+                        renewal_billing_interval
+                    FROM group_subscriptions
+                    WHERE group_id = %s
+                    """,
+                    (group_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return (False, None, None, None, None, None, None, None)
+                return (
+                    bool(row[0]),
+                    (row[1] or "").strip() or None,
+                    (row[2] or "").strip() or None,
+                    (row[3] or "").strip() or None,
+                    row[4],
+                    (row[5] or "").strip() or None,
+                    (row[6] or "").strip() or None,
+                    (row[7] or "").strip() or None,
+                )
+        except errors.UndefinedColumn:
+            return (False, None, None, None, None, None, None, None)
+        except errors.UndefinedTable:
+            return (False, None, None, None, None, None, None, None)
+
     def get_billing_owner_claim_state(
         self, group_id: str
     ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[datetime], Optional[datetime]]:
@@ -997,14 +1109,24 @@ class NeonMessageRepository(MessageRepositoryPort):
                         stripe_customer_id = EXCLUDED.stripe_customer_id,
                         stripe_subscription_id = EXCLUDED.stripe_subscription_id,
                         status = EXCLUDED.status,
-                        current_period_start = EXCLUDED.current_period_start,
-                        current_period_end = EXCLUDED.current_period_end,
+                        current_period_start = COALESCE(EXCLUDED.current_period_start, group_subscriptions.current_period_start),
+                        current_period_end = COALESCE(EXCLUDED.current_period_end, group_subscriptions.current_period_end),
                         stripe_price_id = EXCLUDED.stripe_price_id,
                         entitlement_plan = EXCLUDED.entitlement_plan,
                         billing_interval = EXCLUDED.billing_interval,
                         is_grandfathered = EXCLUDED.is_grandfathered,
                         quota_anchor_day = EXCLUDED.quota_anchor_day,
-                        billing_owner_user_id = COALESCE(group_subscriptions.billing_owner_user_id, EXCLUDED.billing_owner_user_id),
+                        billing_owner_user_id = CASE
+                            WHEN group_subscriptions.billing_owner_lost_at IS NOT NULL THEN
+                                CASE
+                                    WHEN EXCLUDED.billing_owner_user_id IS NOT NULL
+                                        AND group_subscriptions.renewal_owner_user_id IS NOT NULL
+                                        AND EXCLUDED.billing_owner_user_id = group_subscriptions.renewal_owner_user_id
+                                    THEN EXCLUDED.billing_owner_user_id
+                                    ELSE group_subscriptions.billing_owner_user_id
+                                END
+                            ELSE COALESCE(group_subscriptions.billing_owner_user_id, EXCLUDED.billing_owner_user_id)
+                        END,
                         scheduled_target_price_id = EXCLUDED.scheduled_target_price_id,
                         scheduled_effective_at = EXCLUDED.scheduled_effective_at,
                         updated_at = NOW()
@@ -1073,6 +1195,114 @@ class NeonMessageRepository(MessageRepositoryPort):
         except Exception:
             logger.exception("Failed to set translation_enabled", extra={"group_id": group_id})
             raise
+
+    def mark_billing_owner_left(self, group_id: str, current_period_end: Optional[datetime]) -> None:
+        if not group_id:
+            return
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE group_subscriptions
+                    SET
+                        billing_owner_user_id = NULL,
+                        billing_owner_lost_at = NOW(),
+                        pending_billing_owner_user_id = NULL,
+                        pending_billing_owner_subscription_id = NULL,
+                        pending_billing_owner_expires_at = NULL,
+                        current_period_end = COALESCE(%s, current_period_end),
+                        updated_at = NOW()
+                    WHERE group_id = %s
+                    """,
+                    (current_period_end, group_id),
+                )
+        except errors.UndefinedColumn:
+            logger.warning("billing owner lost columns missing; cannot mark owner left", extra={"group_id": group_id})
+        except errors.UndefinedTable:
+            logger.warning("group_subscriptions table missing; cannot mark owner left", extra={"group_id": group_id})
+
+    def create_renewal_reservation(
+        self,
+        *,
+        group_id: str,
+        renewal_owner_user_id: str,
+        renewal_stripe_customer_id: str,
+        renewal_subscription_schedule_id: str,
+        renewal_effective_at: datetime,
+        renewal_price_id: str,
+        renewal_plan: str,
+        renewal_billing_interval: str,
+        renewal_setup_session_id: str,
+    ) -> bool:
+        if not group_id:
+            return False
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE group_subscriptions
+                    SET
+                        renewal_owner_user_id = %s,
+                        renewal_stripe_customer_id = %s,
+                        renewal_subscription_schedule_id = %s,
+                        renewal_effective_at = %s,
+                        renewal_price_id = %s,
+                        renewal_plan = %s,
+                        renewal_billing_interval = %s,
+                        renewal_setup_session_id = %s,
+                        updated_at = NOW()
+                    WHERE
+                        group_id = %s
+                        AND billing_owner_lost_at IS NOT NULL
+                        AND renewal_owner_user_id IS NULL
+                    """,
+                    (
+                        renewal_owner_user_id,
+                        renewal_stripe_customer_id,
+                        renewal_subscription_schedule_id,
+                        renewal_effective_at,
+                        renewal_price_id,
+                        renewal_plan,
+                        renewal_billing_interval,
+                        renewal_setup_session_id,
+                        group_id,
+                    ),
+                )
+                return cur.rowcount > 0
+        except errors.UndefinedColumn:
+            logger.warning("renewal reservation columns missing; cannot reserve renewal", extra={"group_id": group_id})
+            return False
+        except errors.UndefinedTable:
+            logger.warning("group_subscriptions table missing; cannot reserve renewal", extra={"group_id": group_id})
+            return False
+
+    def clear_renewal_reservation(self, group_id: str) -> None:
+        if not group_id:
+            return
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE group_subscriptions
+                    SET
+                        billing_owner_lost_at = NULL,
+                        renewal_owner_user_id = NULL,
+                        renewal_stripe_customer_id = NULL,
+                        renewal_subscription_schedule_id = NULL,
+                        renewal_effective_at = NULL,
+                        renewal_price_id = NULL,
+                        renewal_plan = NULL,
+                        renewal_billing_interval = NULL,
+                        renewal_setup_session_id = NULL,
+                        updated_at = NOW()
+                    WHERE group_id = %s
+                    """,
+                    (group_id,),
+                )
+        except errors.UndefinedColumn:
+            logger.warning("renewal reservation columns missing; cannot clear renewal", extra={"group_id": group_id})
+        except errors.UndefinedTable:
+            logger.warning("group_subscriptions table missing; cannot clear renewal", extra={"group_id": group_id})
 
     def is_translation_enabled(self, group_id: str) -> bool:
         try:

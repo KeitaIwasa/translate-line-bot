@@ -104,6 +104,22 @@ def parse_events(body: str) -> List[models.BaseEvent]:
                     timestamp=event.get("timestamp", 0),
                 )
             )
+        elif event_type == "memberLeft":
+            left = event.get("left", {}).get("members", [])
+            left_ids = [member.get("userId") for member in left if member.get("userId")]
+            if not group_id or not left_ids:
+                continue
+            events.append(
+                models.MemberLeftEvent(
+                    event_type="memberLeft",
+                    reply_token=reply_token,
+                    group_id=group_id,
+                    user_id=user_id,
+                    sender_type=sender_type,
+                    left_user_ids=left_ids,
+                    timestamp=event.get("timestamp", 0),
+                )
+            )
         elif event_type == "follow":
             if not reply_token:
                 continue

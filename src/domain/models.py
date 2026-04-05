@@ -37,6 +37,11 @@ class MemberJoinedEvent(BaseEvent):
 
 
 @dataclass(frozen=True)
+class MemberLeftEvent(BaseEvent):
+    left_user_ids: List[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class FollowEvent(BaseEvent):
     pass
 

@@ -161,6 +161,39 @@ class SubscriptionService:
             logger.exception("Failed to cancel subscription", extra={"subscription_id": subscription_id})
             return False
 
+    def reserve_cancellation_on_owner_leave(self, group_id: str):
+        stripe = self._load_stripe()
+        if not stripe or not self._stripe_secret_key:
+            return None
+
+        customer_id, subscription_id, _status = getattr(self._repo, "get_subscription_detail", lambda *_: (None, None, None))(
+            group_id
+        )
+        if not subscription_id or not customer_id:
+            return None
+
+        stripe.api_key = self._stripe_secret_key
+        try:
+            subscription = stripe.Subscription.modify(subscription_id, cancel_at_period_end=True)
+            period_end_ts = subscription.get("current_period_end")
+            period_end = datetime.fromtimestamp(period_end_ts, tz=timezone.utc) if period_end_ts else None
+            status = subscription.get("status") or "active"
+            updater = getattr(self._repo, "update_subscription_status", None)
+            if updater:
+                updater(group_id, status, period_end)
+            marker = getattr(self._repo, "mark_billing_owner_left", None)
+            if marker:
+                marker(group_id, period_end)
+            return {
+                "status": status,
+                "current_period_end": period_end,
+                "subscription_id": subscription_id,
+                "customer_id": customer_id,
+            }
+        except Exception:  # pylint: disable=broad-except
+            logger.exception("Failed to reserve cancellation on owner leave", extra={"group_id": group_id})
+            return None
+
     @staticmethod
     def build_subscription_summary_text(
         status: Optional[str],

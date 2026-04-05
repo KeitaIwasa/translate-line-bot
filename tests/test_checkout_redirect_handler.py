@@ -903,3 +903,90 @@ def test_start_does_not_claim_owner_before_hosted_url_generation(monkeypatch):
 
     assert response["statusCode"] == 500
     assert _Repo.pending_updates == []
+
+
+def test_status_includes_billing_owner_lost_flags(monkeypatch):
+    module = _import_handler(monkeypatch)
+
+    class _Repo:
+        @staticmethod
+        def get_subscription_plan(_group_id):
+            return ("active", "pro", "month", False, "price_pro_monthly", None, module._to_datetime(1773600000), None, None, None)
+
+        @staticmethod
+        def get_usage(_group_id, _period_key):
+            return 0
+
+        @staticmethod
+        def get_renewal_reservation(_group_id):
+            return (True, "U123", "cus_new", "sched_123", module._to_datetime(1773600000), "price_standard_monthly", "standard", "month")
+
+    monkeypatch.setattr(module, "_get_repo", lambda: _Repo())
+    monkeypatch.setattr(
+        module,
+        "_authorize_member",
+        lambda _event: module._CheckoutAuth(  # pylint: disable=protected-access
+            repo=_Repo(),
+            group_id="gid_1",
+            line_user_id="U123",
+            billing_owner_lost=True,
+            renewal_owner_user_id="U123",
+            renewal_effective_at=module._to_datetime(1773600000),  # pylint: disable=protected-access
+        ),
+    )
+
+    response = module.lambda_handler({"queryStringParameters": {"mode": "status", "st": "token", "cs": "session"}}, None)
+    body = json.loads(response["body"])
+    assert body["billingOwnerLost"] is True
+    assert body["renewalReservationExists"] is True
+    assert body["renewalReservedByCurrentUser"] is True
+    assert body["renewalAction"] == "reserved"
+
+
+def test_start_creates_renewal_setup_session_when_owner_lost(monkeypatch):
+    module = _import_handler(monkeypatch)
+
+    class _Catalog:
+        @staticmethod
+        def resolve_target(_target):
+            return "price_standard_monthly"
+
+    class _Repo:
+        @staticmethod
+        def get_subscription_detail(_group_id):
+            return ("cus_123", "sub_123", "active")
+
+    created = {}
+
+    class _SessionApi:
+        @staticmethod
+        def create(**kwargs):
+            created.update(kwargs)
+            return types.SimpleNamespace(url="https://checkout.stripe.com/c/pay/setup")
+
+    fake_stripe = types.SimpleNamespace(api_key="", checkout=types.SimpleNamespace(Session=_SessionApi))
+
+    monkeypatch.setattr(module, "_import_stripe", lambda: fake_stripe)
+    monkeypatch.setattr(module, "build_price_catalog", lambda _settings: _Catalog())
+    monkeypatch.setattr(
+        module,
+        "_authorize_member",
+        lambda _event: module._CheckoutAuth(  # pylint: disable=protected-access
+            repo=_Repo(),
+            group_id="gid_1",
+            line_user_id="U123",
+            billing_owner_lost=True,
+            renewal_effective_at=module._to_datetime(1773600000),  # pylint: disable=protected-access
+        ),
+    )
+
+    response = module.lambda_handler(
+        {"queryStringParameters": {"mode": "start", "st": "token", "cs": "session", "target": "standard_monthly"}},
+        None,
+    )
+    body = json.loads(response["body"])
+    assert response["statusCode"] == 200
+    assert body["renewal"] is True
+    assert body["redirectUrl"] == "https://checkout.stripe.com/c/pay/setup"
+    assert created["mode"] == "setup"
+    assert created["metadata"]["flow_type"] == "renewal_setup"

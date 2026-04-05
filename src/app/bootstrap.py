@@ -26,6 +26,7 @@ from .handlers.follow_handler import FollowHandler
 from .handlers.join_handler import JoinHandler
 from .handlers.leave_handler import LeaveHandler
 from .handlers.member_joined_handler import MemberJoinedHandler
+from .handlers.member_left_handler import MemberLeftHandler
 from .handlers.message_handler import MessageHandler
 from .handlers.postback_handler import PostbackHandler
 
@@ -138,6 +139,7 @@ def build_dispatcher() -> Dispatcher:
     join_handler = JoinHandler(line_client, repo)
     leave_handler = LeaveHandler(subscription_service, repo)
     member_joined_handler = MemberJoinedHandler(line_client, repo)
+    member_left_handler = MemberLeftHandler(line_client, repo, subscription_service)
     follow_handler = FollowHandler(line_client)
 
     handlers = {
@@ -146,6 +148,7 @@ def build_dispatcher() -> Dispatcher:
         "join": join_handler,
         "leave": leave_handler,
         "memberJoined": member_joined_handler,
+        "memberLeft": member_left_handler,
         "follow": follow_handler,
     }
     return Dispatcher(handlers)

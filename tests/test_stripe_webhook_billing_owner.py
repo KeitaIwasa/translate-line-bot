@@ -246,3 +246,37 @@ def test_sync_subscription_does_not_overwrite_existing_owner_with_pending_claim(
 
     assert captured["billing_owner_user_id"] is None
     assert confirmed == []
+
+
+def test_sync_subscription_fills_missing_period_end_via_retrieve(monkeypatch):
+    module = _import_module(monkeypatch)
+    captured = {}
+
+    class _SubApi:
+        @staticmethod
+        def retrieve(_sub_id):
+            return {
+                "current_period_start": int(datetime(2026, 3, 1, tzinfo=timezone.utc).timestamp()),
+                "current_period_end": int(datetime(2026, 4, 1, tzinfo=timezone.utc).timestamp()),
+            }
+
+    monkeypatch.setattr(module, "stripe", types.SimpleNamespace(Subscription=_SubApi))
+    monkeypatch.setattr(module, "_upsert_subscription", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(module, "price_catalog", type("_Catalog", (), {"resolve_price": staticmethod(lambda _price_id: None)})())
+
+    module._sync_subscription(  # pylint: disable=protected-access
+        "gid_1",
+        {
+            "id": "sub_123",
+            "customer": "cus_123",
+            "status": "active",
+            "current_period_start": int(datetime(2026, 3, 1, tzinfo=timezone.utc).timestamp()),
+            "current_period_end": None,
+            "metadata": {"group_id": "gid_1", "line_user_id": "U555"},
+            "items": {"data": [{"price": {"id": "price_x"}}]},
+        },
+        status_override="active",
+        event_created=int(datetime(2026, 3, 1, tzinfo=timezone.utc).timestamp()),
+    )
+
+    assert captured["current_period_end"] == datetime(2026, 4, 1, tzinfo=timezone.utc)

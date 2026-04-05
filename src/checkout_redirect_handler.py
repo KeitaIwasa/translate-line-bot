@@ -37,6 +37,8 @@ OWNER_ONLY_MESSAGE = "Only the billing owner can manage this subscription."
 OWNER_PENDING_MESSAGE = "Another member is currently opening billing management."
 LOGIN_REQUIRED_MESSAGE = "LINE login is required."
 NOT_GROUP_MEMBER_MESSAGE = "Only LINE group members can open this page."
+OWNER_LOST_MESSAGE = "The billing owner has left the group. Register a new card to continue after the current billing period."
+RENEWAL_RESERVED_MESSAGE = "Another member has already reserved the next billing cycle."
 DEFAULT_RETURN_PATH = "/pro.html"
 ALLOWED_RETURN_PATHS = {"/pro.html", "/en/pro.html", "/zh-tw/pro.html", "/th/pro.html"}
 PENDING_BILLING_OWNER_TTL = timedelta(minutes=30)
@@ -185,11 +187,28 @@ def _handle_start(event: Dict[str, Any]) -> Dict[str, Any]:
     target_price_id = catalog.resolve_target(target)
     if not target_price_id:
         return _json_response(400, {"message": "target price is not configured"})
+    target_plan = _target_plan_from_key(target)
 
     stripe.api_key = settings.stripe_secret_key
     repo = auth.repo
     customer_id, subscription_id, status = repo.get_subscription_detail(auth.group_id)
     is_active = status in {"active", "trialing"}
+
+    if auth.billing_owner_lost:
+        if target_plan == FREE_PLAN:
+            return _json_response(409, {"message": OWNER_LOST_MESSAGE, "reason": "owner_left_requires_paid_plan"})
+        if auth.renewal_owner_user_id and auth.renewal_owner_user_id != auth.line_user_id:
+            return _json_response(409, {"message": RENEWAL_RESERVED_MESSAGE, "reason": "renewal_already_reserved"})
+        session_url = _create_renewal_setup_session(
+            stripe=stripe,
+            group_id=auth.group_id,
+            price_id=target_price_id,
+            line_user_id=auth.line_user_id,
+            renewal_effective_at=auth.renewal_effective_at,
+        )
+        if not session_url:
+            return _json_response(500, {"message": "failed to create renewal setup session"})
+        return _json_response(200, {"mode": "start", "result": "checkout_created", "redirectUrl": session_url, "renewal": True})
 
     if (not customer_id) or (not subscription_id) or (not is_active):
         session_url = _create_checkout_session(
@@ -251,11 +270,28 @@ def _handle_prepare(event: Dict[str, Any]) -> Dict[str, Any]:
     target_price_id = catalog.resolve_target(target)
     if not target_price_id:
         return _json_response(400, {"message": "target price is not configured"})
+    target_plan = _target_plan_from_key(target)
 
     stripe.api_key = settings.stripe_secret_key
     repo = auth.repo
     customer_id, subscription_id, status = repo.get_subscription_detail(auth.group_id)
     is_active = status in {"active", "trialing"}
+
+    if auth.billing_owner_lost:
+        if target_plan == FREE_PLAN:
+            return _json_response(409, {"message": OWNER_LOST_MESSAGE, "reason": "owner_left_requires_paid_plan"})
+        if auth.renewal_owner_user_id and auth.renewal_owner_user_id != auth.line_user_id:
+            return _json_response(409, {"message": RENEWAL_RESERVED_MESSAGE, "reason": "renewal_already_reserved"})
+        session_url = _create_renewal_setup_session(
+            stripe=stripe,
+            group_id=auth.group_id,
+            price_id=target_price_id,
+            line_user_id=auth.line_user_id,
+            renewal_effective_at=auth.renewal_effective_at,
+        )
+        if not session_url:
+            return _json_response(500, {"message": "failed to create renewal setup session"})
+        return _json_response(200, {"mode": "prepare", "result": "checkout_created", "redirectUrl": session_url, "renewal": True})
 
     if (not customer_id) or (not subscription_id) or (not is_active):
         session_url = _create_checkout_session(
@@ -295,6 +331,8 @@ def _handle_portal(event: Dict[str, Any]) -> Dict[str, Any]:
     auth = _authorize_member(event)
     if auth.error_response:
         return auth.error_response
+    if auth.billing_owner_lost:
+        return _json_response(409, {"message": OWNER_LOST_MESSAGE, "reason": "owner_left"})
     if auth.owner_forbidden:
         return _json_response(403, {"message": OWNER_ONLY_MESSAGE, "reason": "owner_only"})
 
@@ -342,6 +380,9 @@ class _CheckoutAuth:
         owner_user_id: Optional[str] = None,
         pending_owner_user_id: Optional[str] = None,
         pending_owner_expires_at: Optional[datetime] = None,
+        billing_owner_lost: bool = False,
+        renewal_owner_user_id: Optional[str] = None,
+        renewal_effective_at: Optional[datetime] = None,
         owner_forbidden: bool = False,
         error_response: Optional[Dict[str, Any]] = None,
     ) -> None:
@@ -351,6 +392,9 @@ class _CheckoutAuth:
         self.owner_user_id = owner_user_id
         self.pending_owner_user_id = pending_owner_user_id
         self.pending_owner_expires_at = pending_owner_expires_at
+        self.billing_owner_lost = billing_owner_lost
+        self.renewal_owner_user_id = renewal_owner_user_id
+        self.renewal_effective_at = renewal_effective_at
         self.owner_forbidden = owner_forbidden
         self.error_response = error_response
 
@@ -415,6 +459,31 @@ def _authorize_member(event: Dict[str, Any]) -> _CheckoutAuth:
     if not repo.is_group_member(group_id, line_user_id):
         return _CheckoutAuth(error_response=_json_response(403, {"message": NOT_GROUP_MEMBER_MESSAGE, "reason": "not_member"}))
 
+    (
+        billing_owner_lost,
+        renewal_owner_user_id,
+        _renewal_customer_id,
+        _renewal_schedule_id,
+        renewal_effective_at,
+        _renewal_price_id,
+        _renewal_plan,
+        _renewal_billing_interval,
+    ) = getattr(repo, "get_renewal_reservation", lambda *_: (False, None, None, None, None, None, None, None))(group_id)
+
+    if billing_owner_lost:
+        return _CheckoutAuth(
+            repo=repo,
+            group_id=group_id,
+            line_user_id=line_user_id,
+            owner_user_id=None,
+            pending_owner_user_id=None,
+            pending_owner_expires_at=None,
+            billing_owner_lost=True,
+            renewal_owner_user_id=renewal_owner_user_id,
+            renewal_effective_at=renewal_effective_at,
+            owner_forbidden=False,
+        )
+
     owner_user_id, pending_owner_user_id, _pending_subscription_id, pending_owner_expires_at, _pending_updated_at = _get_billing_owner_claim_state(
         repo,
         group_id,
@@ -438,6 +507,9 @@ def _authorize_member(event: Dict[str, Any]) -> _CheckoutAuth:
         owner_user_id=owner_user_id,
         pending_owner_user_id=pending_owner_user_id,
         pending_owner_expires_at=pending_owner_expires_at,
+        billing_owner_lost=False,
+        renewal_owner_user_id=None,
+        renewal_effective_at=None,
         owner_forbidden=False,
     )
 
@@ -473,6 +545,16 @@ def _status_from_db(auth: _CheckoutAuth) -> Dict[str, Any]:
     translation_count = repo.get_usage(auth.group_id, period_key)
 
     pending_active = bool((not auth.owner_user_id) and auth.pending_owner_user_id and not _is_expired_claim(auth.pending_owner_expires_at))
+    (
+        billing_owner_lost,
+        renewal_owner_user_id,
+        _renewal_customer_id,
+        _renewal_schedule_id,
+        renewal_effective_at,
+        renewal_price_id,
+        renewal_plan,
+        renewal_billing_interval,
+    ) = getattr(repo, "get_renewal_reservation", lambda *_: (False, None, None, None, None, None, None, None))(auth.group_id)
     body = {
         "groupId": auth.group_id,
         "subscriptionStatus": status,
@@ -493,6 +575,14 @@ def _status_from_db(auth: _CheckoutAuth) -> Dict[str, Any]:
         "billingOwnerPending": pending_active,
         "billingOwnerPendingByCurrentUser": bool(pending_active and auth.pending_owner_user_id == auth.line_user_id),
         "billingOwnerPendingExpiresAt": _format_dt(auth.pending_owner_expires_at) if pending_active else None,
+        "billingOwnerLost": bool(billing_owner_lost),
+        "renewalReservationExists": bool(renewal_owner_user_id),
+        "renewalReservedByCurrentUser": bool(renewal_owner_user_id and renewal_owner_user_id == auth.line_user_id),
+        "renewalEffectiveAt": _format_dt(renewal_effective_at),
+        "renewalAction": "setup" if billing_owner_lost and not renewal_owner_user_id else ("reserved" if billing_owner_lost else None),
+        "renewalPriceId": renewal_price_id,
+        "renewalPlan": renewal_plan,
+        "renewalBillingInterval": renewal_billing_interval,
     }
     return _json_response(200, body)
 
@@ -569,6 +659,39 @@ def _create_checkout_session(
         session = stripe.checkout.Session.create(**kwargs)
     except Exception:  # pylint: disable=broad-except
         logger.warning("Failed to create checkout session", exc_info=True)
+        return None
+    return getattr(session, "url", None)
+
+
+def _create_renewal_setup_session(
+    *,
+    stripe,
+    group_id: str,
+    price_id: str,
+    line_user_id: str,
+    renewal_effective_at: Optional[datetime],
+) -> Optional[str]:
+    metadata = {
+        "group_id": group_id,
+        "line_user_id": line_user_id,
+        "flow_type": "renewal_setup",
+        "renewal_price_id": price_id,
+    }
+    if renewal_effective_at:
+        metadata["renewal_anchor_at"] = str(int(renewal_effective_at.timestamp()))
+    try:
+        session = stripe.checkout.Session.create(
+            mode="setup",
+            customer_creation="always",
+            success_url="https://line.me/R/nv/chat",
+            cancel_url="https://line.me/R/nv/chat",
+            client_reference_id=line_user_id,
+            payment_method_types=["card"],
+            metadata=metadata,
+            setup_intent_data={"metadata": metadata},
+        )
+    except Exception:  # pylint: disable=broad-except
+        logger.warning("Failed to create renewal setup session", exc_info=True)
         return None
     return getattr(session, "url", None)
 

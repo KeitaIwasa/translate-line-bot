@@ -201,6 +201,39 @@ def _already_applied_checks() -> Dict[str, str]:
                   AND column_name = 'pending_billing_owner_expires_at'
               )
         """,
+        "20260405_add_owner_left_and_renewal_reservation.sql": """
+            SELECT
+              EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = 'group_members'
+                  AND column_name = 'active'
+              )
+              AND EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = 'group_members'
+                  AND column_name = 'left_at'
+              )
+              AND EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = 'group_subscriptions'
+                  AND column_name = 'billing_owner_lost_at'
+              )
+              AND EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = 'group_subscriptions'
+                  AND column_name = 'renewal_owner_user_id'
+              )
+              AND EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = 'group_subscriptions'
+                  AND column_name = 'renewal_subscription_schedule_id'
+              )
+        """,
     }
 
 

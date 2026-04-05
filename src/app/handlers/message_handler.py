@@ -811,6 +811,8 @@ class MessageHandler:
     def _can_manage_subscription(self, group_id: str, user_id: str | None) -> bool:
         if not user_id:
             return False
+        if getattr(self._repo, "is_billing_owner_lost", lambda *_: False)(group_id):
+            return False
         owner_id = getattr(self._repo, "get_billing_owner_user_id", lambda *_: None)(group_id)
         if owner_id:
             return owner_id == user_id
