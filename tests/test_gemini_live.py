@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import pytest
 from dotenv import load_dotenv
-from requests.exceptions import HTTPError
+from requests.exceptions import HTTPError, ReadTimeout
 
 from src.domain.models import ContextMessage, TranslationRequest
 from src.infra.gemini_translation import GeminiTranslationAdapter, GeminiRateLimitError
@@ -34,6 +34,8 @@ def test_gemini_live_translation():
         results = client.translate(request)
     except GeminiRateLimitError:
         pytest.skip("Gemini rate limit hit; skipping live translation test")
+    except ReadTimeout:
+        pytest.skip("Gemini live request timed out; skipping live translation test")
     except HTTPError as exc:
         status = getattr(exc.response, "status_code", None)
         if status and status >= 500:

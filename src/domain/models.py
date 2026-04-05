@@ -17,8 +17,19 @@ class BaseEvent:
 
 
 @dataclass(frozen=True)
+class Mentionee:
+    index: int
+    length: int
+    mention_type: str = ""
+    user_id: Optional[str] = None
+    is_self: bool = False
+
+
+@dataclass(frozen=True)
 class MessageEvent(BaseEvent):
     text: str = ""
+    destination: Optional[str] = None
+    mentionees: List[Mentionee] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

@@ -34,7 +34,6 @@ from ..subscription_texts import (
     SUBS_CANCEL_CONFIRM_TEXT,
     SUBS_NOT_PRO_TEXT,
     SUBS_OWNER_ONLY_TEXT,
-    SUBS_UPGRADE_LINK_FAIL,
 )
 from ..subscription_templates import (
     build_subscription_cancel_confirm,
@@ -194,7 +193,7 @@ class MessageHandler:
         deferred_display_name: str | None,
     ) -> bool:
         """グループ向けメッセージのディスパッチを担当。"""
-        command_text = self._extract_command_text(event.text)
+        command_text = self._extract_command_text(event)
         # メンションさえ含まれていればコマンド扱い（空文字でも許可）
         if command_text is not None:
             return self._handle_command(event, command_text)
@@ -289,9 +288,37 @@ class MessageHandler:
         return True
 
     # --- command mode helpers ---
-    def _extract_command_text(self, text: str) -> Optional[str]:
+    def _extract_command_text(self, event: models.MessageEvent) -> Optional[str]:
+        text = event.text or ""
         if not text:
             return None
+        metadata_text = self._extract_command_text_from_metadata(event)
+        if metadata_text is not None:
+            return metadata_text
+        return self._extract_command_text_from_text(text)
+
+    def _extract_command_text_from_metadata(self, event: models.MessageEvent) -> Optional[str]:
+        if not event.mentionees:
+            return None
+        spans = [
+            (mentionee.index, mentionee.index + mentionee.length)
+            for mentionee in event.mentionees
+            if self._is_bot_mentionee(mentionee, event.destination)
+        ]
+        if not spans:
+            return None
+        stripped = event.text or ""
+        for start, end in sorted(spans, reverse=True):
+            if start < 0 or end < start or end > len(stripped):
+                logger.debug(
+                    "Skipping invalid mention span",
+                    extra={"start": start, "end": end, "text_length": len(stripped)},
+                )
+                continue
+            stripped = f"{stripped[:start]} {stripped[end:]}"
+        return self._normalize_command_text(stripped)
+
+    def _extract_command_text_from_text(self, text: str) -> Optional[str]:
         name = self._bot_mention_name
         if not name:
             return None
@@ -300,7 +327,19 @@ class MessageHandler:
         if not re.search(pattern, text, flags=re.IGNORECASE):
             return None
         stripped = re.sub(pattern, " ", text, count=1, flags=re.IGNORECASE)
-        stripped = re.sub(r"\s{2,}", " ", stripped).strip()
+        return self._normalize_command_text(stripped)
+
+    @staticmethod
+    def _is_bot_mentionee(mentionee: models.Mentionee, destination: Optional[str]) -> bool:
+        if mentionee.is_self:
+            return True
+        if mentionee.mention_type != "user":
+            return False
+        return bool(destination and mentionee.user_id == destination)
+
+    @staticmethod
+    def _normalize_command_text(text: str) -> str:
+        stripped = re.sub(r"\s{2,}", " ", text).strip()
         stripped = stripped.lstrip("-—–:：、，,。.!！?？ ")
         return stripped or ""
 
@@ -820,14 +859,7 @@ class MessageHandler:
         return bool(is_member)
 
     def _handle_subscription_upgrade(self, event: models.MessageEvent, instruction_lang: str) -> bool:
-        # 比較ページのURLを返す（ページ内でプラン選択）
-        checkout_url = self._subscription_service.create_checkout_url(event.group_id)
-        if not checkout_url:
-            message = self._translate_interface_single(SUBS_UPGRADE_LINK_FAIL, instruction_lang, event.group_id)
-            self._reply_text(event, message)
-            return True
-        self._reply_text(event, checkout_url)
-        return True
+        return self._handle_subscription_menu(event, instruction_lang)
 
     def _maybe_send_limit_notice(
         self,

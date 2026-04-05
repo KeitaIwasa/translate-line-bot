@@ -33,6 +33,7 @@ def parse_events(body: str) -> List[models.BaseEvent]:
         raise ValueError("Invalid JSON body") from exc
 
     events_raw = payload.get("events", [])
+    destination = payload.get("destination")
     events: List[models.BaseEvent] = []
 
     for event in events_raw:
@@ -49,6 +50,7 @@ def parse_events(body: str) -> List[models.BaseEvent]:
                 continue
             if not group_id or not reply_token:
                 continue
+            mentionees = _parse_mentionees(message.get("mention"))
             events.append(
                 models.MessageEvent(
                     event_type="message",
@@ -57,6 +59,8 @@ def parse_events(body: str) -> List[models.BaseEvent]:
                     user_id=user_id,
                     sender_type=sender_type,
                     text=message.get("text", ""),
+                    destination=destination,
+                    mentionees=mentionees,
                     timestamp=event.get("timestamp", 0),
                 )
             )
@@ -151,3 +155,32 @@ def parse_events(body: str) -> List[models.BaseEvent]:
 
 def _resolve_group_id(source: Dict[str, Any]) -> Optional[str]:
     return source.get("groupId") or source.get("roomId") or source.get("userId")
+
+
+def _parse_mentionees(mention: Any) -> List[models.Mentionee]:
+    if not isinstance(mention, dict):
+        return []
+
+    items = mention.get("mentionees")
+    if not isinstance(items, list):
+        return []
+
+    mentionees: List[models.Mentionee] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("index"))
+            length = int(item.get("length"))
+        except (TypeError, ValueError):
+            continue
+        mentionees.append(
+            models.Mentionee(
+                index=index,
+                length=length,
+                mention_type=str(item.get("type") or ""),
+                user_id=item.get("userId"),
+                is_self=bool(item.get("isSelf")),
+            )
+        )
+    return mentionees

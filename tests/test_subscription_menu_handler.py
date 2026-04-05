@@ -73,3 +73,38 @@ def test_subscription_menu_uses_checkout_url_for_manage_billing():
     assert line.messages is not None
     assert line.messages[0]["template"]["actions"][0]["label"] == "Manage billing"
     assert line.messages[0]["template"]["actions"][0]["uri"] == "https://frontend.example.com/pro.html?st=token"
+
+
+def test_subscription_upgrade_returns_same_menu_as_subscription_menu():
+    line = _Line()
+    subscription_service = _SubscriptionService()
+    handler = MessageHandler(
+        line_client=line,
+        translation_service=_Dummy(),
+        interface_translation=_Dummy(),
+        language_detector=_Dummy(),
+        language_pref_service=_Dummy(),
+        command_router=_Dummy(),
+        repo=_Repo(),
+        max_context_messages=1,
+        max_group_languages=5,
+        translation_retry=1,
+        bot_mention_name="bot",
+        subscription_service=subscription_service,
+    )
+
+    event = models.MessageEvent(
+        event_type="message",
+        reply_token="token",
+        group_id="G",
+        user_id="U",
+        sender_type="group",
+        text="upgrade",
+    )
+
+    assert handler._handle_subscription_upgrade(event, "en") is True
+    assert subscription_service.portal_calls == []
+    assert subscription_service.checkout_calls == ["G", "G"]
+    assert line.messages is not None
+    assert line.messages[0]["template"]["actions"][0]["label"] == "Manage billing"
+    assert line.messages[0]["template"]["actions"][0]["uri"] == "https://frontend.example.com/pro.html?st=token"
