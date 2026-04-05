@@ -180,6 +180,27 @@ def _already_applied_checks() -> Dict[str, str]:
                 AND column_name = 'billing_owner_user_id'
             )
         """,
+        "20260405_add_pending_billing_owner_claim.sql": """
+            SELECT
+              EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = 'group_subscriptions'
+                  AND column_name = 'pending_billing_owner_user_id'
+              )
+              AND EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = 'group_subscriptions'
+                  AND column_name = 'pending_billing_owner_subscription_id'
+              )
+              AND EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = 'group_subscriptions'
+                  AND column_name = 'pending_billing_owner_expires_at'
+              )
+        """,
     }
 
 

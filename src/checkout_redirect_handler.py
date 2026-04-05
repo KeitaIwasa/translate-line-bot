@@ -34,10 +34,12 @@ LINE_AUTHORIZE_URL = "https://access.line.me/oauth2/v2.1/authorize"
 LINE_TOKEN_URL = "https://api.line.me/oauth2/v2.1/token"
 LINE_PROFILE_URL = "https://api.line.me/v2/profile"
 OWNER_ONLY_MESSAGE = "Only the billing owner can manage this subscription."
+OWNER_PENDING_MESSAGE = "Another member is currently opening billing management."
 LOGIN_REQUIRED_MESSAGE = "LINE login is required."
 NOT_GROUP_MEMBER_MESSAGE = "Only LINE group members can open this page."
 DEFAULT_RETURN_PATH = "/pro.html"
 ALLOWED_RETURN_PATHS = {"/pro.html", "/en/pro.html", "/zh-tw/pro.html", "/th/pro.html"}
+PENDING_BILLING_OWNER_TTL = timedelta(minutes=30)
 
 
 def lambda_handler(event: Dict[str, Any], _context) -> Dict[str, Any]:
@@ -159,11 +161,7 @@ def _handle_status(event: Dict[str, Any]) -> Dict[str, Any]:
     if auth.error_response:
         return auth.error_response
 
-    return _status_from_db(
-        auth.group_id,
-        auth.line_user_id,
-        auth.owner_user_id,
-    )
+    return _status_from_db(auth)
 
 
 def _handle_start(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -218,8 +216,6 @@ def _handle_start(event: Dict[str, Any]) -> Dict[str, Any]:
     if current_price_id == target_price_id:
         return _json_response(200, {"mode": "start", "result": "already_current"})
 
-    _claim_billing_owner_if_needed(auth)
-
     hosted_url = _create_subscription_update_hosted_url(
         stripe=stripe,
         customer_id=customer_id,
@@ -230,6 +226,7 @@ def _handle_start(event: Dict[str, Any]) -> Dict[str, Any]:
     if not hosted_url:
         message = "failed to create upgrade checkout session" if _plan_rank(target_plan) > _plan_rank(current_plan) else "failed to create downgrade checkout session"
         return _json_response(500, {"message": message})
+    _set_pending_billing_owner_claim(auth, subscription_id)
     return _json_response(200, {"mode": "start", "result": "checkout_created", "redirectUrl": hosted_url})
 
 
@@ -306,11 +303,9 @@ def _handle_portal(event: Dict[str, Any]) -> Dict[str, Any]:
         logger.warning("Stripe SDK unavailable or secret not set")
         return _json_response(503, {"message": "Stripe is not available"})
 
-    customer_id, _subscription_id, _status = auth.repo.get_subscription_detail(auth.group_id)
+    customer_id, subscription_id, _status = auth.repo.get_subscription_detail(auth.group_id)
     if not customer_id:
         return _json_response(404, {"message": "customer not found"})
-
-    _claim_billing_owner_if_needed(auth)
 
     stripe.api_key = settings.stripe_secret_key
     try:
@@ -324,6 +319,8 @@ def _handle_portal(event: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:  # pylint: disable=broad-except
         logger.warning("Failed to create billing portal session", exc_info=True)
         return _json_response(500, {"message": "failed to create billing portal session"})
+
+    _set_pending_billing_owner_claim(auth, subscription_id)
 
     return _json_response(
         200,
@@ -343,6 +340,8 @@ class _CheckoutAuth:
         group_id: str = "",
         line_user_id: str = "",
         owner_user_id: Optional[str] = None,
+        pending_owner_user_id: Optional[str] = None,
+        pending_owner_expires_at: Optional[datetime] = None,
         owner_forbidden: bool = False,
         error_response: Optional[Dict[str, Any]] = None,
     ) -> None:
@@ -350,8 +349,42 @@ class _CheckoutAuth:
         self.group_id = group_id
         self.line_user_id = line_user_id
         self.owner_user_id = owner_user_id
+        self.pending_owner_user_id = pending_owner_user_id
+        self.pending_owner_expires_at = pending_owner_expires_at
         self.owner_forbidden = owner_forbidden
         self.error_response = error_response
+
+
+def _get_billing_owner_claim_state(repo: NeonMessageRepository, group_id: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[datetime], Optional[datetime]]:
+    getter = getattr(repo, "get_billing_owner_claim_state", None)
+    if callable(getter):
+        return getter(group_id)
+    owner_user_id = repo.get_billing_owner_user_id(group_id)
+    return (owner_user_id, None, None, None, None)
+
+
+def _is_expired_claim(expires_at: Optional[datetime]) -> bool:
+    return bool(expires_at and expires_at <= datetime.now(timezone.utc))
+
+
+def _clear_pending_billing_owner_claim(repo: NeonMessageRepository, group_id: str) -> None:
+    clearer = getattr(repo, "clear_pending_billing_owner_claim", None)
+    if callable(clearer):
+        clearer(group_id)
+
+
+def _set_pending_billing_owner_claim(auth: _CheckoutAuth, subscription_id: Optional[str]) -> None:
+    if auth.owner_user_id or not auth.repo or not subscription_id:
+        return
+    setter = getattr(auth.repo, "set_pending_billing_owner_claim", None)
+    if not callable(setter):
+        return
+    setter(
+        auth.group_id,
+        auth.line_user_id,
+        subscription_id,
+        datetime.now(timezone.utc) + PENDING_BILLING_OWNER_TTL,
+    )
 
 
 def _authorize_member(event: Dict[str, Any]) -> _CheckoutAuth:
@@ -382,24 +415,34 @@ def _authorize_member(event: Dict[str, Any]) -> _CheckoutAuth:
     if not repo.is_group_member(group_id, line_user_id):
         return _CheckoutAuth(error_response=_json_response(403, {"message": NOT_GROUP_MEMBER_MESSAGE, "reason": "not_member"}))
 
-    owner_user_id = repo.get_billing_owner_user_id(group_id)
+    owner_user_id, pending_owner_user_id, _pending_subscription_id, pending_owner_expires_at, _pending_updated_at = _get_billing_owner_claim_state(
+        repo,
+        group_id,
+    )
+    if pending_owner_user_id and _is_expired_claim(pending_owner_expires_at):
+        _clear_pending_billing_owner_claim(repo, group_id)
+        pending_owner_user_id = None
+        pending_owner_expires_at = None
+    if owner_user_id and owner_user_id != line_user_id:
+        return _CheckoutAuth(
+            error_response=_json_response(403, {"message": OWNER_ONLY_MESSAGE, "reason": "owner_only"})
+        )
+    if (not owner_user_id) and pending_owner_user_id and pending_owner_user_id != line_user_id:
+        return _CheckoutAuth(
+            error_response=_json_response(409, {"message": OWNER_PENDING_MESSAGE, "reason": "billing_owner_pending"})
+        )
     return _CheckoutAuth(
         repo=repo,
         group_id=group_id,
         line_user_id=line_user_id,
         owner_user_id=owner_user_id,
-        owner_forbidden=bool(owner_user_id and owner_user_id != line_user_id),
+        pending_owner_user_id=pending_owner_user_id,
+        pending_owner_expires_at=pending_owner_expires_at,
+        owner_forbidden=False,
     )
 
 
-def _claim_billing_owner_if_needed(auth: _CheckoutAuth) -> None:
-    if auth.owner_user_id or not auth.repo:
-        return
-    auth.repo.set_billing_owner_user_id(auth.group_id, auth.line_user_id)
-    auth.owner_user_id = auth.line_user_id
-
-
-def _status_from_db(group_id: str, line_user_id: str, owner_user_id: Optional[str]) -> Dict[str, Any]:
+def _status_from_db(auth: _CheckoutAuth) -> Dict[str, Any]:
     repo = _get_repo()
     (
         status,
@@ -412,7 +455,7 @@ def _status_from_db(group_id: str, line_user_id: str, owner_user_id: Optional[st
         quota_anchor_day,
         scheduled_target_price_id,
         scheduled_effective_at,
-    ) = repo.get_subscription_plan(group_id)
+    ) = repo.get_subscription_plan(auth.group_id)
 
     effective_plan = FREE_PLAN
     if status in {"active", "trialing"}:
@@ -427,10 +470,11 @@ def _status_from_db(group_id: str, line_user_id: str, owner_user_id: Optional[st
         period_end=current_period_end,
         quota_anchor_day=quota_anchor_day,
     )
-    translation_count = repo.get_usage(group_id, period_key)
+    translation_count = repo.get_usage(auth.group_id, period_key)
 
+    pending_active = bool((not auth.owner_user_id) and auth.pending_owner_user_id and not _is_expired_claim(auth.pending_owner_expires_at))
     body = {
-        "groupId": group_id,
+        "groupId": auth.group_id,
         "subscriptionStatus": status,
         "entitlementPlan": entitlement_plan,
         "effectivePlan": effective_plan,
@@ -444,8 +488,11 @@ def _status_from_db(group_id: str, line_user_id: str, owner_user_id: Optional[st
         "quotaAnchorDay": quota_anchor_day,
         "scheduledTargetPriceId": scheduled_target_price_id,
         "scheduledEffectiveAt": _format_dt(scheduled_effective_at),
-        "billingOwnerAssigned": bool(owner_user_id),
-        "isBillingOwner": bool(owner_user_id and owner_user_id == line_user_id),
+        "billingOwnerAssigned": bool(auth.owner_user_id),
+        "isBillingOwner": bool(auth.owner_user_id and auth.owner_user_id == auth.line_user_id),
+        "billingOwnerPending": pending_active,
+        "billingOwnerPendingByCurrentUser": bool(pending_active and auth.pending_owner_user_id == auth.line_user_id),
+        "billingOwnerPendingExpiresAt": _format_dt(auth.pending_owner_expires_at) if pending_active else None,
     }
     return _json_response(200, body)
 

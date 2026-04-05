@@ -14,6 +14,8 @@ from src.config import get_settings
 from src.domain.services.interface_translation_service import InterfaceTranslationService
 from src.domain.services.plan_policy import FREE_PLAN, PRO_PLAN
 from src.infra.gemini_translation import GeminiTranslationAdapter
+from src.infra.neon_client import get_client
+from src.infra.neon_repositories import NeonMessageRepository
 from src.infra.stripe_price_catalog import build_price_catalog
 from src.presentation.reply_formatter import strip_source_echo
 
@@ -21,6 +23,7 @@ logger = logging.getLogger(__name__)
 stripe.default_http_client = stripe.http_client.RequestsClient()
 settings = get_settings()
 price_catalog = build_price_catalog(settings)
+_repo: Optional[NeonMessageRepository] = None
 
 PAYMENT_CONFIRMED_MESSAGE_EN = (
     "Payment has been confirmed. Translation service has resumed for this group. Thank you!\n"
@@ -64,7 +67,7 @@ def lambda_handler(event: Dict[str, Any], _context: Any):
         return {"statusCode": 200, "body": json.dumps({"message": "ignored"})}
 
     try:
-        handler(data_object)
+        handler(data_object, stripe_event.get("created"))
     except Exception as exc:  # pylint: disable=broad-except
         logger.exception("Failed to handle Stripe event: %s", exc)
         return {"statusCode": 500, "body": json.dumps({"message": "internal error"})}
@@ -72,7 +75,7 @@ def lambda_handler(event: Dict[str, Any], _context: Any):
     return {"statusCode": 200, "body": json.dumps({"status": "ok"})}
 
 
-def _handle_payment_succeeded(invoice: Dict[str, Any]) -> None:
+def _handle_payment_succeeded(invoice: Dict[str, Any], event_created: Any) -> None:
     subscription = _retrieve_subscription_from_invoice(invoice)
     if not subscription:
         return
@@ -82,12 +85,12 @@ def _handle_payment_succeeded(invoice: Dict[str, Any]) -> None:
         logger.warning("group_id not found in Stripe metadata", extra={"invoice_id": invoice.get("id")})
         return
 
-    _sync_subscription(group_id, subscription, status_override=subscription.get("status"))
+    _sync_subscription(group_id, subscription, status_override=subscription.get("status"), event_created=event_created)
     _set_translation_enabled(group_id, True)
     _push_payment_confirmation(group_id)
 
 
-def _handle_payment_failed(invoice: Dict[str, Any]) -> None:
+def _handle_payment_failed(invoice: Dict[str, Any], event_created: Any) -> None:
     subscription = _retrieve_subscription_from_invoice(invoice)
     if not subscription:
         return
@@ -97,32 +100,32 @@ def _handle_payment_failed(invoice: Dict[str, Any]) -> None:
         logger.warning("group_id missing on payment_failed")
         return
 
-    _sync_subscription(group_id, subscription, status_override="unpaid")
+    _sync_subscription(group_id, subscription, status_override="unpaid", event_created=event_created)
     _set_translation_enabled(group_id, False)
 
 
-def _handle_subscription_deleted(subscription: Dict[str, Any]) -> None:
+def _handle_subscription_deleted(subscription: Dict[str, Any], event_created: Any) -> None:
     group_id = _extract_group_id(subscription, subscription)
     if not group_id:
         logger.warning("group_id missing on subscription.deleted")
         return
 
-    _sync_subscription(group_id, subscription, status_override="canceled")
+    _sync_subscription(group_id, subscription, status_override="canceled", event_created=event_created)
     _set_translation_enabled(group_id, False)
 
 
-def _handle_subscription_updated(subscription: Dict[str, Any]) -> None:
+def _handle_subscription_updated(subscription: Dict[str, Any], event_created: Any) -> None:
     group_id = _extract_group_id(subscription, subscription)
     if not group_id:
         logger.warning("group_id missing on subscription.updated")
         return
 
     status = subscription.get("status") or "active"
-    _sync_subscription(group_id, subscription, status_override=status)
+    _sync_subscription(group_id, subscription, status_override=status, event_created=event_created)
     _set_translation_enabled(group_id, status in {"active", "trialing"})
 
 
-def _handle_checkout_session_completed(session: Dict[str, Any]) -> None:
+def _handle_checkout_session_completed(session: Dict[str, Any], event_created: Any) -> None:
     session_id = session.get("id")
     if not session_id:
         logger.warning("checkout.session.completed missing id")
@@ -148,7 +151,7 @@ def _handle_checkout_session_completed(session: Dict[str, Any]) -> None:
         return
 
     status = subscription.get("status") or "active"
-    _sync_subscription(group_id, subscription, status_override=status)
+    _sync_subscription(group_id, subscription, status_override=status, event_created=event_created)
     _set_translation_enabled(group_id, status in {"active", "trialing"})
     if status in {"active", "trialing"}:
         _push_payment_confirmation(group_id)
@@ -173,7 +176,7 @@ def _retrieve_subscription_from_invoice(invoice: Dict[str, Any]) -> Optional[Dic
         return None
 
 
-def _sync_subscription(group_id: str, subscription: Dict[str, Any], *, status_override: Optional[str]) -> None:
+def _sync_subscription(group_id: str, subscription: Dict[str, Any], *, status_override: Optional[str], event_created: Any) -> None:
     price_id = _extract_primary_price_id(subscription)
     price_def = price_catalog.resolve_price(price_id)
 
@@ -197,6 +200,12 @@ def _sync_subscription(group_id: str, subscription: Dict[str, Any], *, status_ov
     customer_id = str(subscription.get("customer") or "")
     subscription_id = str(subscription.get("id") or "")
     billing_owner_user_id = _extract_line_user_id(subscription, subscription)
+    if (not billing_owner_user_id) and subscription_id:
+        billing_owner_user_id = _confirm_pending_billing_owner_if_applicable(
+            group_id=group_id,
+            subscription_id=subscription_id,
+            event_created=event_created,
+        )
 
     _upsert_subscription(
         group_id=group_id,
@@ -212,6 +221,30 @@ def _sync_subscription(group_id: str, subscription: Dict[str, Any], *, status_ov
         quota_anchor_day=quota_anchor_day,
         billing_owner_user_id=billing_owner_user_id,
     )
+
+
+def _confirm_pending_billing_owner_if_applicable(group_id: str, subscription_id: str, event_created: Any) -> Optional[str]:
+    event_dt = _to_datetime(event_created)
+    if not event_dt:
+        return None
+
+    repo = _get_repo()
+    (
+        owner_user_id,
+        pending_user_id,
+        pending_subscription_id,
+        pending_expires_at,
+        pending_created_at,
+    ) = repo.get_billing_owner_claim_state(group_id)
+    if owner_user_id or not pending_user_id or not pending_subscription_id or pending_subscription_id != subscription_id:
+        return None
+    if not pending_expires_at or not pending_created_at:
+        return None
+    if event_dt < pending_created_at or event_dt > pending_expires_at:
+        return None
+
+    repo.confirm_pending_billing_owner_claim(group_id, subscription_id, pending_user_id)
+    return pending_user_id
 
 
 def _extract_primary_price_id(subscription: Dict[str, Any]) -> Optional[str]:
@@ -262,6 +295,13 @@ def _to_datetime(value: Any) -> Optional[datetime]:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
     return None
+
+
+def _get_repo() -> NeonMessageRepository:
+    global _repo
+    if _repo is None:
+        _repo = NeonMessageRepository(get_client(settings.neon_database_url))
+    return _repo
 
 
 def _upsert_subscription(

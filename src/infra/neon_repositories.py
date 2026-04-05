@@ -830,6 +830,40 @@ class NeonMessageRepository(MessageRepositoryPort):
             logger.warning("group_subscriptions table missing; billing owner unavailable", extra={"group_id": group_id})
             return None
 
+    def get_billing_owner_claim_state(
+        self, group_id: str
+    ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[datetime], Optional[datetime]]:
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        billing_owner_user_id,
+                        pending_billing_owner_user_id,
+                        pending_billing_owner_subscription_id,
+                        pending_billing_owner_expires_at,
+                        updated_at
+                    FROM group_subscriptions
+                    WHERE group_id = %s
+                    """,
+                    (group_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return (None, None, None, None, None)
+                return (
+                    (row[0] or "").strip() or None,
+                    (row[1] or "").strip() or None,
+                    (row[2] or "").strip() or None,
+                    row[3],
+                    row[4],
+                )
+        except errors.UndefinedColumn:
+            return (self.get_billing_owner_user_id(group_id), None, None, None, None)
+        except errors.UndefinedTable:
+            logger.warning("group_subscriptions table missing; billing owner claim state unavailable", extra={"group_id": group_id})
+            return (None, None, None, None, None)
+
     def set_billing_owner_user_id(self, group_id: str, user_id: str) -> None:
         if not group_id or not user_id:
             return
@@ -847,6 +881,76 @@ class NeonMessageRepository(MessageRepositoryPort):
             logger.warning("billing_owner_user_id column missing; cannot update owner", extra={"group_id": group_id})
         except errors.UndefinedTable:
             logger.warning("group_subscriptions table missing; cannot update owner", extra={"group_id": group_id})
+
+    def set_pending_billing_owner_claim(self, group_id: str, user_id: str, subscription_id: str, expires_at: datetime) -> None:
+        if not group_id or not user_id or not subscription_id or not expires_at:
+            return
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE group_subscriptions
+                    SET
+                        pending_billing_owner_user_id = %s,
+                        pending_billing_owner_subscription_id = %s,
+                        pending_billing_owner_expires_at = %s,
+                        updated_at = NOW()
+                    WHERE group_id = %s
+                    """,
+                    (user_id, subscription_id, expires_at, group_id),
+                )
+        except errors.UndefinedColumn:
+            logger.warning("pending billing owner columns missing; cannot set claim", extra={"group_id": group_id})
+        except errors.UndefinedTable:
+            logger.warning("group_subscriptions table missing; cannot set pending claim", extra={"group_id": group_id})
+
+    def clear_pending_billing_owner_claim(self, group_id: str) -> None:
+        if not group_id:
+            return
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE group_subscriptions
+                    SET
+                        pending_billing_owner_user_id = NULL,
+                        pending_billing_owner_subscription_id = NULL,
+                        pending_billing_owner_expires_at = NULL,
+                        updated_at = NOW()
+                    WHERE group_id = %s
+                    """,
+                    (group_id,),
+                )
+        except errors.UndefinedColumn:
+            logger.warning("pending billing owner columns missing; cannot clear claim", extra={"group_id": group_id})
+        except errors.UndefinedTable:
+            logger.warning("group_subscriptions table missing; cannot clear pending claim", extra={"group_id": group_id})
+
+    def confirm_pending_billing_owner_claim(self, group_id: str, subscription_id: str, confirmed_user_id: str) -> None:
+        if not group_id or not subscription_id or not confirmed_user_id:
+            return
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE group_subscriptions
+                    SET
+                        billing_owner_user_id = %s,
+                        pending_billing_owner_user_id = NULL,
+                        pending_billing_owner_subscription_id = NULL,
+                        pending_billing_owner_expires_at = NULL,
+                        updated_at = NOW()
+                    WHERE
+                        group_id = %s
+                        AND stripe_subscription_id = %s
+                        AND billing_owner_user_id IS NULL
+                    """,
+                    (confirmed_user_id, group_id, subscription_id),
+                )
+        except errors.UndefinedColumn:
+            logger.warning("pending billing owner columns missing; cannot confirm claim", extra={"group_id": group_id})
+        except errors.UndefinedTable:
+            logger.warning("group_subscriptions table missing; cannot confirm pending claim", extra={"group_id": group_id})
 
     def upsert_subscription(
         self,

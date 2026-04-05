@@ -2,6 +2,7 @@ import importlib
 import json
 import sys
 import types
+from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 
@@ -33,12 +34,24 @@ def _import_handler(monkeypatch):
     return importlib.import_module("src.checkout_redirect_handler")
 
 
-def _auth(module, repo, *, owner_user_id=None, owner_forbidden=False, line_user_id="U123", group_id="gid_1"):
+def _auth(
+    module,
+    repo,
+    *,
+    owner_user_id=None,
+    pending_owner_user_id=None,
+    pending_owner_expires_at=None,
+    owner_forbidden=False,
+    line_user_id="U123",
+    group_id="gid_1",
+):
     return module._CheckoutAuth(  # pylint: disable=protected-access
         repo=repo,
         group_id=group_id,
         line_user_id=line_user_id,
         owner_user_id=owner_user_id,
+        pending_owner_user_id=pending_owner_user_id,
+        pending_owner_expires_at=pending_owner_expires_at,
         owner_forbidden=owner_forbidden,
     )
 
@@ -229,7 +242,7 @@ def test_status_returns_translation_count_for_current_period(monkeypatch):
             return 123
 
     monkeypatch.setattr(module, "_get_repo", lambda: _Repo())
-    monkeypatch.setattr(module, "_authorize_member", lambda _event: _auth(module, _Repo(), owner_user_id="U123"))
+    monkeypatch.setattr(module, "_authorize_member", lambda _event: _auth(module, _Repo(), owner_user_id="U123", line_user_id="U123"))
 
     event = {"queryStringParameters": {"mode": "status", "st": "token", "cs": "session"}}
     response = module.lambda_handler(event, None)
@@ -240,6 +253,42 @@ def test_status_returns_translation_count_for_current_period(monkeypatch):
     assert body["periodKey"] == "2026-02-13"
     assert body["translationCount"] == 123
     assert body["isBillingOwner"] is True
+
+
+def test_status_includes_pending_owner_flags(monkeypatch):
+    module = _import_handler(monkeypatch)
+
+    class _Repo:
+        @staticmethod
+        def get_subscription_plan(_group_id):
+            return ("active", "standard", "month", False, None, None, None, None, None, None)
+
+        @staticmethod
+        def get_usage(_group_id, _period_key):
+            return 0
+
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    monkeypatch.setattr(module, "_get_repo", lambda: _Repo())
+    monkeypatch.setattr(
+        module,
+        "_authorize_member",
+        lambda _event: _auth(
+            module,
+            _Repo(),
+            line_user_id="U123",
+            pending_owner_user_id="U123",
+            pending_owner_expires_at=expires_at,
+        ),
+    )
+
+    event = {"queryStringParameters": {"mode": "status", "st": "token", "cs": "session"}}
+    response = module.lambda_handler(event, None)
+
+    assert response["statusCode"] == 200
+    body = json.loads(response["body"])
+    assert body["billingOwnerPending"] is True
+    assert body["billingOwnerPendingByCurrentUser"] is True
+    assert body["billingOwnerPendingExpiresAt"].endswith("Z")
 
 
 def test_start_requires_billing_owner_for_existing_subscription(monkeypatch):
@@ -254,7 +303,111 @@ def test_start_requires_billing_owner_for_existing_subscription(monkeypatch):
     assert body["reason"] == "owner_only"
 
 
-def test_start_upgrade_returns_checkout_redirect_for_active_subscription(monkeypatch):
+def test_start_returns_409_when_pending_owner_belongs_to_another_member(monkeypatch):
+    module = _import_handler(monkeypatch)
+
+    class _Repo:
+        @staticmethod
+        def is_group_member(_group_id, _user_id):
+            return True
+
+        @staticmethod
+        def get_billing_owner_claim_state(_group_id):
+            return (
+                None,
+                "U999",
+                "sub_123",
+                datetime.now(timezone.utc) + timedelta(minutes=10),
+                datetime.now(timezone.utc),
+            )
+
+    monkeypatch.setattr(module, "_get_repo", lambda: _Repo())
+    monkeypatch.setattr(module, "_verify_subscription_token", lambda _token: {"group_id": "gid_1"})
+    monkeypatch.setattr(
+        module,
+        "verify_token",
+        lambda token, **kwargs: {"group_id": "gid_1", "line_user_id": "U123"},
+    )
+
+    event = {"queryStringParameters": {"mode": "start", "st": "token", "cs": "session", "target": "pro_monthly"}}
+    response = module.lambda_handler(event, None)
+
+    assert response["statusCode"] == 409
+    body = json.loads(response["body"])
+    assert body["reason"] == "billing_owner_pending"
+
+
+def test_authorize_member_clears_expired_pending_claim(monkeypatch):
+    module = _import_handler(monkeypatch)
+    cleared = []
+
+    class _Repo:
+        @staticmethod
+        def is_group_member(_group_id, _user_id):
+            return True
+
+        @staticmethod
+        def get_billing_owner_claim_state(_group_id):
+            return (
+                None,
+                "U999",
+                "sub_123",
+                datetime.now(timezone.utc) - timedelta(minutes=1),
+                datetime.now(timezone.utc) - timedelta(minutes=2),
+            )
+
+        @staticmethod
+        def clear_pending_billing_owner_claim(group_id):
+            cleared.append(group_id)
+
+    monkeypatch.setattr(module, "_get_repo", lambda: _Repo())
+    monkeypatch.setattr(module, "_verify_subscription_token", lambda _token: {"group_id": "gid_1"})
+    monkeypatch.setattr(
+        module,
+        "verify_token",
+        lambda token, **kwargs: {"group_id": "gid_1", "line_user_id": "U123"},
+    )
+
+    auth = module._authorize_member({"queryStringParameters": {"st": "token", "cs": "session"}})  # pylint: disable=protected-access
+
+    assert auth.error_response is None
+    assert auth.pending_owner_user_id is None
+    assert cleared == ["gid_1"]
+
+
+def test_authorize_member_allows_same_user_pending_claim(monkeypatch):
+    module = _import_handler(monkeypatch)
+
+    class _Repo:
+        @staticmethod
+        def is_group_member(_group_id, _user_id):
+            return True
+
+        @staticmethod
+        def get_billing_owner_claim_state(_group_id):
+            return (
+                None,
+                "U123",
+                "sub_123",
+                datetime.now(timezone.utc) + timedelta(minutes=10),
+                datetime.now(timezone.utc),
+            )
+
+    monkeypatch.setattr(module, "_get_repo", lambda: _Repo())
+    monkeypatch.setattr(module, "_verify_subscription_token", lambda _token: {"group_id": "gid_1"})
+    monkeypatch.setattr(
+        module,
+        "verify_token",
+        lambda token, **kwargs: {"group_id": "gid_1", "line_user_id": "U123"},
+    )
+
+    auth = module._authorize_member({"queryStringParameters": {"st": "token", "cs": "session"}})  # pylint: disable=protected-access
+
+    assert auth.error_response is None
+    assert auth.pending_owner_user_id == "U123"
+
+
+def test_start_upgrade_returns_checkout_redirect_for_active_subscription_without_owner_claim(monkeypatch):
     module = _import_handler(monkeypatch)
 
     class _Catalog:
@@ -269,7 +422,7 @@ def test_start_upgrade_returns_checkout_redirect_for_active_subscription(monkeyp
             return None
 
     class _Repo:
-        owner_updates = []
+        pending_updates = []
 
         @staticmethod
         def get_subscription_detail(_group_id):
@@ -280,8 +433,8 @@ def test_start_upgrade_returns_checkout_redirect_for_active_subscription(monkeyp
             return ("active", "standard", "month", False, None, None, None, None, None, None)
 
         @classmethod
-        def set_billing_owner_user_id(cls, group_id, user_id):
-            cls.owner_updates.append((group_id, user_id))
+        def set_pending_billing_owner_claim(cls, group_id, user_id, subscription_id, expires_at):
+            cls.pending_updates.append((group_id, user_id, subscription_id, expires_at))
 
     calls = []
 
@@ -333,7 +486,8 @@ def test_start_upgrade_returns_checkout_redirect_for_active_subscription(monkeyp
     assert body["result"] == "checkout_created"
     assert body["redirectUrl"] == "https://billing.stripe.com/session/test"
     assert calls and calls[0]["flow_data"]["type"] == "subscription_update_confirm"
-    assert _Repo.owner_updates == [("gid_1", "U123")]
+    assert len(_Repo.pending_updates) == 1
+    assert _Repo.pending_updates[0][:3] == ("gid_1", "U123", "sub_123")
 
 
 def test_start_checkout_includes_line_user_id_for_new_subscription(monkeypatch):
@@ -392,6 +546,12 @@ def test_portal_returns_billing_portal_url(monkeypatch):
         def get_subscription_detail(_group_id):
             return ("cus_123", "sub_123", "active")
 
+        pending_updates = []
+
+        @classmethod
+        def set_pending_billing_owner_claim(cls, group_id, user_id, subscription_id, expires_at):
+            cls.pending_updates.append((group_id, user_id, subscription_id, expires_at))
+
     calls = []
 
     class _SessionApi:
@@ -405,7 +565,7 @@ def test_portal_returns_billing_portal_url(monkeypatch):
         billing_portal=types.SimpleNamespace(Session=_SessionApi),
     )
 
-    monkeypatch.setattr(module, "_authorize_member", lambda _event: _auth(module, _Repo(), owner_user_id="U123"))
+    monkeypatch.setattr(module, "_authorize_member", lambda _event: _auth(module, _Repo(), line_user_id="U123"))
     monkeypatch.setattr(module, "_import_stripe", lambda: fake_stripe)
 
     event = {"queryStringParameters": {"mode": "portal", "st": "token", "cs": "session"}}
@@ -416,6 +576,41 @@ def test_portal_returns_billing_portal_url(monkeypatch):
     assert body["result"] == "portal_created"
     assert body["redirectUrl"] == "https://billing.stripe.com/p/session/test"
     assert calls and calls[0]["customer"] == "cus_123"
+    assert _Repo.pending_updates[0][:3] == ("gid_1", "U123", "sub_123")
+
+
+def test_portal_does_not_claim_owner_before_billing_portal_session(monkeypatch):
+    module = _import_handler(monkeypatch)
+
+    class _Repo:
+        pending_updates = []
+
+        @staticmethod
+        def get_subscription_detail(_group_id):
+            return ("cus_123", "sub_123", "active")
+
+        @classmethod
+        def set_pending_billing_owner_claim(cls, group_id, user_id, subscription_id, expires_at):
+            cls.pending_updates.append((group_id, user_id, subscription_id, expires_at))
+
+    class _SessionApi:
+        @staticmethod
+        def create(**_kwargs):
+            raise RuntimeError("stripe outage")
+
+    fake_stripe = types.SimpleNamespace(
+        api_key="",
+        billing_portal=types.SimpleNamespace(Session=_SessionApi),
+    )
+
+    monkeypatch.setattr(module, "_authorize_member", lambda _event: _auth(module, _Repo(), line_user_id="U123"))
+    monkeypatch.setattr(module, "_import_stripe", lambda: fake_stripe)
+
+    event = {"queryStringParameters": {"mode": "portal", "st": "token", "cs": "session"}}
+    response = module.lambda_handler(event, None)
+
+    assert response["statusCode"] == 500
+    assert _Repo.pending_updates == []
 
 
 def test_portal_returns_401_when_checkout_session_is_missing(monkeypatch):
@@ -436,15 +631,15 @@ def test_prepare_upgrade_returns_checkout_redirect_without_owner_claim(monkeypat
             return "price_target_pro"
 
     class _Repo:
-        owner_updates = []
+        pending_updates = []
 
         @staticmethod
         def get_subscription_detail(_group_id):
             return ("cus_123", "sub_123", "active")
 
         @classmethod
-        def set_billing_owner_user_id(cls, group_id, user_id):  # pragma: no cover - should not be called
-            cls.owner_updates.append((group_id, user_id))
+        def set_pending_billing_owner_claim(cls, group_id, user_id, subscription_id, expires_at):  # pragma: no cover - should not be called
+            cls.pending_updates.append((group_id, user_id, subscription_id, expires_at))
 
     calls = []
 
@@ -494,7 +689,7 @@ def test_prepare_upgrade_returns_checkout_redirect_without_owner_claim(monkeypat
     assert body["result"] == "checkout_created"
     assert body["redirectUrl"] == "https://billing.stripe.com/session/prepare-upgrade"
     assert calls and calls[0]["flow_data"]["type"] == "subscription_update_confirm"
-    assert _Repo.owner_updates == []
+    assert _Repo.pending_updates == []
 
 
 def test_prepare_checkout_for_new_subscription(monkeypatch):
@@ -544,7 +739,7 @@ def test_prepare_checkout_for_new_subscription(monkeypatch):
     assert calls[0]["client_reference_id"] == "U777"
 
 
-def test_start_downgrade_returns_checkout_redirect_without_schedule_call(monkeypatch):
+def test_start_downgrade_returns_checkout_redirect_without_schedule_call_or_owner_claim(monkeypatch):
     module = _import_handler(monkeypatch)
 
     class _Catalog:
@@ -559,15 +754,15 @@ def test_start_downgrade_returns_checkout_redirect_without_schedule_call(monkeyp
             return None
 
     class _Repo:
-        owner_updates = []
+        pending_updates = []
 
         @staticmethod
         def get_subscription_detail(_group_id):
             return ("cus_123", "sub_123", "active")
 
         @classmethod
-        def set_billing_owner_user_id(cls, group_id, user_id):
-            cls.owner_updates.append((group_id, user_id))
+        def set_pending_billing_owner_claim(cls, group_id, user_id, subscription_id, expires_at):
+            cls.pending_updates.append((group_id, user_id, subscription_id, expires_at))
 
     portal_calls = []
     schedule_calls = []
@@ -631,4 +826,80 @@ def test_start_downgrade_returns_checkout_redirect_without_schedule_call(monkeyp
     assert body["redirectUrl"] == "https://billing.stripe.com/session/start-downgrade"
     assert portal_calls and portal_calls[0]["flow_data"]["type"] == "subscription_update_confirm"
     assert schedule_calls == []
-    assert _Repo.owner_updates == [("gid_1", "U123")]
+    assert len(_Repo.pending_updates) == 1
+    assert _Repo.pending_updates[0][:3] == ("gid_1", "U123", "sub_123")
+
+
+def test_start_does_not_claim_owner_before_hosted_url_generation(monkeypatch):
+    module = _import_handler(monkeypatch)
+
+    class _Catalog:
+        @staticmethod
+        def resolve_target(_target):
+            return "price_target_pro"
+
+        @staticmethod
+        def resolve_price(price_id):
+            if price_id == "price_current_standard":
+                return types.SimpleNamespace(plan="standard", interval="month", is_grandfathered=False)
+            return None
+
+    class _Repo:
+        pending_updates = []
+
+        @staticmethod
+        def get_subscription_detail(_group_id):
+            return ("cus_123", "sub_123", "active")
+
+        @staticmethod
+        def get_subscription_plan(_group_id):
+            return ("active", "standard", "month", False, None, None, None, None, None, None)
+
+        @classmethod
+        def set_pending_billing_owner_claim(cls, group_id, user_id, subscription_id, expires_at):
+            cls.pending_updates.append((group_id, user_id, subscription_id, expires_at))
+
+    class _SessionApi:
+        @staticmethod
+        def create(**_kwargs):
+            raise RuntimeError("stripe outage")
+
+    class _SubApi:
+        @staticmethod
+        def retrieve(_sub_id, expand=None):  # noqa: ARG004
+            return {
+                "items": {
+                    "data": [
+                        {
+                            "id": "si_123",
+                            "price": {"id": "price_current_standard"},
+                        }
+                    ]
+                },
+                "current_period_start": 1771000000,
+                "current_period_end": 1773600000,
+                "status": "active",
+            }
+
+    fake_stripe = types.SimpleNamespace(
+        api_key="",
+        billing_portal=types.SimpleNamespace(Session=_SessionApi),
+        Subscription=_SubApi,
+    )
+
+    monkeypatch.setattr(module, "_authorize_member", lambda _event: _auth(module, _Repo(), line_user_id="U123"))
+    monkeypatch.setattr(module, "build_price_catalog", lambda _settings: _Catalog())
+    monkeypatch.setattr(module, "_import_stripe", lambda: fake_stripe)
+
+    event = {
+        "queryStringParameters": {
+            "mode": "start",
+            "st": "token",
+            "cs": "session",
+            "target": "pro_monthly",
+        }
+    }
+    response = module.lambda_handler(event, None)
+
+    assert response["statusCode"] == 500
+    assert _Repo.pending_updates == []
