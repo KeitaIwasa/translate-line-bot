@@ -68,6 +68,9 @@ class MemberLeftHandler:
             logger=logger,
             warning_log="Owner-left DM notice translation failed",
         )
+        checkout_url = self._subscription_service.create_checkout_url(group_id)
+        if checkout_url:
+            group_message = f"{group_message}\n\n{checkout_url}".strip()
         group_push_result = "skipped"
         dm_push_result = "skipped"
         try:

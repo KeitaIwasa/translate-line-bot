@@ -33,13 +33,19 @@ class _Repo:
 
 
 class _SubscriptionService:
-    def __init__(self, result):
+    def __init__(self, result, checkout_url=None):
         self.result = result
+        self.checkout_url = checkout_url
         self.calls = []
+        self.checkout_calls = []
 
     def reserve_cancellation_on_owner_leave(self, group_id):
         self.calls.append(group_id)
         return self.result
+
+    def create_checkout_url(self, group_id):
+        self.checkout_calls.append(group_id)
+        return self.checkout_url
 
 
 class _Translator:
@@ -73,7 +79,8 @@ def test_member_left_reserves_cancellation_and_pushes_notice():
     line = _Line()
     repo = _Repo(owner_id="OWNER")
     service = _SubscriptionService(
-        result={"current_period_end": datetime(2026, 4, 30, tzinfo=timezone.utc)}
+        result={"current_period_end": datetime(2026, 4, 30, tzinfo=timezone.utc)},
+        checkout_url="https://billing.example.com/manage",
     )
     handler = MemberLeftHandler(line, repo, service)
 
@@ -92,6 +99,8 @@ def test_member_left_reserves_cancellation_and_pushes_notice():
     assert [target for target, _ in line.messages] == ["G", "OWNER"]
     assert "2026-04-30" in line.messages[0][1]
     assert "2026-04-30" in line.messages[1][1]
+    assert line.messages[0][1].endswith("https://billing.example.com/manage")
+    assert service.checkout_calls == ["G"]
 
 
 def test_member_left_dm_failure_does_not_break_flow():
@@ -115,6 +124,30 @@ def test_member_left_dm_failure_does_not_break_flow():
 
     assert service.calls == ["G"]
     assert [target for target, _ in line.messages] == ["G"]
+
+
+def test_member_left_without_checkout_url_keeps_group_message_text_only():
+    line = _Line()
+    repo = _Repo(owner_id="OWNER")
+    service = _SubscriptionService(
+        result={"current_period_end": datetime(2026, 4, 30, tzinfo=timezone.utc)},
+        checkout_url=None,
+    )
+    handler = MemberLeftHandler(line, repo, service)
+
+    event = models.MemberLeftEvent(
+        event_type="memberLeft",
+        reply_token=None,
+        group_id="G",
+        user_id="U0",
+        sender_type="group",
+        left_user_ids=["OWNER"],
+        timestamp=0,
+    )
+    handler.handle(event)
+
+    assert len(line.messages) == 2
+    assert "http" not in line.messages[0][1]
 
 
 def test_member_left_builds_multilingual_messages_for_group_and_dm():
