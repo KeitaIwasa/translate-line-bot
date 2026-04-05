@@ -43,17 +43,26 @@ class MemberLeftHandler:
 
         period_end = result.get("current_period_end")
         until = period_end.date().isoformat() if period_end else "the current billing period end"
+        until_for_dm = self._format_period_end_for_dm(period_end)
         languages = dedup_lang_codes(self._repo.fetch_group_languages(group_id))
         group_message_en = (
             "The billing owner has left this LINE group.\n"
             f"The current paid plan remains active until {until} and will then stop automatically.\n"
             "To continue after that date, a current group member must open billing management and register a new card."
         )
-        owner_dm_en = (
-            "You left the LINE group that owns this subscription.\n"
-            f"Auto-renew has been set to stop at period end ({until}).\n"
-            "If the group wants to continue after that date, a current member must register a new card from billing management."
-        )
+        group_name = self._safe_get_group_name(group_id)
+        if group_name:
+            owner_dm_en = (
+                f'You have left the LINE group "{group_name}," which owns the KOTORI subscription. '
+                f"As a result, auto-renewal has been set to stop at the end of the current billing period ({until_for_dm}), "
+                "and no further charges will be made after that date."
+            )
+        else:
+            owner_dm_en = (
+                "You have left the LINE group which owns the KOTORI subscription. "
+                f"As a result, auto-renewal has been set to stop at the end of the current billing period ({until_for_dm}), "
+                "and no further charges will be made after that date."
+            )
         group_message = build_multilingual_message(
             base_text=group_message_en,
             languages=languages,
@@ -101,3 +110,19 @@ class MemberLeftHandler:
                 "dm_push_result": dm_push_result,
             },
         )
+
+    def _safe_get_group_name(self, group_id: str) -> str | None:
+        try:
+            name = self._line.get_group_name(group_id)
+        except Exception:  # pylint: disable=broad-except
+            logger.warning("Failed to fetch group name for owner-left DM", extra={"group_id": group_id}, exc_info=True)
+            return None
+        if not name:
+            return None
+        return str(name).strip() or None
+
+    @staticmethod
+    def _format_period_end_for_dm(period_end) -> str:
+        if not period_end:
+            return "the current billing period end"
+        return f"{period_end.strftime('%B')} {period_end.day}, {period_end.year}"

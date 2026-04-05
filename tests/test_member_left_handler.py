@@ -6,14 +6,18 @@ from src.domain.services.interface_translation_service import InterfaceTranslati
 
 
 class _Line:
-    def __init__(self, *, fail_targets=None) -> None:
+    def __init__(self, *, fail_targets=None, group_name=None) -> None:
         self.messages = []
         self.fail_targets = set(fail_targets or [])
+        self.group_name = group_name
 
     def push_text(self, to, text):
         if to in self.fail_targets:
             raise RuntimeError("push failed")
         self.messages.append((to, text))
+
+    def get_group_name(self, _group_id):
+        return self.group_name
 
 
 class _Repo:
@@ -76,7 +80,7 @@ def test_member_left_ignores_non_owner_leave():
 
 
 def test_member_left_reserves_cancellation_and_pushes_notice():
-    line = _Line()
+    line = _Line(group_name="ABC Group")
     repo = _Repo(owner_id="OWNER")
     service = _SubscriptionService(
         result={"current_period_end": datetime(2026, 4, 30, tzinfo=timezone.utc)},
@@ -98,7 +102,8 @@ def test_member_left_reserves_cancellation_and_pushes_notice():
     assert service.calls == ["G"]
     assert [target for target, _ in line.messages] == ["G", "OWNER"]
     assert "2026-04-30" in line.messages[0][1]
-    assert "2026-04-30" in line.messages[1][1]
+    assert "April 30, 2026" in line.messages[1][1]
+    assert '"ABC Group,"' in line.messages[1][1]
     assert line.messages[0][1].endswith("https://billing.example.com/manage")
     assert service.checkout_calls == ["G"]
 
@@ -177,3 +182,28 @@ def test_member_left_builds_multilingual_messages_for_group_and_dm():
     assert "fr:" in group_message
     assert group_message.count("ja:") == 1
     assert "ja:" in dm_message
+
+
+def test_member_left_dm_uses_fallback_sentence_when_group_name_is_missing():
+    line = _Line(group_name=None)
+    repo = _Repo(owner_id="OWNER")
+    service = _SubscriptionService(
+        result={"current_period_end": datetime(2026, 5, 5, tzinfo=timezone.utc)},
+    )
+    handler = MemberLeftHandler(line, repo, service)
+
+    event = models.MemberLeftEvent(
+        event_type="memberLeft",
+        reply_token=None,
+        group_id="G",
+        user_id="U0",
+        sender_type="group",
+        left_user_ids=["OWNER"],
+        timestamp=0,
+    )
+    handler.handle(event)
+
+    assert len(line.messages) == 2
+    dm = line.messages[1][1]
+    assert dm.startswith("You have left the LINE group which owns the KOTORI subscription.")
+    assert "May 5, 2026" in dm
