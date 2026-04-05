@@ -17,7 +17,7 @@ from src.infra.gemini_translation import GeminiTranslationAdapter
 from src.infra.neon_client import get_client
 from src.infra.neon_repositories import NeonMessageRepository
 from src.infra.stripe_price_catalog import build_price_catalog
-from src.presentation.reply_formatter import strip_source_echo
+from src.presentation.multilingual_message import build_multilingual_message, dedup_lang_codes
 
 logger = logging.getLogger(__name__)
 stripe.default_http_client = stripe.http_client.RequestsClient()
@@ -511,45 +511,15 @@ def _push_payment_confirmation(group_id: str) -> None:
 
 
 def _build_multilingual_message(base_text: str, group_id: str) -> str:
-    trimmed = (base_text or "").strip()
-    if not trimmed:
-        return ""
-
-    languages = _dedup_lang_codes(_fetch_group_languages(group_id))
+    languages = dedup_lang_codes(_fetch_group_languages(group_id))
     translator = _get_interface_translation_service()
-
-    if not languages or not translator:
-        return trimmed
-
-    target_langs = [lang for lang in languages if not lang.startswith("en")]
-
-    text_by_lang = {}
-    if target_langs:
-        try:
-            translations = translator.translate(trimmed, target_langs)
-            for item in translations or []:
-                lowered = (item.lang or "").lower()
-                if not lowered or lowered in text_by_lang:
-                    continue
-                cleaned = strip_source_echo(trimmed, item.text)
-                normalized = (cleaned or item.text or "").strip()
-                if not normalized:
-                    continue
-                text_by_lang[lowered] = normalized
-        except Exception:  # pylint: disable=broad-except
-            logger.warning("Payment confirmation translation failed", exc_info=True)
-
-    lines: List[str] = [trimmed]
-    for lang in languages:
-        if lang.startswith("en"):
-            continue
-        translated = text_by_lang.get(lang)
-        if not translated or translated in lines:
-            continue
-        lines.append(translated)
-
-    joined = "\n\n".join(line for line in lines if line)
-    return joined.strip()[:5000]
+    return build_multilingual_message(
+        base_text=base_text,
+        languages=languages,
+        translator=translator,
+        logger=logger,
+        warning_log="Payment confirmation translation failed",
+    )
 
 
 def _fetch_group_languages(group_id: str) -> List[str]:
@@ -564,18 +534,6 @@ def _fetch_group_languages(group_id: str) -> List[str]:
         return []
 
     return [str(row[0]).lower() for row in rows if row and row[0]]
-
-
-def _dedup_lang_codes(languages: List[str]) -> List[str]:
-    seen = set()
-    deduped: List[str] = []
-    for code in languages:
-        lowered = (code or "").lower()
-        if not lowered or lowered in seen:
-            continue
-        seen.add(lowered)
-        deduped.append(lowered)
-    return deduped
 
 
 @lru_cache(maxsize=1)
