@@ -37,6 +37,11 @@ class MemberJoinedEvent(BaseEvent):
 
 
 @dataclass(frozen=True)
+class MemberLeftEvent(BaseEvent):
+    left_user_ids: List[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class FollowEvent(BaseEvent):
     pass
 
@@ -72,7 +77,7 @@ class TranslationResult:
 # === Command routing ===
 @dataclass(frozen=True)
 class CommandDecision:
-    action: str  # language_settings | howto | pause | resume | unknown | subscription_menu | subscription_cancel | subscription_upgrade
+    action: str  # language_settings | howto | pause | resume | unknown | error | subscription_menu | subscription_cancel | subscription_upgrade
     operation: str = ""  # reset_all | add | remove | add_and_remove (for language_settings)
     languages_to_add: List[LanguageChoice] = field(default_factory=list)
     languages_to_remove: List[LanguageChoice] = field(default_factory=list)

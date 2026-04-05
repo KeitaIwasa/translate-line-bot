@@ -1,5 +1,6 @@
 ## ToDo
 
+[x] グループメンション操作を OpenAI Agent SDK + Tools に一気置換（入力JSON化、tool分岐、errorフォールバック）
 [ ] サブスクリプションが停止（キャンセル）されたときに通知を送信
 [x] 個人チャットPIIマスク戻り値の型不整合を修正（履歴生成・safe_output_text）
 [x] 上記不具合の回帰テストを追加（タプル混入防止）
@@ -16,5 +17,3 @@
 [x] Stripe Webhook を price.id ベースで entitlement 同期するよう更新
 [x] Pro向けメッセージ暗号化・7日削除ジョブの実装を追加
 [x] 料金比較ページ（`/pro.html` 4言語）を新UIに再構成
-[ ] 法務文書（terms/privacy/consumer）の最終文面レビュー
-[ ] ステージング反映（migration + backend + homepage）の最終実施

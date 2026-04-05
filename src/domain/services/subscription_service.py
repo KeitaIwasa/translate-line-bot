@@ -51,18 +51,14 @@ class SubscriptionService:
         expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
         token = issue_token(
             {
+                "version": 2,
                 "group_id": group_id,
                 "scope": scope,
                 "exp": int(expires_at.timestamp()),
             },
             secret=self._subscription_token_secret,
         )
-        api_base = (
-            f"&api_base={quote_plus(self._checkout_api_base_url)}"
-            if self._checkout_api_base_url
-            else ""
-        )
-        return f"{self._subscription_frontend_base_url}{page_path}?st={quote_plus(token)}{api_base}"
+        return f"{self._subscription_frontend_base_url}{page_path}?st={quote_plus(token)}"
 
     def _create_legacy_checkout_url(self, group_id: str) -> Optional[str]:
         stripe = self._load_stripe()
@@ -86,18 +82,12 @@ class SubscriptionService:
 
             if self._subscription_frontend_base_url and session_id:
                 # 事前案内ページへ遷移させ、ページ内ボタンから Checkout に進ませる
-                api_base_param = (
-                    f"&api_base={quote_plus(self._checkout_api_base_url)}"
-                    if self._checkout_api_base_url
-                    else ""
-                )
-                # api_base が設定されていれば /checkout リダイレクト経由で短いURLを返す。
-                # 未設定の環境では Stripe の checkout_url を保持しつつ従来挙動を維持する。
+                # /api 経由の同一オリジン呼び出しに統一するため、api_base クエリは付与しない。
                 checkout_param = ""
                 if (not self._checkout_api_base_url) and checkout_url:
                     checkout_param = f"&checkout_url={quote_plus(checkout_url)}"
 
-                return f"{self._subscription_frontend_base_url}/pro.html?session_id={session_id}{api_base_param}{checkout_param}"
+                return f"{self._subscription_frontend_base_url}/pro.html?session_id={session_id}{checkout_param}"
 
             return checkout_url
         except Exception as exc:  # pylint: disable=broad-except
@@ -134,15 +124,10 @@ class SubscriptionService:
         if not self._subscription_frontend_base_url:
             return "https://line.me/R/nv/chat"
 
-        api_base = (
-            f"&api_base={quote_plus(self._checkout_api_base_url)}"
-            if self._checkout_api_base_url
-            else ""
-        )
         # {CHECKOUT_SESSION_ID} は Stripe 側で実セッション ID に置換される
         return (
             f"{self._subscription_frontend_base_url}/pro.html"
-            f"?session_id={{CHECKOUT_SESSION_ID}}{api_base}"
+            f"?session_id={{CHECKOUT_SESSION_ID}}"
         )
 
     def cancel_subscription(self, group_id: str) -> bool:
@@ -175,6 +160,39 @@ class SubscriptionService:
         except Exception:  # pylint: disable=broad-except
             logger.exception("Failed to cancel subscription", extra={"subscription_id": subscription_id})
             return False
+
+    def reserve_cancellation_on_owner_leave(self, group_id: str):
+        stripe = self._load_stripe()
+        if not stripe or not self._stripe_secret_key:
+            return None
+
+        customer_id, subscription_id, _status = getattr(self._repo, "get_subscription_detail", lambda *_: (None, None, None))(
+            group_id
+        )
+        if not subscription_id or not customer_id:
+            return None
+
+        stripe.api_key = self._stripe_secret_key
+        try:
+            subscription = stripe.Subscription.modify(subscription_id, cancel_at_period_end=True)
+            period_end_ts = subscription.get("current_period_end")
+            period_end = datetime.fromtimestamp(period_end_ts, tz=timezone.utc) if period_end_ts else None
+            status = subscription.get("status") or "active"
+            updater = getattr(self._repo, "update_subscription_status", None)
+            if updater:
+                updater(group_id, status, period_end)
+            marker = getattr(self._repo, "mark_billing_owner_left", None)
+            if marker:
+                marker(group_id, period_end)
+            return {
+                "status": status,
+                "current_period_end": period_end,
+                "subscription_id": subscription_id,
+                "customer_id": customer_id,
+            }
+        except Exception:  # pylint: disable=broad-except
+            logger.exception("Failed to reserve cancellation on owner leave", extra={"group_id": group_id})
+            return None
 
     @staticmethod
     def build_subscription_summary_text(

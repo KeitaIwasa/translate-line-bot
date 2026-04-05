@@ -48,6 +48,16 @@ class LineApiAdapter(LinePort):
             )
             raise LineApiError(f"LINE reply failed with status {response.status_code}")
 
+    def push_text(self, to: str, text: str) -> None:
+        url = f"{self.BASE_URL}/v2/bot/message/push"
+        payload = {"to": to, "messages": [{"type": "text", "text": (text or '')[:5000]}]}
+        response = self._session.post(url, json=payload, timeout=5)
+        if not response.ok:
+            logger.warning(
+                "LINE push failed",
+                extra={"status": response.status_code, "body": (response.text or "")[:500], "to": to},
+            )
+
     def get_display_name(
         self,
         source_type: str,

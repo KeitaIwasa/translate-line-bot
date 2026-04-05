@@ -9,7 +9,7 @@ from ..domain.services.interface_translation_service import InterfaceTranslation
 from ..domain.services.language_detection_service import LanguageDetectionService
 from ..infra.gemini_translation import GeminiTranslationAdapter
 from ..infra.language_pref_client import LanguagePreferenceAdapter
-from ..infra.command_router import GeminiCommandRouter
+from ..infra.command_router import OpenAIGroupMentionCommandRouter
 from ..infra.line_api import LineApiAdapter
 from ..infra.neon_client import get_client
 from ..infra.neon_repositories import NeonMessageRepository
@@ -26,6 +26,7 @@ from .handlers.follow_handler import FollowHandler
 from .handlers.join_handler import JoinHandler
 from .handlers.leave_handler import LeaveHandler
 from .handlers.member_joined_handler import MemberJoinedHandler
+from .handlers.member_left_handler import MemberLeftHandler
 from .handlers.message_handler import MessageHandler
 from .handlers.postback_handler import PostbackHandler
 
@@ -50,9 +51,11 @@ def build_dispatcher() -> Dispatcher:
         model=settings.gemini_model,
         timeout_seconds=settings.gemini_timeout_seconds,
     )
-    command_router = GeminiCommandRouter(
-        api_key=settings.gemini_api_key,
-        model=settings.command_model,
+    group_prompt_path = str(Path(__file__).resolve().parent / "prompts" / "kotori_group_mention_prompt.txt")
+    command_router = OpenAIGroupMentionCommandRouter(
+        api_key=settings.openai_api_key,
+        model=settings.openai_group_mention_model,
+        prompt_path=group_prompt_path,
         timeout_seconds=settings.gemini_timeout_seconds,
     )
     db_client = get_client(settings.neon_database_url)
@@ -136,6 +139,12 @@ def build_dispatcher() -> Dispatcher:
     join_handler = JoinHandler(line_client, repo)
     leave_handler = LeaveHandler(subscription_service, repo)
     member_joined_handler = MemberJoinedHandler(line_client, repo)
+    member_left_handler = MemberLeftHandler(
+        line_client,
+        repo,
+        subscription_service,
+        interface_translation=interface_translation,
+    )
     follow_handler = FollowHandler(line_client)
 
     handlers = {
@@ -144,6 +153,7 @@ def build_dispatcher() -> Dispatcher:
         "join": join_handler,
         "leave": leave_handler,
         "memberJoined": member_joined_handler,
+        "memberLeft": member_left_handler,
         "follow": follow_handler,
     }
     return Dispatcher(handlers)

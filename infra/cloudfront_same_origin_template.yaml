@@ -1,0 +1,214 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: KOTORI same-origin delivery (CloudFront + /api to API Gateway) without WAF
+
+Parameters:
+  DomainName:
+    Type: String
+    Description: e.g. kotori-ai.com
+  AcmCertificateArn:
+    Type: String
+    Description: ACM certificate ARN in us-east-1 for DomainName
+  HostedZoneId:
+    Type: String
+    Default: ""
+    Description: Route53 hosted zone id (leave empty if DNS is managed elsewhere)
+  StaticOriginDomainName:
+    Type: String
+    Description: Static site origin domain (S3 website endpoint or other static host)
+  StaticOriginProtocolPolicy:
+    Type: String
+    Default: https-only
+    AllowedValues:
+      - http-only
+      - https-only
+      - match-viewer
+  ApiGatewayDomainName:
+    Type: String
+    Description: execute-api domain, e.g. abcdef.execute-api.ap-northeast-1.amazonaws.com
+  ApiOriginPath:
+    Type: String
+    Default: /prod
+    Description: API Gateway stage path
+
+Conditions:
+  UseRoute53Record: !Not [!Equals [!Ref HostedZoneId, ""]]
+
+Resources:
+  ApiPathRewriteFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub "kotori-api-path-rewrite-${AWS::StackName}"
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Strip /api prefix before forwarding to API Gateway
+        Runtime: cloudfront-js-1.0
+      FunctionCode: |
+        function handler(event) {
+          var req = event.request;
+          var uri = req.uri || "/";
+          if (uri.indexOf("/api/") === 0) {
+            req.uri = uri.substring(4);
+            if (!req.uri || req.uri.length === 0) {
+              req.uri = "/";
+            }
+          } else if (uri === "/api") {
+            req.uri = "/";
+          }
+          return req;
+        }
+
+  ApiCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub "kotori-api-cache-disabled-${AWS::StackName}"
+        DefaultTTL: 0
+        MaxTTL: 0
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: none
+          EnableAcceptEncodingBrotli: true
+          EnableAcceptEncodingGzip: true
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: all
+
+  StaticCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub "kotori-static-cache-${AWS::StackName}"
+        DefaultTTL: 86400
+        MaxTTL: 31536000
+        MinTTL: 1
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: none
+          EnableAcceptEncodingBrotli: true
+          EnableAcceptEncodingGzip: true
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+
+  ApiOriginRequestPolicy:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: !Sub "kotori-api-origin-request-${AWS::StackName}"
+        CookiesConfig:
+          CookieBehavior: none
+        HeadersConfig:
+          HeaderBehavior: none
+        QueryStringsConfig:
+          QueryStringBehavior: all
+
+  SecurityHeadersPolicy:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub "kotori-security-headers-${AWS::StackName}"
+        SecurityHeadersConfig:
+          ContentSecurityPolicy:
+            ContentSecurityPolicy: "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; script-src 'self' 'unsafe-inline'; connect-src 'self' https://checkout.stripe.com https://billing.stripe.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+            Override: true
+          ReferrerPolicy:
+            ReferrerPolicy: no-referrer
+            Override: true
+          StrictTransportSecurity:
+            AccessControlMaxAgeSec: 31536000
+            IncludeSubdomains: true
+            Preload: true
+            Override: true
+          XContentTypeOptions:
+            Override: true
+          XFrameOptions:
+            FrameOption: DENY
+            Override: true
+        CustomHeadersConfig:
+          Items:
+            - Header: Permissions-Policy
+              Value: geolocation=(), microphone=(), camera=()
+              Override: true
+
+  KotoriDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        HttpVersion: http2and3
+        PriceClass: PriceClass_200
+        Aliases:
+          - !Ref DomainName
+        ViewerCertificate:
+          AcmCertificateArn: !Ref AcmCertificateArn
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+        Origins:
+          - Id: StaticOrigin
+            DomainName: !Ref StaticOriginDomainName
+            CustomOriginConfig:
+              OriginProtocolPolicy: !Ref StaticOriginProtocolPolicy
+              HTTPPort: 80
+              HTTPSPort: 443
+          - Id: ApiOrigin
+            DomainName: !Ref ApiGatewayDomainName
+            OriginPath: !Ref ApiOriginPath
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              HTTPPort: 80
+              HTTPSPort: 443
+        DefaultCacheBehavior:
+          TargetOriginId: StaticOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+          CachePolicyId: !Ref StaticCachePolicy
+          ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+          Compress: true
+        CacheBehaviors:
+          - PathPattern: /api/*
+            TargetOriginId: ApiOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+              - PUT
+              - PATCH
+              - POST
+              - DELETE
+            CachedMethods:
+              - GET
+              - HEAD
+            CachePolicyId: !Ref ApiCachePolicy
+            OriginRequestPolicyId: !Ref ApiOriginRequestPolicy
+            ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+            Compress: true
+            FunctionAssociations:
+              - EventType: viewer-request
+                FunctionARN: !GetAtt ApiPathRewriteFunction.FunctionARN
+
+  KotoriAliasRecord:
+    Condition: UseRoute53Record
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub "${DomainName}."
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt KotoriDistribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+
+Outputs:
+  DistributionId:
+    Value: !Ref KotoriDistribution
+  DistributionDomainName:
+    Value: !GetAtt KotoriDistribution.DomainName

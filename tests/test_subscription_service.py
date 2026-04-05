@@ -27,6 +27,7 @@ class _RepoStub:
     def __init__(self):
         self.updated = []
         self.enabled_calls = []
+        self.owner_left = []
 
     def get_subscription_detail(self, group_id):
         return ("cust_123", "sub_123", "active")
@@ -36,6 +37,9 @@ class _RepoStub:
 
     def set_translation_enabled(self, group_id, enabled):
         self.enabled_calls.append((group_id, enabled))
+
+    def mark_billing_owner_left(self, group_id, period_end):
+        self.owner_left.append((group_id, period_end))
 
 
 @pytest.fixture(autouse=True)
@@ -83,6 +87,21 @@ def test_cancel_subscription_returns_false_when_modify_fails(monkeypatch):
     stripe_mod.Subscription.modify = original_modify
 
 
+def test_reserve_cancellation_on_owner_leave_marks_owner_lost(monkeypatch):
+    repo = _RepoStub()
+    stripe_mod = _fake_stripe_module(
+        modify_result={"status": "active", "cancel_at_period_end": True, "current_period_end": 1_700_000_000}
+    )
+    monkeypatch.setitem(sys.modules, "stripe", stripe_mod)
+
+    service = SubscriptionService(repo, stripe_secret_key="sk_test", stripe_price_monthly_id="price_123")
+
+    result = service.reserve_cancellation_on_owner_leave("gid")
+    assert result is not None
+    assert repo.updated[0][1] == "active"
+    assert repo.owner_left and repo.owner_left[0][0] == "gid"
+
+
 def test_build_subscription_summary_text_for_standard_plan():
     period_end = datetime(2026, 2, 28, 0, 0)
     text = SubscriptionService.build_subscription_summary_text(
@@ -98,7 +117,7 @@ def test_build_subscription_summary_text_defaults_to_pro_when_plan_unspecified()
     assert text == "Plan: Pro (active)"
 
 
-def test_create_checkout_url_token_flow_includes_api_base():
+def test_create_checkout_url_token_flow_has_only_signed_token():
     repo = _RepoStub()
     service = SubscriptionService(
         repo,
@@ -115,10 +134,10 @@ def test_create_checkout_url_token_flow_includes_api_base():
     query = parse_qs(parsed.query)
     assert parsed.path == "/pro.html"
     assert "st" in query and query["st"][0]
-    assert query.get("api_base") == ["https://api.example.com/prod"]
+    assert "api_base" not in query
 
 
-def test_create_checkout_url_token_flow_omits_api_base_when_unset():
+def test_create_checkout_url_token_flow_still_works_without_api_base():
     repo = _RepoStub()
     service = SubscriptionService(
         repo,

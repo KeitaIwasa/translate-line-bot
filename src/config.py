@@ -11,8 +11,8 @@ class Settings:
     line_channel_access_token: str
     gemini_api_key: str
     neon_database_url: str
-    gemini_model: str = "gemini-2.5-flash"
-    command_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-flash-latest"
+    command_model: str = "gemini-flash-latest"
     bot_mention_name: str = "通訳AI"
     max_context_messages: int = 8
     max_group_languages: int = 5
@@ -34,9 +34,14 @@ class Settings:
     subscription_frontend_base_url: str = ""
     checkout_api_base_url: str = ""
     subscription_token_secret: str = ""
+    checkout_session_secret: str = ""
+    line_login_channel_id: str = ""
+    line_login_channel_secret: str = ""
+    line_login_redirect_uri: str = ""
     message_encryption_key: str = ""
     openai_api_key: str = ""
     openai_support_model: str = "gpt-5.2"
+    openai_group_mention_model: str = "gpt-5.2"
     openai_guardrail_model: str = "gpt-4.1-mini"
     private_chat_history_limit: int = 5
     contact_to_email: str = "contact@iwasadigital.com"
@@ -68,8 +73,8 @@ def get_settings() -> Settings:
         line_channel_access_token=required["LINE_CHANNEL_ACCESS_TOKEN"],
         gemini_api_key=required["GEMINI_API_KEY"],
         neon_database_url=required["NEON_DATABASE_URL"],
-        gemini_model=env.get("GEMINI_MODEL", "gemini-2.5-flash"),
-        command_model=env.get("COMMAND_MODEL", env.get("GEMINI_MODEL", "gemini-2.5-flash")),
+        gemini_model=env.get("GEMINI_MODEL", "gemini-flash-latest"),
+        command_model=env.get("COMMAND_MODEL", env.get("GEMINI_MODEL", "gemini-flash-latest")),
         bot_mention_name=env.get("BOT_MENTION_NAME", "通訳AI"),
         max_context_messages=int(env.get("MAX_CONTEXT_MESSAGES", "8")),
         max_group_languages=int(env.get("MAX_GROUP_LANGUAGES", "5")),
@@ -97,9 +102,14 @@ def get_settings() -> Settings:
             env.get("CHECKOUT_API_BASE_URL", "")
         ),
         subscription_token_secret=env.get("SUBSCRIPTION_TOKEN_SECRET", ""),
+        checkout_session_secret=env.get("CHECKOUT_SESSION_SECRET", ""),
+        line_login_channel_id=env.get("LINE_LOGIN_CHANNEL_ID", ""),
+        line_login_channel_secret=env.get("LINE_LOGIN_CHANNEL_SECRET", ""),
+        line_login_redirect_uri=env.get("LINE_LOGIN_REDIRECT_URI", ""),
         message_encryption_key=env.get("MESSAGE_ENCRYPTION_KEY", ""),
         openai_api_key=env.get("OPENAI_API_KEY", ""),
         openai_support_model=env.get("OPENAI_SUPPORT_MODEL", "gpt-5.2"),
+        openai_group_mention_model=env.get("OPENAI_GROUP_MENTION_MODEL", "gpt-5.2"),
         openai_guardrail_model=env.get("OPENAI_GUARDRAIL_MODEL", "gpt-4.1-mini"),
         private_chat_history_limit=int(env.get("PRIVATE_CHAT_HISTORY_LIMIT", "5")),
         contact_to_email=env.get("CONTACT_TO_EMAIL", "contact@iwasadigital.com"),

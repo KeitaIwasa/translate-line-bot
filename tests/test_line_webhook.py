@@ -76,3 +76,26 @@ def test_parse_leave_event():
     assert isinstance(event, models.LeaveEvent)
     assert event.group_id == "G"
     assert event.reply_token is None
+
+
+def test_parse_member_left_event():
+    body = json.dumps(
+        {
+            "events": [
+                {
+                    "type": "memberLeft",
+                    "timestamp": 1732060800000,
+                    "source": {"type": "group", "groupId": "G", "userId": "U"},
+                    "left": {"members": [{"type": "user", "userId": "U1"}, {"type": "user", "userId": "U2"}]},
+                }
+            ]
+        }
+    )
+
+    events = parse_events(body)
+
+    assert len(events) == 1
+    event = events[0]
+    assert isinstance(event, models.MemberLeftEvent)
+    assert event.group_id == "G"
+    assert event.left_user_ids == ["U1", "U2"]
