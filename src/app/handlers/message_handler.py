@@ -6,6 +6,7 @@ import base64
 import zlib
 import re
 import time
+from dataclasses import replace
 from functools import partial
 from datetime import datetime, timezone
 from calendar import monthrange
@@ -628,21 +629,9 @@ class MessageHandler:
                 plan_key=plan_key,
                 candidate_languages=candidate_languages,
             ):
-                runtime = models.TranslationRuntimeState(
+                runtime = replace(
+                    runtime,
                     translation_enabled=True,
-                    group_languages=runtime.group_languages,
-                    subscription_status=runtime.subscription_status,
-                    period_start=runtime.period_start,
-                    period_end=runtime.period_end,
-                    period_key=runtime.period_key,
-                    usage=runtime.usage,
-                    limit_notice_plan=runtime.limit_notice_plan,
-                    entitlement_plan=runtime.entitlement_plan,
-                    billing_interval=runtime.billing_interval,
-                    is_grandfathered=runtime.is_grandfathered,
-                    quota_anchor_day=runtime.quota_anchor_day,
-                    scheduled_target_price_id=runtime.scheduled_target_price_id,
-                    scheduled_effective_at=runtime.scheduled_effective_at,
                     translation_paused_reason=None,
                 )
             else:
@@ -768,7 +757,7 @@ class MessageHandler:
 
     def _pause_translation_for_quota(self, group_id: str) -> None:
         pause_by_quota = getattr(self._repo, "set_translation_paused_by_quota", None)
-        if pause_by_quota:
+        if callable(pause_by_quota):
             pause_by_quota(group_id)
             return
         self._repo.set_translation_enabled(group_id, False)
