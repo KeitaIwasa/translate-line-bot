@@ -105,6 +105,7 @@ CREATE INDEX idx_messages_group_user_time
 | ---- | --- | -------- | ---------- | ---- |
 | `group_id` | TEXT | ✔ |  | LINE グループ ID |
 | `translation_enabled` | BOOLEAN | ✔ | TRUE | 通訳を稼働させるかのフラグ |
+| `translation_paused_reason` | TEXT |  |  | 翻訳停止理由。クォータ上限停止は `quota`、手動停止や言語設定中は `NULL` |
 | `updated_at` | TIMESTAMPTZ | ✔ | `NOW()` | 最終更新時刻 |
 
 - 主キー: `group_id`
@@ -114,6 +115,7 @@ CREATE INDEX idx_messages_group_user_time
 CREATE TABLE group_settings (
   group_id TEXT PRIMARY KEY,
   translation_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  translation_paused_reason TEXT,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ```

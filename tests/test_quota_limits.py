@@ -53,10 +53,18 @@ class NullCommandRouter:
 
 
 class ProQuotaRepo:
-    def __init__(self, initial_usage: int, paid: bool = True, notice_plan: str | None = None):
+    def __init__(
+        self,
+        initial_usage: int,
+        paid: bool = True,
+        notice_plan: str | None = None,
+        translation_enabled: bool = True,
+        paused_reason: str | None = None,
+    ):
         self.usage = initial_usage
         self.paid = paid
-        self.translation_enabled = True
+        self.translation_enabled = translation_enabled
+        self.paused_reason = paused_reason
         self.notice_plan = notice_plan
 
     # group/lang settings
@@ -120,10 +128,16 @@ class ProQuotaRepo:
             period_key="2025-01-01",
             usage=self.usage,
             limit_notice_plan=self.notice_plan,
+            translation_paused_reason=self.paused_reason,
         )
 
     def set_translation_enabled(self, _group_id, enabled: bool):
         self.translation_enabled = enabled
+        self.paused_reason = None
+
+    def set_translation_paused_by_quota(self, _group_id):
+        self.translation_enabled = False
+        self.paused_reason = "quota"
 
     def is_translation_enabled(self, _group_id):
         return self.translation_enabled
@@ -307,3 +321,77 @@ def test_free_plan_under_limit_allows_translation_even_if_notice_flag_exists():
     assert handled is True
     assert translation.calls == 1
     assert repo.usage == 11
+
+
+def test_free_quota_pause_is_persisted_with_reason():
+    line = RecordingLineClient()
+    translation = RecordingTranslationService()
+    repo = ProQuotaRepo(initial_usage=50, paid=False, notice_plan="free")
+    handler = _build_handler(repo, line, translation)
+
+    handled = handler._handle_translation_flow(_build_event("blocked"), sender_name="user", translation_enabled=True)
+
+    assert handled is True
+    assert translation.calls == 0
+    assert repo.translation_enabled is False
+    assert repo.paused_reason == "quota"
+
+
+def test_free_quota_pause_resumes_after_period_reset_when_under_limit():
+    line = RecordingLineClient()
+    translation = RecordingTranslationService()
+    repo = ProQuotaRepo(
+        initial_usage=0,
+        paid=False,
+        notice_plan=None,
+        translation_enabled=False,
+        paused_reason="quota",
+    )
+    handler = _build_handler(repo, line, translation)
+
+    handled = handler._handle_translation_flow(_build_event("new month"), sender_name="user", translation_enabled=False)
+
+    assert handled is True
+    assert repo.translation_enabled is True
+    assert repo.paused_reason is None
+    assert translation.calls == 1
+    assert repo.usage == 1
+
+
+def test_free_quota_pause_does_not_resume_while_current_period_over_limit():
+    line = RecordingLineClient()
+    translation = RecordingTranslationService()
+    repo = ProQuotaRepo(
+        initial_usage=50,
+        paid=False,
+        notice_plan="free",
+        translation_enabled=False,
+        paused_reason="quota",
+    )
+    handler = _build_handler(repo, line, translation)
+
+    handled = handler._handle_translation_flow(_build_event("same month"), sender_name="user", translation_enabled=False)
+
+    assert handled is True
+    assert repo.translation_enabled is False
+    assert repo.paused_reason == "quota"
+    assert translation.calls == 0
+
+
+def test_manual_pause_does_not_resume_even_when_under_free_limit():
+    line = RecordingLineClient()
+    translation = RecordingTranslationService()
+    repo = ProQuotaRepo(
+        initial_usage=0,
+        paid=False,
+        notice_plan=None,
+        translation_enabled=False,
+        paused_reason=None,
+    )
+    handler = _build_handler(repo, line, translation)
+
+    handled = handler._handle_translation_flow(_build_event("manual pause"), sender_name="user", translation_enabled=False)
+
+    assert handled is True
+    assert repo.translation_enabled is False
+    assert translation.calls == 0

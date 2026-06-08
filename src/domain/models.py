@@ -149,6 +149,7 @@ class TranslationRuntimeState:
     quota_anchor_day: Optional[int] = None
     scheduled_target_price_id: Optional[str] = None
     scheduled_effective_at: Optional[datetime] = None
+    translation_paused_reason: Optional[str] = None
 
 
 @dataclass(frozen=True)

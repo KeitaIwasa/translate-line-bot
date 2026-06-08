@@ -6,6 +6,7 @@ import base64
 import zlib
 import re
 import time
+from dataclasses import replace
 from functools import partial
 from datetime import datetime, timezone
 from calendar import monthrange
@@ -622,13 +623,25 @@ class MessageHandler:
                 return True
 
         if not runtime.translation_enabled:
-            logger.info(
-                "Translation disabled; sending pause notice",
-                extra={"group_id": event.group_id, "user_id": event.user_id},
-            )
-            # 停止理由に応じた案内を返して終了
-            self._send_pause_notice(event)
-            return True
+            if self._maybe_resume_quota_paused_translation(
+                event=event,
+                runtime=runtime,
+                plan_key=plan_key,
+                candidate_languages=candidate_languages,
+            ):
+                runtime = replace(
+                    runtime,
+                    translation_enabled=True,
+                    translation_paused_reason=None,
+                )
+            else:
+                logger.info(
+                    "Translation disabled; sending pause notice",
+                    extra={"group_id": event.group_id, "user_id": event.user_id},
+                )
+                # 停止理由に応じた案内を返して終了
+                self._send_pause_notice(event)
+                return True
 
         limit = self._quota_limit_for_plan(plan_key)
         stop_translation_on_limit = stop_translation_on_quota(plan_key)
@@ -674,6 +687,34 @@ class MessageHandler:
 
         return True
 
+    def _maybe_resume_quota_paused_translation(
+        self,
+        *,
+        event: models.MessageEvent,
+        runtime: models.TranslationRuntimeState,
+        plan_key: str,
+        candidate_languages: Sequence[str],
+    ) -> bool:
+        if normalize_plan_key(plan_key) != FREE_PLAN:
+            return False
+        if runtime.translation_paused_reason != "quota":
+            return False
+        if not candidate_languages:
+            return False
+        limit = self._quota_limit_for_plan(plan_key)
+        if int(runtime.usage or 0) >= limit:
+            return False
+
+        self._repo.set_translation_enabled(event.group_id, True)
+        logger.info(
+            "Resumed translation after quota reset | group=%s period=%s usage=%s limit=%s",
+            event.group_id,
+            runtime.period_key,
+            runtime.usage,
+            limit,
+        )
+        return True
+
     def _prepare_translation_context(
         self,
         event: models.MessageEvent,
@@ -703,7 +744,7 @@ class MessageHandler:
             flow.decision.should_notify,
         )
         if flow.decision.stop_translation:
-            self._repo.set_translation_enabled(event.group_id, False)
+            self._pause_translation_for_quota(event.group_id)
         if flow.decision.should_notify:
             self._maybe_send_limit_notice(
                 event,
@@ -713,6 +754,13 @@ class MessageHandler:
                 period_end,
             )
         return True
+
+    def _pause_translation_for_quota(self, group_id: str) -> None:
+        pause_by_quota = getattr(self._repo, "set_translation_paused_by_quota", None)
+        if callable(pause_by_quota):
+            pause_by_quota(group_id)
+            return
+        self._repo.set_translation_enabled(group_id, False)
 
     def _reply_translation_result(
         self,
