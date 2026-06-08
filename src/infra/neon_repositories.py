@@ -487,13 +487,27 @@ class NeonMessageRepository(MessageRepositoryPort):
             with self._client.cursor() as cur:
                 cur.execute(
                     """
+                    INSERT INTO group_settings (group_id, translation_enabled, translation_paused_reason)
+                    VALUES (%s, %s, NULL)
+                    ON CONFLICT (group_id)
+                    DO UPDATE SET
+                        translation_enabled = EXCLUDED.translation_enabled,
+                        translation_paused_reason = NULL,
+                        updated_at = NOW()
+                    """,
+                    (group_id, enabled),
+                )
+        except errors.UndefinedColumn:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
                     INSERT INTO group_settings (group_id, translation_enabled)
                     VALUES (%s, %s)
                     ON CONFLICT (group_id)
                     DO UPDATE SET translation_enabled = EXCLUDED.translation_enabled, updated_at = NOW()
                     """,
                     (group_id, enabled),
-            )
+                )
         except errors.UndefinedTable:
             # 後方互換: group_settings が未作成でも致命的エラーにしない
             logger.warning(
@@ -501,6 +515,26 @@ class NeonMessageRepository(MessageRepositoryPort):
                 extra={"group_id": group_id},
             )
             return
+
+    def set_translation_paused_by_quota(self, group_id: str) -> None:
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO group_settings (group_id, translation_enabled, translation_paused_reason, updated_at)
+                    VALUES (%s, FALSE, 'quota', NOW())
+                    ON CONFLICT (group_id)
+                    DO UPDATE SET
+                        translation_enabled = FALSE,
+                        translation_paused_reason = 'quota',
+                        updated_at = NOW()
+                    """,
+                    (group_id,),
+                )
+        except errors.UndefinedColumn:
+            self.set_translation_enabled(group_id, False)
+        except errors.UndefinedTable:
+            logger.warning("group_settings table missing; skip persisting quota pause", extra={"group_id": group_id})
 
     def upsert_group_name(self, group_id: str, group_name: str) -> None:
         """グループ名を保存する。既存の translation_enabled 値は維持する。"""
@@ -1330,15 +1364,29 @@ class NeonMessageRepository(MessageRepositoryPort):
 
     def fetch_translation_runtime_state(self, group_id: str) -> TranslationRuntimeState:
         translation_enabled = True
+        translation_paused_reason = None
         try:
             with self._client.cursor() as cur:
                 cur.execute(
-                    "SELECT translation_enabled FROM group_settings WHERE group_id = %s",
+                    "SELECT translation_enabled, translation_paused_reason FROM group_settings WHERE group_id = %s",
                     (group_id,),
                 )
                 row = cur.fetchone()
                 if row is not None:
                     translation_enabled = bool(row[0])
+                    translation_paused_reason = row[1]
+        except errors.UndefinedColumn:
+            try:
+                with self._client.cursor() as cur:
+                    cur.execute(
+                        "SELECT translation_enabled FROM group_settings WHERE group_id = %s",
+                        (group_id,),
+                    )
+                    row = cur.fetchone()
+                    if row is not None:
+                        translation_enabled = bool(row[0])
+            except errors.UndefinedTable:
+                translation_enabled = True
         except errors.UndefinedTable:
             translation_enabled = True
 
@@ -1410,6 +1458,7 @@ class NeonMessageRepository(MessageRepositoryPort):
             quota_anchor_day=quota_anchor_day,
             scheduled_target_price_id=scheduled_target_price_id,
             scheduled_effective_at=scheduled_effective_at,
+            translation_paused_reason=translation_paused_reason,
         )
 
     def reset_group_language_settings(self, group_id: str) -> None:
