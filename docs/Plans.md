@@ -1,5 +1,6 @@
 ## ToDo
 
+[x] STGのGemini 3.5系リクエストを`thinkingLevel`対応へ修正し、STGのみ再デプロイしてLINE疎通確認
 [x] グループメンション操作を OpenAI Agent SDK + Tools に一気置換（入力JSON化、tool分岐、errorフォールバック）
 [ ] サブスクリプションが停止（キャンセル）されたときに通知を送信
 [x] 個人チャットPIIマスク戻り値の型不整合を修正（履歴生成・safe_output_text）

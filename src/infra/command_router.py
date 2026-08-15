@@ -12,6 +12,7 @@ from requests import HTTPError
 
 from ..domain.models import CommandDecision, LanguageChoice
 from ..domain.ports import CommandRouterPort
+from .gemini_generation_config import build_generation_config
 
 logger = logging.getLogger(__name__)
 
@@ -204,12 +205,7 @@ class GeminiCommandRouter(CommandRouterPort):
                     ],
                 }
             ],
-            "generationConfig": {
-                "temperature": 0.2,
-                "responseMimeType": "application/json",
-                "responseSchema": SCHEMA,
-                "thinkingConfig": {"thinkingBudget": 0},
-            },
+            "generationConfig": build_generation_config(self._model, SCHEMA),
         }
 
 

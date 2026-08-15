@@ -10,6 +10,7 @@ import requests
 
 from ..domain.models import LanguageChoice, LanguagePreference
 from ..domain.ports import LanguagePreferencePort
+from .gemini_generation_config import build_generation_config
 
 logger = logging.getLogger(__name__)
 
@@ -112,12 +113,7 @@ class LanguagePreferenceAdapter(LanguagePreferencePort):
                     ],
                 }
             ],
-            "generationConfig": {
-                "temperature": 0.2,
-                "responseMimeType": "application/json",
-                "responseSchema": LANGUAGE_PREF_SCHEMA,
-                "thinkingConfig": {"thinkingBudget": 0},
-            },
+            "generationConfig": build_generation_config(self._model, LANGUAGE_PREF_SCHEMA),
         }
 
     def _request_language_preference(self, text: str) -> Dict:

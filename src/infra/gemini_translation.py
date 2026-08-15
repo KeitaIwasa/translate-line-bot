@@ -10,6 +10,7 @@ import requests
 
 from src.domain.models import TranslationRequest, TranslationResult
 from src.domain.ports import TranslationPort
+from src.infra.gemini_generation_config import build_generation_config
 from src.infra.translation_schema import TRANSLATION_SCHEMA
 
 logger = logging.getLogger(__name__)
@@ -169,11 +170,6 @@ class GeminiTranslationAdapter(TranslationPort):
                     ],
                 }
             ],
-            "generationConfig": {
-                "temperature": 0.2,
-                "responseMimeType": "application/json",
-                "responseSchema": TRANSLATION_SCHEMA,
-                "thinkingConfig": {"thinkingBudget": 0},
-            },
+            "generationConfig": build_generation_config(self._model, TRANSLATION_SCHEMA),
         }
         return payload

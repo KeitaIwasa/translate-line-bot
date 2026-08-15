@@ -5,6 +5,7 @@ import pytest
 
 from src.domain.models import ContextMessage, TranslationRequest
 from src.infra.gemini_translation import GeminiTranslationAdapter
+from src.infra.translation_schema import TRANSLATION_SCHEMA
 
 
 class DummyResponse:
@@ -68,7 +69,11 @@ def test_translate_builds_payload_and_filters_translations(monkeypatch, fixed_da
     session = DummySession(response_data=_build_default_response())
     monkeypatch.setattr("infra.gemini_translation.requests.Session", lambda: session)
 
-    client = GeminiTranslationAdapter(api_key="api-key", model="gemini-pro", timeout_seconds=7)
+    client = GeminiTranslationAdapter(
+        api_key="api-key",
+        model="gemini-3.5-flash-lite",
+        timeout_seconds=7,
+    )
 
     request = TranslationRequest(
         sender_name="Bob",
@@ -95,6 +100,11 @@ def test_translate_builds_payload_and_filters_translations(monkeypatch, fixed_da
     assert body["context_messages"][0]["sender_name"] == "Alice"
     assert body["context_messages"][0]["timestamp"] == fixed_datetime.strftime("%Y-%m-%d %H:%M:%S")
     assert body["target_languages"] == ["ja", "fr"]
+    assert payload["generationConfig"] == {
+        "responseMimeType": "application/json",
+        "responseSchema": TRANSLATION_SCHEMA,
+        "thinkingConfig": {"thinkingLevel": "minimal"},
+    }
 
 
 def test_translate_skips_request_when_no_targets(monkeypatch, fixed_datetime):
