@@ -10,6 +10,7 @@ import requests
 
 from ..domain.models import LanguageChoice, LanguagePreference
 from ..domain.ports import LanguagePreferencePort
+from .gemini_errors import GeminiRateLimitError, GeminiRequestError
 from .gemini_generation_config import build_generation_config
 
 logger = logging.getLogger(__name__)
@@ -124,9 +125,19 @@ class LanguagePreferenceAdapter(LanguagePreferencePort):
             json=payload,
             timeout=self._timeout,
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.HTTPError:
+            status_code = response.status_code
+            logger.error(
+                "Gemini language preference request failed | model=%s status=%s",
+                self._model,
+                status_code,
+            )
+            if status_code == 429:
+                raise GeminiRateLimitError(self._model) from None
+            raise GeminiRequestError(self._model, status_code) from None
         body = response.json()
-        logger.debug("Gemini language preference raw response", extra={"body": body})
         return body
 
     @staticmethod
@@ -135,7 +146,8 @@ class LanguagePreferenceAdapter(LanguagePreferencePort):
             candidate = body["candidates"][0]
             part_text = candidate["content"]["parts"][0]["text"]
         except (KeyError, IndexError) as exc:
-            raise ValueError(f"Unexpected Gemini response format: {body}") from exc
+            logger.error("Gemini language preference response format invalid")
+            raise ValueError("Unexpected Gemini language preference response format") from exc
 
         data = json.loads(part_text)
         languages = [

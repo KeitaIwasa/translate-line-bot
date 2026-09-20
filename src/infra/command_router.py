@@ -118,25 +118,32 @@ class GeminiCommandRouter(CommandRouterPort):
             response.raise_for_status()
         except HTTPError:
             logger.error(
-                "Command router request failed: status=%s body=%s",
+                "Command router request failed | model=%s status=%s",
+                self._model,
                 response.status_code,
-                response.text[:800],
             )
             return self._unknown_decision()
 
         body = response.json()
-        logger.debug("command router raw response", extra={"body": body})
 
         try:
             candidate = body["candidates"][0]
             part_text = candidate["content"]["parts"][0]["text"]
         except (KeyError, IndexError) as exc:
-            raise ValueError(f"Unexpected command router response: {body}") from exc
+            logger.error(
+                "Command router response format invalid | model=%s",
+                self._model,
+            )
+            raise ValueError("Unexpected command router response format") from exc
 
         try:
             data = json.loads(part_text)
         except Exception:
-            logger.error("Command router JSON parse failed", extra={"part_text": part_text})
+            logger.error(
+                "Command router JSON parse failed | model=%s response_length=%s",
+                self._model,
+                len(part_text),
+            )
             return self._unknown_decision()
 
         def _parse_lang_list(items: List[Dict] | None) -> List[LanguageChoice]:
@@ -230,7 +237,10 @@ class OpenAIGroupMentionCommandRouter(CommandRouterPort):
         try:
             output = self._run_agent(text)
         except Exception:
-            logger.exception("Group mention agent execution failed")
+            logger.error(
+                "Group mention agent execution failed | model=%s operation=command_router",
+                self._model,
+            )
             return self._error_decision()
         decision = self._to_command_decision(output)
         if not decision:
@@ -373,11 +383,10 @@ class OpenAIGroupMentionCommandRouter(CommandRouterPort):
     def _to_command_decision(self, raw_output: Any) -> CommandDecision | None:
         payload = self._normalize_output(raw_output)
         if not isinstance(payload, dict):
-            preview = str(raw_output)
             logger.warning(
-                "Unexpected router output type: %s preview=%s",
+                "Unexpected router output type: %s output_present=%s",
                 type(raw_output).__name__,
-                preview[:300],
+                raw_output is not None,
             )
             return None
 

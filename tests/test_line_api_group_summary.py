@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+import logging
 
 from src.infra.line_api import LineApiAdapter
 
@@ -62,3 +63,39 @@ def test_get_group_name_error_returns_none():
     name = adapter.get_group_name("group123")
 
     assert name is None
+
+
+def test_reply_error_log_does_not_include_payload_or_signed_url(caplog):
+    class _ReplySession(_FakeSession):
+        def post(self, *args, **kwargs):
+            return _FakeResponse(status_code=500, text="server error")
+
+    session = _ReplySession([])
+    adapter = LineApiAdapter("dummy")
+    adapter._session = session  # type: ignore[attr-defined]
+    caplog.set_level(logging.ERROR, logger="src.infra.line_api")
+
+    try:
+        adapter.reply_messages(
+            "reply-token",
+            [
+                {
+                    "type": "template",
+                    "altText": "Subscription",
+                    "template": {
+                        "type": "buttons",
+                        "actions": [
+                            {"type": "uri", "label": "Manage", "uri": "https://example.test/?st=secret-token"}
+                        ],
+                    },
+                }
+            ],
+        )
+    except RuntimeError:
+        pass
+
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "payload" not in logs
+    assert "secret-token" not in logs
+    assert "Subscription" not in logs
+    assert "types=['template']" in logs

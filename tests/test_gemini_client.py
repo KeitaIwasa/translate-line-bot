@@ -2,8 +2,10 @@ import json
 from datetime import datetime, timezone
 
 import pytest
+import requests
 
 from src.domain.models import ContextMessage, TranslationRequest
+from src.infra.gemini_errors import GeminiRequestError
 from src.infra.gemini_translation import GeminiTranslationAdapter
 from src.infra.translation_schema import TRANSLATION_SCHEMA
 
@@ -34,6 +36,22 @@ class DummySession:
             }
         )
         return DummyResponse(self._response)
+
+
+class ErrorResponse:
+    status_code = 400
+
+    def raise_for_status(self) -> None:
+        raise requests.HTTPError(
+            "400 Client Error: Bad Request for url: "
+            "https://generativelanguage.googleapis.com/v1beta/models/test:generateContent?key=api-key",
+            response=self,
+        )
+
+
+class ErrorSession:
+    def post(self, url, params=None, json=None, timeout=None):
+        return ErrorResponse()
 
 
 def _build_default_response():
@@ -153,3 +171,21 @@ def test_translate_truncates_long_texts(monkeypatch, fixed_datetime):
 
     assert len(body["context_messages"][0]["text"]) == 250
     assert body["context_messages"][0]["text"].endswith("...")
+
+
+def test_translate_http_error_does_not_include_api_key_in_exception(monkeypatch, fixed_datetime):
+    monkeypatch.setattr("infra.gemini_translation.requests.Session", ErrorSession)
+    client = GeminiTranslationAdapter(api_key="api-key", model="gemini-3.5-flash-lite")
+    request = TranslationRequest(
+        sender_name="Bob",
+        message_text="Hello",
+        timestamp=fixed_datetime,
+        candidate_languages=["ja"],
+        context_messages=[],
+    )
+
+    with pytest.raises(GeminiRequestError) as exc_info:
+        client.translate(request)
+
+    assert "api-key" not in str(exc_info.value)
+    assert "generativelanguage.googleapis.com" not in str(exc_info.value)

@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime, timezone
 
 from src.app.handlers.message_handler import MessageHandler
@@ -8,12 +9,13 @@ from src.domain import models
 class _Line:
     def __init__(self):
         self.last_text = None
+        self.last_messages = None
 
     def reply_text(self, _token, text):
         self.last_text = text
 
     def reply_messages(self, *_args, **_kwargs):
-        return None
+        self.last_messages = _args[1] if len(_args) > 1 else _kwargs.get("messages")
 
     def get_display_name(self, *_args, **_kwargs):
         return None
@@ -160,3 +162,73 @@ def test_router_receives_runtime_payload_json():
     assert data["next_reset_at_utc"] == "2026-03-01T00:00:00+00:00"
     assert data["current_languages"] == ["ja", "en"]
     assert data["translation_enabled"] is True
+
+
+def test_command_logs_decision_timing_and_text_reply_metadata_without_body(caplog):
+    class _Router:
+        def decide(self, _text):
+            return models.CommandDecision(
+                action="howto",
+                instruction_language="ja",
+                ack_text="秘密の返信本文はログに出さない",
+            )
+
+    caplog.set_level(logging.INFO, logger="src.app.handlers.message_handler")
+    handler = _build_handler(_Router())
+
+    handler._handle_command(_event(), "使い方")
+
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "Command decision | action=howto instruction_lang=ja" in logs
+    assert "ack_present=True" in logs
+    assert "Command stage | stage=runtime_fetch" in logs
+    assert "Command stage | stage=router_decision" in logs
+    assert "Command stage | stage=instruction_language_resolution" in logs
+    assert "Command stage | stage=action_handler" in logs
+    assert "Command reply | status=sent reply_type=text message_count=1" in logs
+    assert "Command completed | status=success action=howto" in logs
+    assert "total_elapsed_ms=" in logs
+    assert "秘密の返信本文はログに出さない" not in logs
+
+
+def test_command_logs_template_structure_without_labels_or_signed_urls(caplog):
+    class _Router:
+        def decide(self, _text):
+            return models.CommandDecision(action="subscription_menu", instruction_language="en")
+
+    class _SubscriptionRepo(_Repo):
+        def get_subscription_period(self, _group_id):
+            return ("active", None, None)
+
+        def get_subscription_plan(self, _group_id):
+            return ("active", "pro", "month", False, None, None, None, None, None, None)
+
+    class _SubscriptionService:
+        def create_checkout_url(self, _group_id):
+            return "https://example.test/pro.html?st=secret-token"
+
+    caplog.set_level(logging.INFO, logger="src.app.handlers.message_handler")
+    handler = MessageHandler(
+        line_client=_Line(),
+        translation_service=_Dummy(),
+        interface_translation=_Dummy(),
+        language_detector=_LangDetector(),
+        language_pref_service=_Dummy(),
+        command_router=_Router(),
+        repo=_SubscriptionRepo(),
+        max_context_messages=1,
+        max_group_languages=5,
+        translation_retry=1,
+        bot_mention_name="KOTORI",
+        subscription_service=_SubscriptionService(),
+    )
+
+    handler._handle_command(_event(), "サブスク確認")
+
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "Command decision | action=subscription_menu" in logs
+    assert "Command reply | status=sent reply_type=template message_count=1" in logs
+    assert "template_types=['buttons']" in logs
+    assert "action_count=2" in logs
+    assert "Manage billing" not in logs
+    assert "secret-token" not in logs
