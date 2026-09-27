@@ -1,4 +1,5 @@
 import json
+import logging
 
 from src.infra.command_router import OpenAIGroupMentionCommandRouter
 
@@ -98,3 +99,16 @@ def test_decide_returns_error_when_tool_is_not_selected(tmp_path):
     decision = router.decide('{"user_message":"help"}')
 
     assert decision.action == "error"
+
+
+def test_invalid_agent_output_log_does_not_include_reply_body(tmp_path, caplog):
+    router = _build_router(tmp_path)
+    router._run_agent = lambda _text: "秘密の返信本文"
+    caplog.set_level(logging.WARNING, logger="src.infra.command_router")
+
+    decision = router.decide('{"user_message":"help"}')
+
+    assert decision.action == "error"
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "秘密の返信本文" not in logs
+    assert "preview=" not in logs

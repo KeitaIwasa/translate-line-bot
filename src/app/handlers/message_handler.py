@@ -6,7 +6,7 @@ import base64
 import zlib
 import re
 import time
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 from datetime import datetime, timezone
 from calendar import monthrange
@@ -79,6 +79,138 @@ COMMAND_ROUTER_ERROR_BASE = "Sorry, I couldn't process that request right now. P
 LANGUAGE_LIMIT_MESSAGE_EN = "You can set up to {limit} translation languages. Please specify {limit} or fewer."
 PRIVATE_ASSISTANT_USER_ID = "__assistant__"
 PRIVATE_ASSISTANT_SENDER = "KOTORI Support"
+
+
+@dataclass
+class _CommandTrace:
+    """コマンド処理の観測用状態。本文やトークンは保持しない。"""
+
+    group_id: str
+    started: float = field(default_factory=time.perf_counter)
+    action: str = "unknown"
+    instruction_language: str = ""
+    operation: str = ""
+    add_count: int = 0
+    remove_count: int = 0
+    ack_present: bool = False
+    ack_length: int = 0
+    reply_type: str = "none"
+    message_count: int = 0
+    text_length: int = 0
+    template_types: List[str] = field(default_factory=list)
+    template_action_count: int = 0
+    reply_status: str = "not_sent"
+    reply_api_ms: float = 0.0
+    status: str = "in_progress"
+
+    def set_decision(self, decision: models.CommandDecision, instruction_language: str) -> None:
+        self.action = decision.action or "unknown"
+        self.instruction_language = instruction_language or ""
+        self.operation = decision.operation or ""
+        self.ack_present = bool((decision.ack_text or "").strip())
+        self.ack_length = len(decision.ack_text or "")
+
+    def log_stage(self, stage: str, stage_started: float) -> None:
+        now = time.perf_counter()
+        logger.info(
+            "Command stage | stage=%s elapsed_ms=%.2f stage_elapsed_ms=%.2f group=%s",
+            stage,
+            (now - self.started) * 1000,
+            (now - stage_started) * 1000,
+            self.group_id,
+        )
+
+    def log_decision(self, router_elapsed_ms: float) -> None:
+        logger.info(
+            "Command decision | action=%s instruction_lang=%s operation=%s "
+            "add_count=%s remove_count=%s ack_present=%s ack_length=%s router_elapsed_ms=%.2f group=%s",
+            self.action,
+            self.instruction_language or "none",
+            self.operation or "none",
+            self.add_count,
+            self.remove_count,
+            self.ack_present,
+            self.ack_length,
+            router_elapsed_ms,
+            self.group_id,
+        )
+
+    def set_language_counts(self, decision: models.CommandDecision) -> None:
+        self.add_count = len(decision.languages_to_add)
+        self.remove_count = len(decision.languages_to_remove)
+
+    def record_reply(self, messages: Sequence[dict], elapsed_ms: float, success: bool) -> None:
+        self.reply_api_ms += elapsed_ms
+        self.reply_status = "sent" if success else "failed"
+        self.message_count += len(messages)
+
+        reply_types = {message.get("type") for message in messages if isinstance(message, dict)}
+        reply_types.discard(None)
+        if len(reply_types) == 1:
+            self.reply_type = next(iter(reply_types))
+        elif reply_types:
+            self.reply_type = "mixed"
+
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            if message.get("type") == "text":
+                self.text_length += len(message.get("text") or "")
+                continue
+            if message.get("type") != "template":
+                continue
+            template = message.get("template")
+            if not isinstance(template, dict):
+                continue
+            template_type = template.get("type")
+            if template_type:
+                self.template_types.append(str(template_type))
+            actions = template.get("actions")
+            if isinstance(actions, list):
+                self.template_action_count += len(actions)
+
+        logger.info(
+            "Command reply | status=%s reply_type=%s message_count=%s text_length=%s "
+            "template_types=%s action_count=%s reply_api_ms=%.2f group=%s",
+            self.reply_status,
+            self.reply_type,
+            self.message_count,
+            self.text_length,
+            sorted(set(self.template_types)) or [],
+            self.template_action_count,
+            elapsed_ms,
+            self.group_id,
+        )
+
+    def log_operation(self, label: str, attempt: int, elapsed_ms: float, status: str) -> None:
+        logger.info(
+            "Command operation | label=%s attempt=%s status=%s elapsed_ms=%.2f group=%s",
+            label,
+            attempt,
+            status,
+            elapsed_ms,
+            self.group_id,
+        )
+
+    def log_completed(self) -> None:
+        if self.status == "in_progress":
+            self.status = "success" if self.reply_status == "sent" else "completed_without_reply"
+        logger.info(
+            "Command completed | status=%s action=%s instruction_lang=%s reply_status=%s "
+            "reply_type=%s message_count=%s text_length=%s template_types=%s "
+            "action_count=%s total_elapsed_ms=%.2f group=%s",
+            self.status,
+            self.action,
+            self.instruction_language or "none",
+            self.reply_status,
+            self.reply_type,
+            self.message_count,
+            self.text_length,
+            sorted(set(self.template_types)) or [],
+            self.template_action_count,
+            (time.perf_counter() - self.started) * 1000,
+            self.group_id,
+        )
 
 
 class MessageHandler:
@@ -248,13 +380,42 @@ class MessageHandler:
             logger.exception("Failed to persist direct assistant message")
 
     # --- internal helpers ---
-    def _reply_text(self, event: models.MessageEvent, text: Optional[str]) -> bool:
+    def _reply_text(
+        self,
+        event: models.MessageEvent,
+        text: Optional[str],
+        *,
+        command_trace: _CommandTrace | None = None,
+    ) -> bool:
         if not event.reply_token or not text:
             return False
-        self._line.reply_text(event.reply_token, text[:LINE_REPLY_TEXT_LIMIT])
+        reply_text = text[:LINE_REPLY_TEXT_LIMIT]
+        started = time.perf_counter()
+        try:
+            self._line.reply_text(event.reply_token, reply_text)
+        except Exception:
+            if command_trace:
+                command_trace.record_reply(
+                    [{"type": "text", "text": reply_text}],
+                    (time.perf_counter() - started) * 1000,
+                    False,
+                )
+            raise
+        if command_trace:
+            command_trace.record_reply(
+                [{"type": "text", "text": reply_text}],
+                (time.perf_counter() - started) * 1000,
+                True,
+            )
         return True
 
-    def _reply_messages(self, event: models.MessageEvent, messages: Sequence[dict]) -> bool:
+    def _reply_messages(
+        self,
+        event: models.MessageEvent,
+        messages: Sequence[dict],
+        *,
+        command_trace: _CommandTrace | None = None,
+    ) -> bool:
         if not event.reply_token or not messages:
             return False
         normalized: List[dict] = []
@@ -267,7 +428,23 @@ class MessageHandler:
             normalized.append(item)
         if not normalized:
             return False
-        self._line.reply_messages(event.reply_token, normalized)
+        started = time.perf_counter()
+        try:
+            self._line.reply_messages(event.reply_token, normalized)
+        except Exception:
+            if command_trace:
+                command_trace.record_reply(
+                    normalized,
+                    (time.perf_counter() - started) * 1000,
+                    False,
+                )
+            raise
+        if command_trace:
+            command_trace.record_reply(
+                normalized,
+                (time.perf_counter() - started) * 1000,
+                True,
+            )
         return True
 
     def _attempt_language_enrollment(self, event: models.MessageEvent) -> bool:
@@ -345,68 +522,115 @@ class MessageHandler:
         return stripped or ""
 
     def _handle_command(self, event: models.MessageEvent, command_text: str) -> bool:
-        instr_future: Future[str] | None = None
+        trace = _CommandTrace(group_id=event.group_id or "")
         try:
-            instr_future = self._executor.submit(self._lang_detector.detect, command_text)
+            instr_future: Future[str] | None = None
+            try:
+                instr_future = self._executor.submit(self._lang_detector.detect, command_text)
+            except Exception:
+                logger.debug("Executor submission failed; fallback to sync", exc_info=True)
+
+            runtime_started = time.perf_counter()
+            try:
+                runtime = self._fetch_command_runtime_state(event.group_id)
+            finally:
+                trace.log_stage("runtime_fetch", runtime_started)
+
+            router_input = self._build_command_router_input(command_text, runtime)
+            router_started = time.perf_counter()
+            try:
+                decision = self._command_router.decide(router_input)
+            finally:
+                router_elapsed_ms = (time.perf_counter() - router_started) * 1000
+                trace.log_stage("router_decision", router_started)
+
+            language_started = time.perf_counter()
+            instruction_lang = decision.instruction_language
+            if not instruction_lang and instr_future:
+                try:
+                    instruction_lang = instr_future.result()
+                except Exception:
+                    logger.debug("Instruction language detect failed", exc_info=True)
+                    instruction_lang = decision.instruction_language
+            if not instruction_lang and command_text:
+                try:
+                    instruction_lang = self._lang_detector.detect(command_text)
+                except Exception:
+                    logger.debug("Instruction language detect failed (sync)", exc_info=True)
+            trace.log_stage("instruction_language_resolution", language_started)
+
+            trace.set_decision(decision, instruction_lang)
+            trace.set_language_counts(decision)
+            trace.log_decision(router_elapsed_ms)
+
+            action = decision.action or "unknown"
+            action_started = time.perf_counter()
+            try:
+                if action == "error":
+                    message = self._build_command_router_error_message(instruction_lang, command_trace=trace)
+                    handled = self._reply_text(event, message, command_trace=trace)
+                elif action == "language_settings":
+                    handled = self._handle_language_settings(event, decision, command_text, command_trace=trace)
+                elif action == "howto":
+                    message = (decision.ack_text or "").strip()
+                    if not message:
+                        message = self._build_usage_response(
+                            instruction_lang or decision.instruction_language,
+                            event.group_id,
+                            command_trace=trace,
+                        )
+                    handled = self._reply_text(event, message, command_trace=trace)
+                elif action == "pause":
+                    self._repo.set_translation_enabled(event.group_id, False)
+                    base_ack = "I will pause translation. Please mention me again when you want to resume."
+                    ack = decision.ack_text or self._safe_translate_for_instruction(
+                        base_ack,
+                        instruction_lang,
+                        command_trace=trace,
+                    )
+                    handled = self._reply_text(event, ack, command_trace=trace)
+                elif action == "resume":
+                    self._repo.set_translation_enabled(event.group_id, True)
+                    base_ack = "I will resume the translation."
+                    ack = decision.ack_text or self._safe_translate_for_instruction(
+                        base_ack,
+                        instruction_lang,
+                        command_trace=trace,
+                    )
+                    handled = self._reply_text(event, ack, command_trace=trace)
+                elif action == "subscription_menu":
+                    handled = self._handle_subscription_menu(
+                        event,
+                        instruction_lang or decision.instruction_language,
+                        command_trace=trace,
+                    )
+                elif action == "subscription_cancel":
+                    handled = self._handle_subscription_cancel(
+                        event,
+                        instruction_lang or decision.instruction_language,
+                        command_trace=trace,
+                    )
+                elif action == "subscription_upgrade":
+                    handled = self._handle_subscription_upgrade(
+                        event,
+                        instruction_lang or decision.instruction_language,
+                        command_trace=trace,
+                    )
+                else:
+                    handled = self._respond_unknown_instruction(
+                        event,
+                        instruction_lang or decision.instruction_language,
+                        command_text,
+                        command_trace=trace,
+                    )
+            finally:
+                trace.log_stage("action_handler", action_started)
+            return handled
         except Exception:
-            logger.debug("Executor submission failed; fallback to sync", exc_info=True)
-
-        runtime = self._fetch_command_runtime_state(event.group_id)
-        router_input = self._build_command_router_input(command_text, runtime)
-        decision = self._command_router.decide(router_input)
-        action = decision.action or "unknown"
-        instruction_lang = decision.instruction_language
-        if not instruction_lang and instr_future:
-            try:
-                instruction_lang = instr_future.result()
-            except Exception:
-                logger.debug("Instruction language detect failed", exc_info=True)
-                instruction_lang = decision.instruction_language
-        if not instruction_lang and command_text:
-            try:
-                instruction_lang = self._lang_detector.detect(command_text)
-            except Exception:
-                logger.debug("Instruction language detect failed (sync)", exc_info=True)
-
-        if action == "error":
-            message = self._build_command_router_error_message(instruction_lang)
-            self._reply_text(event, message)
-            return True
-
-        if action == "language_settings":
-            return self._handle_language_settings(event, decision, command_text)
-
-        if action == "howto":
-            message = (decision.ack_text or "").strip()
-            if not message:
-                message = self._build_usage_response(instruction_lang or decision.instruction_language, event.group_id)
-            self._reply_text(event, message)
-            return True
-
-        if action == "pause":
-            self._repo.set_translation_enabled(event.group_id, False)
-            base_ack = "I will pause translation. Please mention me again when you want to resume."
-            ack = decision.ack_text or self._safe_translate_for_instruction(base_ack, instruction_lang)
-            self._reply_text(event, ack)
-            return True
-
-        if action == "resume":
-            self._repo.set_translation_enabled(event.group_id, True)
-            base_ack = "I will resume the translation."
-            ack = decision.ack_text or self._safe_translate_for_instruction(base_ack, instruction_lang)
-            self._reply_text(event, ack)
-            return True
-
-        if action == "subscription_menu":
-            return self._handle_subscription_menu(event, instruction_lang or decision.instruction_language)
-
-        if action == "subscription_cancel":
-            return self._handle_subscription_cancel(event, instruction_lang or decision.instruction_language)
-
-        if action == "subscription_upgrade":
-            return self._handle_subscription_upgrade(event, instruction_lang or decision.instruction_language)
-
-        return self._respond_unknown_instruction(event, instruction_lang or decision.instruction_language, command_text)
+            trace.status = "error"
+            raise
+        finally:
+            trace.log_completed()
 
     def _fetch_command_runtime_state(self, group_id: str) -> models.TranslationRuntimeState:
         fetcher = getattr(self._repo, "fetch_translation_runtime_state", None)
@@ -494,14 +718,34 @@ class MessageHandler:
             return ""
         return f"{reset_date}T00:00:00+00:00"
 
-    def _build_command_router_error_message(self, instruction_lang: str) -> str:
-        return self._safe_translate_for_instruction(COMMAND_ROUTER_ERROR_BASE, instruction_lang)
+    def _build_command_router_error_message(
+        self,
+        instruction_lang: str,
+        *,
+        command_trace: _CommandTrace | None = None,
+    ) -> str:
+        return self._safe_translate_for_instruction(
+            COMMAND_ROUTER_ERROR_BASE,
+            instruction_lang,
+            command_trace=command_trace,
+        )
 
-    def _safe_translate_for_instruction(self, base_text: str, instruction_lang: str) -> str:
+    def _safe_translate_for_instruction(
+        self,
+        base_text: str,
+        instruction_lang: str,
+        *,
+        command_trace: _CommandTrace | None = None,
+    ) -> str:
         if not instruction_lang or instruction_lang.lower().startswith("en"):
             return base_text
         try:
-            translated = self._translate_template(base_text, instruction_lang, force=True)
+            translated = self._translate_template(
+                base_text,
+                instruction_lang,
+                force=True,
+                command_trace=command_trace,
+            )
             if isinstance(translated, str) and translated.strip():
                 return translated
         except Exception:
@@ -513,12 +757,19 @@ class MessageHandler:
         event: models.MessageEvent,
         decision: models.CommandDecision,
         command_text: Optional[str] = None,
+        *,
+        command_trace: _CommandTrace | None = None,
     ) -> bool:
         op = decision.operation or "reset_all"
         valid_ops = {"reset_all", "add_and_remove", "add", "remove"}
         if op not in valid_ops:
             logger.info("Unsupported language operation", extra={"op": op})
-            return self._respond_unknown_instruction(event, decision.instruction_language, command_text)
+            return self._respond_unknown_instruction(
+                event,
+                decision.instruction_language,
+                command_text,
+                command_trace=command_trace,
+            )
         add_langs = [(lang.code, lang.name) for lang in decision.languages_to_add]
         remove_codes = [lang.code for lang in decision.languages_to_remove]
         plan_key = self._resolve_effective_plan_for_group(event.group_id)
@@ -544,8 +795,9 @@ class MessageHandler:
                 msg = self._build_language_limit_message(
                     decision.instruction_language,
                     max_languages=language_limit,
+                    command_trace=command_trace,
                 )
-                self._reply_text(event, msg)
+                self._reply_text(event, msg, command_trace=command_trace)
                 return True
 
         if op == "reset_all":
@@ -556,8 +808,9 @@ class MessageHandler:
             ack = self._translate_template(
                 "Your language settings have been reset. Please tell us all the languages ​​you would like to translate.",
                 decision.instruction_language,
+                command_trace=command_trace,
             )
-            self._reply_text(event, ack)
+            self._reply_text(event, ack, command_trace=command_trace)
             return True
 
         if op == "add_and_remove":
@@ -579,8 +832,12 @@ class MessageHandler:
         # 言語変更後は翻訳再開
         self._repo.set_translation_enabled(event.group_id, True)
 
-        ack = decision.ack_text or self._translate_template("言語設定を更新しました。", decision.instruction_language)
-        self._reply_text(event, ack)
+        ack = decision.ack_text or self._translate_template(
+            "言語設定を更新しました。",
+            decision.instruction_language,
+            command_trace=command_trace,
+        )
+        self._reply_text(event, ack, command_trace=command_trace)
         return True
 
     def _respond_unknown_instruction(
@@ -588,11 +845,13 @@ class MessageHandler:
         event: models.MessageEvent,
         instruction_lang: str,
         original_text: Optional[str] = None,
+        *,
+        command_trace: _CommandTrace | None = None,
     ) -> bool:
         detected = instruction_lang or (self._lang_detector.detect(original_text) if original_text else "")
-        fallback = self._build_unknown_response(detected)
+        fallback = self._build_unknown_response(detected, command_trace=command_trace)
         self._repo.set_translation_enabled(event.group_id, True)
-        self._reply_text(event, fallback)
+        self._reply_text(event, fallback, command_trace=command_trace)
         return True
 
     def _handle_translation_flow(
@@ -823,7 +1082,13 @@ class MessageHandler:
             )
 
     # --- subscription helpers ---
-    def _handle_subscription_menu(self, event: models.MessageEvent, instruction_lang: str) -> bool:
+    def _handle_subscription_menu(
+        self,
+        event: models.MessageEvent,
+        instruction_lang: str,
+        *,
+        command_trace: _CommandTrace | None = None,
+    ) -> bool:
         status, _period_start, period_end = getattr(self._repo, "get_subscription_period", lambda *_: (None, None, None))(
             event.group_id
         )
@@ -857,42 +1122,73 @@ class MessageHandler:
             upgrade_url=upgrade_url,
             include_upgrade=effective_plan != PRO_PLAN,
             include_cancel=paid,
-            translate=lambda text: self._translate_template(text, instruction_lang, force=True),
+            translate=lambda text: self._translate_template(
+                text,
+                instruction_lang,
+                force=True,
+                command_trace=command_trace,
+            ),
             truncate=self._truncate,
             normalize_text=self._normalize_template_text,
         )
 
         if not message:
-            fallback = self._translate_template("Subscription status is unavailable right now.", instruction_lang, force=True)
-            self._reply_text(event, fallback)
+            fallback = self._translate_template(
+                "Subscription status is unavailable right now.",
+                instruction_lang,
+                force=True,
+                command_trace=command_trace,
+            )
+            self._reply_text(event, fallback, command_trace=command_trace)
             return True
 
-        self._reply_messages(event, [message])
+        self._reply_messages(event, [message], command_trace=command_trace)
         return True
 
-    def _handle_subscription_cancel(self, event: models.MessageEvent, instruction_lang: str) -> bool:
+    def _handle_subscription_cancel(
+        self,
+        event: models.MessageEvent,
+        instruction_lang: str,
+        *,
+        command_trace: _CommandTrace | None = None,
+    ) -> bool:
         if not self._can_manage_subscription(event.group_id, event.user_id):
-            message = self._translate_interface_single(SUBS_OWNER_ONLY_TEXT, instruction_lang, event.group_id)
-            self._reply_text(event, message)
+            message = self._translate_interface_single(
+                SUBS_OWNER_ONLY_TEXT,
+                instruction_lang,
+                event.group_id,
+                command_trace=command_trace,
+            )
+            self._reply_text(event, message, command_trace=command_trace)
             return True
         customer_id, subscription_id, status = getattr(self._repo, "get_subscription_detail", lambda *_: (None, None, None))(
             event.group_id
         )
         active = self._is_active_subscription(status)
         if not subscription_id or not customer_id or not active:
-            message = self._translate_interface_single(SUBS_NOT_PRO_TEXT, instruction_lang, event.group_id)
-            self._reply_text(event, message)
+            message = self._translate_interface_single(
+                SUBS_NOT_PRO_TEXT,
+                instruction_lang,
+                event.group_id,
+                command_trace=command_trace,
+            )
+            self._reply_text(event, message, command_trace=command_trace)
             return True
 
         confirm = build_subscription_cancel_confirm(
             group_id=event.group_id,
-            translate=lambda text: self._translate_template(text, instruction_lang, force=True),
+            translate=lambda text: self._translate_template(
+                text,
+                instruction_lang,
+                force=True,
+                command_trace=command_trace,
+            ),
             truncate=self._truncate,
             normalize_text=self._normalize_template_text,
             base_confirm_text=SUBS_CANCEL_CONFIRM_TEXT,
         )
         if confirm:
-            self._reply_messages(event, [confirm])
+            self._reply_messages(event, [confirm], command_trace=command_trace)
         return True
 
     def _can_manage_subscription(self, group_id: str, user_id: str | None) -> bool:
@@ -906,8 +1202,18 @@ class MessageHandler:
         is_member = getattr(self._repo, "is_group_member", lambda *_: True)(group_id, user_id)
         return bool(is_member)
 
-    def _handle_subscription_upgrade(self, event: models.MessageEvent, instruction_lang: str) -> bool:
-        return self._handle_subscription_menu(event, instruction_lang)
+    def _handle_subscription_upgrade(
+        self,
+        event: models.MessageEvent,
+        instruction_lang: str,
+        *,
+        command_trace: _CommandTrace | None = None,
+    ) -> bool:
+        return self._handle_subscription_menu(
+            event,
+            instruction_lang,
+            command_trace=command_trace,
+        )
 
     def _maybe_send_limit_notice(
         self,
@@ -1134,6 +1440,8 @@ class MessageHandler:
         instruction_lang: str,
         group_id: str,
         precomputed_languages: Optional[List[str]] = None,
+        *,
+        command_trace: _CommandTrace | None = None,
     ) -> str:
         base_targets = list(precomputed_languages or self._repo.fetch_group_languages(group_id))
         if instruction_lang:
@@ -1151,6 +1459,7 @@ class MessageHandler:
             timestamp=datetime.now(timezone.utc),
             context=[],
             candidate_languages=translation_targets,
+            command_trace=command_trace,
         )
 
         targets_lower = {lang.lower() for lang in targets_list}
@@ -1170,7 +1479,12 @@ class MessageHandler:
 
         return "\n\n".join(lines)[:MAX_REPLY_LENGTH]
 
-    def _build_unknown_response(self, instruction_lang: str) -> str:
+    def _build_unknown_response(
+        self,
+        instruction_lang: str,
+        *,
+        command_trace: _CommandTrace | None = None,
+    ) -> str:
         translations = self._invoke_translation_with_retry(
             sender_name="System",
             message_text=UNKNOWN_INSTRUCTION_BASE,
@@ -1178,6 +1492,7 @@ class MessageHandler:
             context=[],
             candidate_languages=[instruction_lang] if instruction_lang else [],
             allow_same_language=True,
+            command_trace=command_trace,
         )
         if not translations:
             return self._normalize_bullet_newlines(UNKNOWN_INSTRUCTION_BASE)
@@ -1185,18 +1500,40 @@ class MessageHandler:
         normalized = self._normalize_bullet_newlines(text or UNKNOWN_INSTRUCTION_BASE)
         return normalized
 
-    def _translate_interface_single(self, base_text: str, instruction_lang: str, group_id: str) -> str:
+    def _translate_interface_single(
+        self,
+        base_text: str,
+        instruction_lang: str,
+        group_id: str,
+        *,
+        command_trace: _CommandTrace | None = None,
+    ) -> str:
         """インターフェース文言を 1 言語で返す。instruction_lang が無い場合はグループの主要言語を使用。"""
 
         # instruction_lang 優先
         if instruction_lang and self._interface_translation:
+            started = time.perf_counter()
             try:
                 translations = self._interface_translation.translate(base_text, [instruction_lang])
+                if command_trace:
+                    command_trace.log_operation(
+                        "Gemini interface translation",
+                        1,
+                        (time.perf_counter() - started) * 1000,
+                        "success",
+                    )
                 if translations:
                     cleaned = strip_source_echo(base_text, translations[0].text)
                     if cleaned or translations[0].text:
                         return cleaned or translations[0].text or base_text
             except Exception:  # pylint: disable=broad-except
+                if command_trace:
+                    command_trace.log_operation(
+                        "Gemini interface translation",
+                        1,
+                        (time.perf_counter() - started) * 1000,
+                        "failed",
+                    )
                 logger.warning("translate_interface_single failed", exc_info=True)
 
         # グループ主要言語へフォールバック
@@ -1208,12 +1545,27 @@ class MessageHandler:
                 break
 
         if primary and self._interface_translation:
+            started = time.perf_counter()
             try:
                 translations = self._interface_translation.translate(base_text, [primary])
+                if command_trace:
+                    command_trace.log_operation(
+                        "Gemini interface translation fallback",
+                        1,
+                        (time.perf_counter() - started) * 1000,
+                        "success",
+                    )
                 if translations:
                     cleaned = strip_source_echo(base_text, translations[0].text)
                     return cleaned or translations[0].text or base_text
             except Exception:  # pylint: disable=broad-except
+                if command_trace:
+                    command_trace.log_operation(
+                        "Gemini interface translation fallback",
+                        1,
+                        (time.perf_counter() - started) * 1000,
+                        "failed",
+                    )
                 logger.warning("translate_interface_single fallback failed", exc_info=True)
 
         return base_text
@@ -1222,7 +1574,13 @@ class MessageHandler:
         """箇条書きのハイフンの前に改行を強制して読みやすくする。"""
         return re.sub(r"(?<!\n)(- )", "\n- ", text)
 
-    def _build_language_limit_message(self, instruction_lang: str, *, max_languages: Optional[int] = None) -> str:
+    def _build_language_limit_message(
+        self,
+        instruction_lang: str,
+        *,
+        max_languages: Optional[int] = None,
+        command_trace: _CommandTrace | None = None,
+    ) -> str:
         limit = max_languages if max_languages is not None else self._max_group_languages
         base = LANGUAGE_LIMIT_MESSAGE_EN.format(limit=limit)
         if not instruction_lang or instruction_lang.lower().startswith("en"):
@@ -1230,7 +1588,12 @@ class MessageHandler:
 
         manual = None
         lowered = instruction_lang.lower()
-        translated = self._translate_template(base, instruction_lang, force=True)
+        translated = self._translate_template(
+            base,
+            instruction_lang,
+            force=True,
+            command_trace=command_trace,
+        )
         if translated and translated != base:
             return translated
         return manual or translated or base
@@ -1241,6 +1604,7 @@ class MessageHandler:
         instruction_lang: str,
         *,
         force: bool = False,
+        command_trace: _CommandTrace | None = None,
     ) -> str | List[str]:
         if isinstance(base_text, str):
             originals = [base_text]
@@ -1268,6 +1632,7 @@ class MessageHandler:
             timestamp=datetime.now(timezone.utc),
             context=[],
             candidate_languages=[instruction_lang],
+            command_trace=command_trace,
         )
         if not translations:
             return base_text
@@ -1304,6 +1669,7 @@ class MessageHandler:
         candidate_languages: Sequence[str],
         *,
         allow_same_language: bool = False,
+        command_trace: _CommandTrace | None = None,
     ):
         if not candidate_languages:
             return []
@@ -1320,12 +1686,15 @@ class MessageHandler:
                 allow_same_language=allow_same_language,
             ),
             timeout_seconds=getattr(getattr(self._translation, "_translator", None), "_timeout", None),
+            command_trace=command_trace,
         )
 
     def _invoke_interface_translation_with_retry(
         self,
         base_text: str,
         target_languages: Sequence[str],
+        *,
+        command_trace: _CommandTrace | None = None,
     ):
         if not target_languages:
             return []
@@ -1334,15 +1703,39 @@ class MessageHandler:
             label="Gemini interface translation",
             func=partial(self._interface_translation.translate, base_text, target_languages),
             timeout_seconds=getattr(getattr(self._interface_translation, "_translator", None), "_timeout", None),
+            command_trace=command_trace,
         )
 
-    def _run_with_retry(self, label: str, func, timeout_seconds: int | None = None):
+    def _run_with_retry(
+        self,
+        label: str,
+        func,
+        timeout_seconds: int | None = None,
+        *,
+        command_trace: _CommandTrace | None = None,
+    ):
         """翻訳系リトライ共通処理。"""
         last_error: Exception | None = None
         for attempt in range(self._translation_retry):
+            attempt_started = time.perf_counter()
             try:
-                return func()
+                result = func()
+                if command_trace:
+                    command_trace.log_operation(
+                        label,
+                        attempt + 1,
+                        (time.perf_counter() - attempt_started) * 1000,
+                        "success",
+                    )
+                return result
             except requests.exceptions.Timeout as exc:
+                if command_trace:
+                    command_trace.log_operation(
+                        label,
+                        attempt + 1,
+                        (time.perf_counter() - attempt_started) * 1000,
+                        "timeout",
+                    )
                 logger.warning(
                     "%s timeout",
                     label,
@@ -1350,6 +1743,13 @@ class MessageHandler:
                 )
                 last_error = exc
             except Exception as exc:  # pylint: disable=broad-except
+                if command_trace:
+                    command_trace.log_operation(
+                        label,
+                        attempt + 1,
+                        (time.perf_counter() - attempt_started) * 1000,
+                        "failed",
+                    )
                 if isinstance(exc, GeminiRateLimitError):
                     last_error = exc
                     break

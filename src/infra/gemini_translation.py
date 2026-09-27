@@ -10,6 +10,8 @@ import requests
 
 from src.domain.models import TranslationRequest, TranslationResult
 from src.domain.ports import TranslationPort
+from src.infra.gemini_errors import GeminiRateLimitError, GeminiRequestError
+from src.infra.gemini_generation_config import build_generation_config
 from src.infra.translation_schema import TRANSLATION_SCHEMA
 
 logger = logging.getLogger(__name__)
@@ -32,10 +34,6 @@ Requirements:
 * Output only a JSON object that conforms to the specified JSON Schema.
 * Do NOT include context_messages or target_languages in the output JSON.
 """.strip()
-
-
-class GeminiRateLimitError(requests.HTTPError):
-    """Raised when Gemini returns HTTP 429 Too Many Requests."""
 
 
 @dataclass(frozen=True)
@@ -93,17 +91,24 @@ class GeminiTranslationAdapter(TranslationPort):
         )
         try:
             response.raise_for_status()
-        except requests.HTTPError as exc:
-            if exc.response is not None and exc.response.status_code == 429:
-                raise GeminiRateLimitError(exc.response) from exc
-            raise
+        except requests.HTTPError:
+            status_code = response.status_code
+            logger.error(
+                "Gemini request failed | model=%s status=%s",
+                self._model,
+                status_code,
+            )
+            if status_code == 429:
+                raise GeminiRateLimitError(self._model) from None
+            raise GeminiRequestError(self._model, status_code) from None
 
         body = response.json()
         try:
             candidate = body["candidates"][0]
             part_text = candidate["content"]["parts"][0]["text"]
         except (KeyError, IndexError) as exc:
-            raise ValueError(f"Unexpected Gemini response format: {body}") from exc
+            logger.error("Gemini response format invalid | model=%s", self._model)
+            raise ValueError("Unexpected Gemini response format") from exc
 
         data = json.loads(part_text)
 
@@ -169,11 +174,6 @@ class GeminiTranslationAdapter(TranslationPort):
                     ],
                 }
             ],
-            "generationConfig": {
-                "temperature": 0.2,
-                "responseMimeType": "application/json",
-                "responseSchema": TRANSLATION_SCHEMA,
-                "thinkingConfig": {"thinkingBudget": 0},
-            },
+            "generationConfig": build_generation_config(self._model, TRANSLATION_SCHEMA),
         }
         return payload
