@@ -43,3 +43,23 @@ def test_get_settings_reads_contact_env_vars(monkeypatch):
     assert settings.contact_rate_limit_max == 9
     assert settings.contact_rate_limit_window_seconds == 120
     assert settings.contact_ip_hash_salt == "salt-123"
+
+
+def test_get_settings_reads_jev_env_vars(monkeypatch):
+    monkeypatch.setenv("LINE_CHANNEL_SECRET", "x")
+    monkeypatch.setenv("LINE_CHANNEL_ACCESS_TOKEN", "x")
+    monkeypatch.setenv("GEMINI_API_KEY", "x")
+    monkeypatch.setenv("NEON_DATABASE_URL", "postgres://example")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "")
+    monkeypatch.setenv("TYPESAFE_API_KEY_SSM_PARAMETER", "/kotori/stg/typesafe-api-key")
+    monkeypatch.setenv("JEV_TIMEOUT_SECONDS", "1.2")
+    monkeypatch.setenv("JEV_MIN_CONFIDENCE", "0.9")
+
+    get_settings.cache_clear()
+    settings = get_settings()
+
+    assert settings.typesafe_api_key == ""
+    assert settings.typesafe_api_key_ssm_parameter == "/kotori/stg/typesafe-api-key"
+    assert settings.jev_model == "jev-latest"
+    assert settings.jev_timeout_seconds == 1.2
+    assert settings.jev_min_confidence == 0.9

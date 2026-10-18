@@ -50,6 +50,11 @@ class Settings:
     contact_rate_limit_max: int = 5
     contact_rate_limit_window_seconds: int = 600
     contact_ip_hash_salt: str = ""
+    typesafe_api_key: str = ""
+    typesafe_api_key_ssm_parameter: str = ""
+    jev_model: str = "jev-latest"
+    jev_timeout_seconds: float = 1.5
+    jev_min_confidence: float = 0.8
 
 
 @lru_cache(maxsize=1)
@@ -121,4 +126,9 @@ def get_settings() -> Settings:
         contact_rate_limit_max=int(env.get("CONTACT_RATE_LIMIT_MAX", "5")),
         contact_rate_limit_window_seconds=int(env.get("CONTACT_RATE_LIMIT_WINDOW_SECONDS", "600")),
         contact_ip_hash_salt=env.get("CONTACT_IP_HASH_SALT", ""),
+        typesafe_api_key=env.get("TYPESAFE_API_KEY", ""),
+        typesafe_api_key_ssm_parameter=env.get("TYPESAFE_API_KEY_SSM_PARAMETER", ""),
+        jev_model=env.get("JEV_MODEL", "jev-latest") or "jev-latest",
+        jev_timeout_seconds=float(env.get("JEV_TIMEOUT_SECONDS", "1.5") or "1.5"),
+        jev_min_confidence=float(env.get("JEV_MIN_CONFIDENCE", "0.8") or "0.8"),
     )

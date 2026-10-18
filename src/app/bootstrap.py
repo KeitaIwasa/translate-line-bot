@@ -10,6 +10,7 @@ from ..domain.services.language_detection_service import LanguageDetectionServic
 from ..infra.gemini_translation import GeminiTranslationAdapter
 from ..infra.language_pref_client import LanguagePreferenceAdapter
 from ..infra.command_router import OpenAIGroupMentionCommandRouter
+from ..infra.jev_command_router import JevFirstPassCommandRouter, TypesafeApiKeyProvider
 from ..infra.line_api import LineApiAdapter
 from ..infra.neon_client import get_client
 from ..infra.neon_repositories import NeonMessageRepository
@@ -52,11 +53,22 @@ def build_dispatcher() -> Dispatcher:
         timeout_seconds=settings.gemini_timeout_seconds,
     )
     group_prompt_path = str(Path(__file__).resolve().parent / "prompts" / "kotori_group_mention_prompt.txt")
-    command_router = OpenAIGroupMentionCommandRouter(
+    llm_command_router = OpenAIGroupMentionCommandRouter(
         api_key=settings.openai_api_key,
         model=settings.openai_group_mention_model,
         prompt_path=group_prompt_path,
         timeout_seconds=settings.gemini_timeout_seconds,
+    )
+    # Jev で定型操作を一次判定し、言語依存の操作だけ LLM ルーターに回す
+    command_router = JevFirstPassCommandRouter(
+        fallback=llm_command_router,
+        api_key_provider=TypesafeApiKeyProvider(
+            api_key=settings.typesafe_api_key,
+            ssm_parameter_name=settings.typesafe_api_key_ssm_parameter,
+        ),
+        model=settings.jev_model,
+        timeout_seconds=settings.jev_timeout_seconds,
+        min_confidence=settings.jev_min_confidence,
     )
     db_client = get_client(settings.neon_database_url)
     repo = NeonMessageRepository(

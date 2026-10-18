@@ -58,6 +58,17 @@ Parameters:
       - false
     Description: Set to true when Stripe secrets/price IDs are provisioned
 
+  TypesafeApiKey:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: TypeSafe (Jev) API key. Leave empty to use TypesafeApiKeySsmParameter or disable Jev
+  TypesafeApiKeySsmParameter:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^/kotori/.+"
+    Description: SSM SecureString name holding the TypeSafe API key (e.g. /kotori/stg/typesafe-api-key). Empty disables the SSM lookup
+
 Conditions:
   UseStripe: !Equals [!Ref EnableStripe, "true"]
 
@@ -125,6 +136,11 @@ Globals:
         OPENAI_SUPPORT_MODEL: gpt-5.2
         OPENAI_GROUP_MENTION_MODEL: gpt-5.2
         OPENAI_GUARDRAIL_MODEL: gpt-4.1-mini
+        TYPESAFE_API_KEY: !Ref TypesafeApiKey
+        TYPESAFE_API_KEY_SSM_PARAMETER: !Ref TypesafeApiKeySsmParameter
+        JEV_MODEL: jev-latest
+        JEV_TIMEOUT_SECONDS: "1.5"
+        JEV_MIN_CONFIDENCE: "0.8"
         PRIVATE_CHAT_HISTORY_LIMIT: 5
         CONTACT_TO_EMAIL: contact@iwasadigital.com
         CONTACT_FROM_EMAIL: no-reply@iwasadigital.com
@@ -146,6 +162,10 @@ Resources:
       Description: Handles LINE webhook events and triggers translation pipeline
       Policies:
         - AWSLambdaBasicExecutionRole
+        - Statement:
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/kotori/${StageName}/*"
       Events:
         Webhook:
           Type: HttpApi
