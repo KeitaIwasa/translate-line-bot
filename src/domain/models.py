@@ -153,6 +153,15 @@ class TranslationRuntimeState:
 
 
 @dataclass(frozen=True)
+class GroupMessagePrefetch:
+    """翻訳前にまとめて読むグループ状態と、保存済みの送信者表示名。"""
+
+    runtime: TranslationRuntimeState
+    display_name: Optional[str] = None
+    cache_hit: bool = False
+
+
+@dataclass(frozen=True)
 class PrivateChatResponse:
     output_text: str
     safe_input_text: str

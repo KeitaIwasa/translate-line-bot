@@ -213,6 +213,19 @@ class _CommandTrace:
         )
 
 
+@dataclass
+class _GroupMessageStart:
+    """グループメッセージ1件の、返信前に揃えた状態。"""
+
+    legacy: bool
+    sender_name: str
+    deferred_display_name: Optional[str] = None
+    runtime: Optional[models.TranslationRuntimeState] = None
+    messages_future: Optional[Future] = None
+    name_future: Optional[Future] = None
+    membership_written: bool = False
+
+
 class MessageHandler:
     """message イベントのユースケースを担当。"""
 
@@ -252,6 +265,7 @@ class MessageHandler:
         self._max_group_languages = max_group_languages
         self._translation_retry = translation_retry
         self._bot_mention_name = bot_mention_name
+        self._max_context_messages = max_context_messages
         self._free_quota = free_quota_per_month
         self._standard_quota = standard_quota_per_month
         self._pro_quota = pro_quota_per_month
@@ -295,8 +309,7 @@ class MessageHandler:
             self._handle_private_chat(event, sender_name, timestamp)
             return
 
-        self._repo.ensure_group_member(event.group_id, event.user_id)
-        sender_name, deferred_name = self._resolve_sender_name(event)
+        start = self._begin_group_message(event)
 
         logger.info(
             "Handling message event | group=%s user=%s sender=%s text=%.40s",
@@ -307,31 +320,141 @@ class MessageHandler:
         )
 
         try:
-            self._process_group_message(event, sender_name, deferred_name)
+            self._process_group_message(event, start)
         except GeminiRateLimitError:
             logger.warning("Gemini rate limited; notifying user")
             self._send_rate_limit_notice(event)
         except Exception:
             logger.exception("Message handling failed")
         finally:
+            if not start.legacy:
+                try:
+                    start.sender_name = self._finish_deferred_group_bookkeeping(event, start)
+                except Exception:
+                    logger.exception("Deferred member bookkeeping failed")
+            self._drain_optional_future(start.messages_future, "recent_messages")
             try:
-                self._record_message(event, sender_name=sender_name, timestamp=timestamp)
+                self._record_message(event, sender_name=start.sender_name, timestamp=timestamp)
             except Exception:
                 logger.exception("Failed to persist message")
-        
-    def _process_group_message(
-        self,
-        event: models.MessageEvent,
-        sender_name: str,
-        deferred_display_name: str | None,
-    ) -> bool:
+
+    def _begin_group_message(self, event: models.MessageEvent) -> _GroupMessageStart:
+        loader = getattr(self._repo, "fetch_group_message_prefetch", None)
+        if not callable(loader):
+            # テスト用の古いリポジトリ。会員登録と表示名は返信前のまま。
+            self._repo.ensure_group_member(event.group_id, event.user_id)
+            sender_name, deferred_name = self._resolve_sender_name(event)
+            return _GroupMessageStart(
+                legacy=True,
+                sender_name=sender_name,
+                deferred_display_name=deferred_name,
+            )
+
+        messages_future = None
+        if self._extract_command_text(event) is None:
+            # 履歴取得は設定読み取りと重ねる。翻訳しない経路でもハンドラ返却前に待つ。
+            messages_future = self._executor.submit(
+                self._repo.fetch_recent_messages,
+                event.group_id,
+                self._max_context_messages,
+            )
+        prefetch = loader(event.group_id, event.user_id)
+        if prefetch.display_name:
+            return _GroupMessageStart(
+                legacy=False,
+                sender_name=prefetch.display_name,
+                runtime=prefetch.runtime,
+                messages_future=messages_future,
+            )
+
+        logger.info("Display name lookup deferred | group=%s", event.group_id)
+        name_future = self._executor.submit(
+            self._line.get_display_name,
+            event.sender_type,
+            event.group_id,
+            event.user_id,
+        )
+        return _GroupMessageStart(
+            legacy=False,
+            sender_name=event.user_id or "Unknown",
+            runtime=prefetch.runtime,
+            messages_future=messages_future,
+            name_future=name_future,
+        )
+
+    def _finish_deferred_group_bookkeeping(self, event: models.MessageEvent, start: _GroupMessageStart) -> str:
+        """返信後に会員登録と表示名保存を終える。ハンドラが返る前に完了させる。"""
+
+        started = time.perf_counter()
+        display_name = None
+        if start.name_future is not None:
+            try:
+                display_name = start.name_future.result()
+            except Exception:
+                logger.warning("Deferred display name lookup failed", exc_info=True)
+                display_name = None
+        saved_name = False
+        ensured = False
+        normalized_name = (display_name or "").strip()
+        try:
+            if normalized_name and event.group_id and event.user_id:
+                self._repo.upsert_group_member_display_name(event.group_id, event.user_id, normalized_name)
+                saved_name = True
+                start.sender_name = normalized_name
+            elif not start.membership_written:
+                self._repo.ensure_group_member(event.group_id, event.user_id)
+                ensured = True
+        except Exception:
+            logger.exception("Deferred member write failed")
+        logger.info(
+            "Deferred group bookkeeping | elapsed_ms=%.2f group=%s ensured=%s display_name_saved=%s",
+            (time.perf_counter() - started) * 1000,
+            event.group_id,
+            ensured,
+            saved_name,
+        )
+        return start.sender_name
+
+    @staticmethod
+    def _drain_optional_future(future: Future | None, label: str) -> None:
+        if future is None:
+            return
+        try:
+            future.result()
+        except Exception:
+            logger.warning("Background %s failed", label, exc_info=True)
+
+    def _sender_name_if_ready(self, start: _GroupMessageStart) -> str:
+        if start.name_future is None or not start.name_future.done():
+            return start.sender_name
+        try:
+            display_name = start.name_future.result()
+        except Exception:
+            logger.warning("Display name lookup failed before translation", exc_info=True)
+            return start.sender_name
+        normalized_name = (display_name or "").strip()
+        if normalized_name:
+            start.sender_name = normalized_name
+        return start.sender_name
+
+    def _process_group_message(self, event: models.MessageEvent, start: _GroupMessageStart) -> bool:
         """グループ向けメッセージのディスパッチを担当。"""
         command_text = self._extract_command_text(event)
         # メンションさえ含まれていればコマンド扱い（空文字でも許可）
         if command_text is not None:
+            # 課金コマンドは所属確認を返信前に見る。翻訳ホットパスでは会員登録を後ろへ回す。
+            if not start.legacy and event.group_id and event.user_id:
+                self._repo.ensure_group_member(event.group_id, event.user_id)
+                start.membership_written = True
             return self._handle_command(event, command_text)
 
-        return self._handle_translation_flow(event, sender_name, deferred_display_name=deferred_display_name)
+        return self._handle_translation_flow(
+            event,
+            self._sender_name_if_ready(start),
+            deferred_display_name=start.deferred_display_name,
+            runtime=start.runtime,
+            messages_future=start.messages_future,
+        )
 
     def _handle_private_chat(
         self,
@@ -860,9 +983,12 @@ class MessageHandler:
         sender_name: str,
         translation_enabled: bool | None = None,
         deferred_display_name: str | None = None,
+        runtime: models.TranslationRuntimeState | None = None,
+        messages_future: Future | None = None,
     ) -> bool:
         started = time.perf_counter()
-        runtime = self._repo.fetch_translation_runtime_state(event.group_id)
+        if runtime is None:
+            runtime = self._repo.fetch_translation_runtime_state(event.group_id)
         self._log_translation_stage("runtime_fetched", started, event.group_id)
 
         plan_key, language_limit, candidate_languages, removed_languages = self._prepare_translation_context(event, runtime)
@@ -917,6 +1043,7 @@ class MessageHandler:
             period_start=runtime.period_start,
             period_end=runtime.period_end,
             quota_anchor_day=runtime.quota_anchor_day,
+            prefetched_messages=messages_future,
         )
         self._log_translation_stage("after_translation_run", started, event.group_id)
 

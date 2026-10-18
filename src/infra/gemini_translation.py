@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable, List
@@ -83,12 +84,21 @@ class GeminiTranslationAdapter(TranslationPort):
             len(context),
         )
 
-        response = self._session.post(
-            url,
-            params={"key": self._api_key},
-            json=payload,
-            timeout=self._timeout,
-        )
+        started = time.perf_counter()
+        try:
+            response = self._session.post(
+                url,
+                params={"key": self._api_key},
+                json=payload,
+                timeout=self._timeout,
+            )
+        finally:
+            logger.info(
+                "Gemini call | model=%s elapsed_ms=%.2f targets=%s",
+                self._model,
+                (time.perf_counter() - started) * 1000,
+                len(request.candidate_languages),
+            )
         try:
             response.raise_for_status()
         except requests.HTTPError:

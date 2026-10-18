@@ -59,6 +59,7 @@ class TranslationFlowService:
         period_end: datetime | None,
         quota_anchor_day: int | None = None,
         paid: bool | None = None,
+        prefetched_messages=None,
     ) -> TranslationFlowResult:
         """クオータ判定→翻訳実行→返信文生成までを一括で行う。"""
 
@@ -86,7 +87,8 @@ class TranslationFlowService:
         increment = 1
         group_id = event.group_id or ""
 
-        context_messages = self._repo.fetch_recent_messages(event.group_id, self._max_context)
+        # クオータ更新と履歴取得は別接続で同時に進む。ここでは結果を受け取る。
+        context_messages = self._resolve_context_messages(event.group_id or "", prefetched_messages)
         timestamp = datetime.fromtimestamp(event.timestamp / 1000, tz=timezone.utc)
         try:
             translations = self._invoke_translation_with_retry(
@@ -116,6 +118,17 @@ class TranslationFlowService:
 
         reply_text = build_translation_reply(event.text, translations)
         return TranslationFlowResult(decision=decision, reply_text=reply_text)
+
+    def _resolve_context_messages(self, group_id: str, prefetched_messages):
+        if prefetched_messages is None:
+            return self._repo.fetch_recent_messages(group_id, self._max_context)
+        if hasattr(prefetched_messages, "result") and not isinstance(prefetched_messages, (list, tuple)):
+            try:
+                return list(prefetched_messages.result() or [])
+            except Exception:
+                logger.warning("Prefetched context failed; reading messages again", exc_info=True)
+                return self._repo.fetch_recent_messages(group_id, self._max_context)
+        return list(prefetched_messages)
 
     def _rollback_usage(self, *, group_id: str, period_key: str, increment: int) -> None:
         """失敗時にクオータを元に戻すヘルパー。"""
