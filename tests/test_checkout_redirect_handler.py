@@ -301,6 +301,30 @@ def test_auth_start_explains_expired_token(monkeypatch):
     assert "signed-token" not in response["body"]
 
 
+def test_auth_start_logs_group_id_when_token_is_expired(monkeypatch, caplog):
+    module = _import_handler(monkeypatch)
+    token = module.issue_token(
+        {
+            "version": 2,
+            "group_id": "Cexpiredgroup",
+            "scope": module.CHECKOUT_SCOPE,
+            "exp": 1,
+        },
+        secret="token_secret",
+    )
+
+    with caplog.at_level("WARNING"):
+        response = module.lambda_handler(
+            {"queryStringParameters": {"mode": "auth_start", "st": token, "return_to": "/pro.html"}},
+            None,
+        )
+
+    assert response["statusCode"] == 401
+    assert "token expired" in caplog.text
+    assert "group_id=Cexpiredgroup" in caplog.text
+    assert token not in caplog.text
+
+
 def test_auth_callback_explains_line_access_denied(monkeypatch):
     module = _import_handler(monkeypatch)
     event = {

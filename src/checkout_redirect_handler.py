@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import html
 import importlib
 import json
@@ -996,8 +997,13 @@ def _ensure_checkout_membership(repo: NeonMessageRepository, group_id: str, line
         return MEMBERSHIP_MEMBER
 
     verdict = _lookup_line_membership(group_id, line_user_id)
-    # テキスト未送信のメンバーは DB に居ない。結果だけ残し、ユーザーIDは出さない。
-    logger.warning("checkout membership db miss group_id=%s verdict=%s", group_id, verdict)
+    # メッセージ処理と同じく user_id を残し、Login 側と Messaging API 側の ID 不一致を追えるようにする。
+    logger.warning(
+        "checkout membership db miss group_id=%s user_id=%s verdict=%s",
+        group_id,
+        line_user_id,
+        verdict,
+    )
     if verdict != MEMBERSHIP_MEMBER:
         return verdict
 
@@ -1195,9 +1201,22 @@ def _verify_subscription_token(token: str) -> Optional[Dict[str, Any]]:
     try:
         return verify_token(token, secret=settings.subscription_token_secret, scope=CHECKOUT_SCOPE)
     except TokenError as exc:
-        # トークン本文は出さない。期限切れと署名不正をログで区別できるようにする。
-        logger.warning("subscription token rejected: %s", exc)
+        # 署名検証後の期限切れだけ group_id を残す。トークン本文は出さない。
+        group_id = _signed_group_id(token) if str(exc) == "token expired" else ""
+        logger.warning("subscription token rejected: %s group_id=%s", exc, group_id or "-")
         return None
+
+
+def _signed_group_id(token: str) -> str:
+    try:
+        encoded = token.split(".", 1)[0]
+        padding = "=" * (-len(encoded) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(encoded + padding))
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("group_id") or "")
 
 
 def _checkout_session_secret() -> str:
