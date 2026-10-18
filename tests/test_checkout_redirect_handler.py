@@ -154,6 +154,7 @@ def test_auth_callback_redirects_with_not_member_error(monkeypatch):
     monkeypatch.setattr(module, "_exchange_line_login_code", lambda _code: "access-token")
     monkeypatch.setattr(module, "_fetch_line_user_id", lambda _token: "U999")
     monkeypatch.setattr(module, "_get_repo", lambda: _Repo())
+    monkeypatch.setattr(module, "_lookup_line_membership", lambda _group_id, _user_id: module.MEMBERSHIP_NOT_MEMBER)
 
     event = {"queryStringParameters": {"mode": "auth_callback", "code": "abc", "state": "state-token"}}
     response = module.lambda_handler(event, None)
@@ -162,6 +163,74 @@ def test_auth_callback_redirects_with_not_member_error(monkeypatch):
     parsed = urlparse(response["headers"]["Location"])
     query = parse_qs(parsed.query)
     assert query["error"] == ["not_member"]
+
+
+def test_auth_callback_accepts_member_confirmed_by_line_profile(monkeypatch):
+    module = _import_handler(monkeypatch)
+    ensured = []
+
+    class _Repo:
+        @staticmethod
+        def is_group_member(_group_id, _user_id):
+            return False
+
+        @staticmethod
+        def ensure_group_member(group_id, user_id):
+            ensured.append((group_id, user_id))
+
+    monkeypatch.setattr(
+        module,
+        "verify_token",
+        lambda token, **kwargs: (
+            {"st": "signed-token", "return_to": "/pro.html"}
+            if kwargs.get("scope") == module.CHECKOUT_OAUTH_STATE_SCOPE
+            else {"group_id": "gid_1"}
+        ),
+    )
+    monkeypatch.setattr(module, "_exchange_line_login_code", lambda _code: "access-token")
+    monkeypatch.setattr(module, "_fetch_line_user_id", lambda _token: "U999")
+    monkeypatch.setattr(module, "_get_repo", lambda: _Repo())
+    monkeypatch.setattr(module, "_lookup_line_membership", lambda _group_id, _user_id: module.MEMBERSHIP_MEMBER)
+
+    event = {"queryStringParameters": {"mode": "auth_callback", "code": "abc", "state": "state-token"}}
+    response = module.lambda_handler(event, None)
+
+    assert response["statusCode"] == 302
+    query = parse_qs(urlparse(response["headers"]["Location"]).query)
+    assert "cs" in query
+    assert "error" not in query
+    assert ensured == [("gid_1", "U999")]
+
+
+def test_auth_callback_does_not_reject_member_when_line_check_is_unavailable(monkeypatch):
+    module = _import_handler(monkeypatch)
+
+    class _Repo:
+        @staticmethod
+        def is_group_member(_group_id, _user_id):
+            return False
+
+    monkeypatch.setattr(
+        module,
+        "verify_token",
+        lambda token, **kwargs: (
+            {"st": "signed-token", "return_to": "/en/pro.html"}
+            if kwargs.get("scope") == module.CHECKOUT_OAUTH_STATE_SCOPE
+            else {"group_id": "gid_1"}
+        ),
+    )
+    monkeypatch.setattr(module, "_exchange_line_login_code", lambda _code: "access-token")
+    monkeypatch.setattr(module, "_fetch_line_user_id", lambda _token: "U999")
+    monkeypatch.setattr(module, "_get_repo", lambda: _Repo())
+    monkeypatch.setattr(module, "_lookup_line_membership", lambda _group_id, _user_id: module.MEMBERSHIP_UNAVAILABLE)
+
+    event = {"queryStringParameters": {"mode": "auth_callback", "code": "abc", "state": "state-token"}}
+    response = module.lambda_handler(event, None)
+
+    assert response["statusCode"] == 503
+    assert "text/html" in response["headers"]["Content-Type"]
+    assert "Group membership could not be verified" in response["body"]
+    assert "not_member" not in response["body"]
 
 
 def test_auth_callback_returns_401_when_line_token_exchange_http_error(monkeypatch):
@@ -186,8 +255,9 @@ def test_auth_callback_returns_401_when_line_token_exchange_http_error(monkeypat
     response = module.lambda_handler(event, None)
 
     assert response["statusCode"] == 401
-    body = json.loads(response["body"])
-    assert body["message"] == "line login failed"
+    assert "text/html" in response["headers"]["Content-Type"]
+    assert "LINE login could not be completed" in response["body"]
+    assert "signed-token" in response["body"]
 
 
 def test_auth_callback_returns_401_when_line_profile_fetch_url_error(monkeypatch):
@@ -213,8 +283,124 @@ def test_auth_callback_returns_401_when_line_profile_fetch_url_error(monkeypatch
     response = module.lambda_handler(event, None)
 
     assert response["statusCode"] == 401
-    body = json.loads(response["body"])
-    assert body["message"] == "line login failed"
+    assert "text/html" in response["headers"]["Content-Type"]
+    assert "LINEログインを完了できませんでした" in response["body"]
+
+
+def test_auth_start_explains_expired_token(monkeypatch):
+    module = _import_handler(monkeypatch)
+    monkeypatch.setattr(module, "_verify_subscription_token", lambda _token: None)
+
+    event = {"queryStringParameters": {"mode": "auth_start", "st": "signed-token", "return_to": "/pro.html"}}
+    response = module.lambda_handler(event, None)
+
+    assert response["statusCode"] == 401
+    assert "text/html" in response["headers"]["Content-Type"]
+    assert "24 hours" in response["body"]
+    assert "24時間" in response["body"]
+    assert "signed-token" not in response["body"]
+
+
+def test_auth_callback_explains_line_access_denied(monkeypatch):
+    module = _import_handler(monkeypatch)
+    event = {
+        "queryStringParameters": {
+            "mode": "auth_callback",
+            "error": "ACCESS_DENIED",
+            "error_description": "The resource owner denied the request.",
+            "state": "state-token",
+        }
+    }
+    response = module.lambda_handler(event, None)
+
+    assert response["statusCode"] == 401
+    assert "LINE login could not be completed" in response["body"]
+    assert "error_description" not in response["body"]
+    assert "state-token" not in response["body"]
+
+
+def test_lookup_line_membership_uses_room_or_group_profile(monkeypatch):
+    module = _import_handler(monkeypatch)
+    seen = {}
+
+    class _Resp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def _open(req, timeout=5):  # noqa: ARG001
+        seen["url"] = req.full_url
+        return _Resp()
+
+    monkeypatch.setattr(module, "urlopen", _open)
+    assert module._lookup_line_membership("Rroom", "Uuser") == module.MEMBERSHIP_MEMBER
+    assert "/v2/bot/room/Rroom/member/Uuser" in seen["url"]
+
+    def _missing(req, timeout=5):  # noqa: ARG001
+        raise HTTPError(req.full_url, 404, "missing", hdrs=None, fp=None)
+
+    monkeypatch.setattr(module, "urlopen", _missing)
+    assert module._lookup_line_membership("Cgroup", "Uuser") == module.MEMBERSHIP_NOT_MEMBER
+
+    def _busy(req, timeout=5):  # noqa: ARG001
+        raise HTTPError(req.full_url, 500, "busy", hdrs=None, fp=None)
+
+    monkeypatch.setattr(module, "urlopen", _busy)
+    assert module._lookup_line_membership("Cgroup", "Uuser") == module.MEMBERSHIP_UNAVAILABLE
+
+
+def test_authorize_member_registers_silent_member_confirmed_by_line(monkeypatch):
+    module = _import_handler(monkeypatch)
+    ensured = []
+
+    class _Repo:
+        @staticmethod
+        def is_group_member(_group_id, _user_id):
+            return False
+
+        @staticmethod
+        def ensure_group_member(group_id, user_id):
+            ensured.append((group_id, user_id))
+
+        @staticmethod
+        def get_billing_owner_user_id(_group_id):
+            return None
+
+    monkeypatch.setattr(module, "_get_repo", lambda: _Repo())
+    monkeypatch.setattr(module, "_verify_subscription_token", lambda _token: {"group_id": "gid_1"})
+    monkeypatch.setattr(module, "verify_token", lambda token, **kwargs: {"group_id": "gid_1", "line_user_id": "U123"})
+    monkeypatch.setattr(module, "_lookup_line_membership", lambda _group_id, _user_id: module.MEMBERSHIP_MEMBER)
+
+    auth = module._authorize_member({"queryStringParameters": {"st": "token", "cs": "session"}})  # pylint: disable=protected-access
+
+    assert auth.error_response is None
+    assert auth.line_user_id == "U123"
+    assert ensured == [("gid_1", "U123")]
+
+
+def test_authorize_member_returns_retryable_error_when_line_check_fails(monkeypatch):
+    module = _import_handler(monkeypatch)
+
+    class _Repo:
+        @staticmethod
+        def is_group_member(_group_id, _user_id):
+            return False
+
+    monkeypatch.setattr(module, "_get_repo", lambda: _Repo())
+    monkeypatch.setattr(module, "_verify_subscription_token", lambda _token: {"group_id": "gid_1"})
+    monkeypatch.setattr(module, "verify_token", lambda token, **kwargs: {"group_id": "gid_1", "line_user_id": "U123"})
+    monkeypatch.setattr(module, "_lookup_line_membership", lambda _group_id, _user_id: module.MEMBERSHIP_UNAVAILABLE)
+
+    auth = module._authorize_member({"queryStringParameters": {"st": "token", "cs": "session"}})  # pylint: disable=protected-access
+
+    assert auth.error_response is not None
+    assert auth.error_response["statusCode"] == 503
+    body = json.loads(auth.error_response["body"])
+    assert body["reason"] == "membership_unavailable"
 
 
 def test_status_returns_translation_count_for_current_period(monkeypatch):
