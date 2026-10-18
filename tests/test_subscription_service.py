@@ -134,6 +134,7 @@ def test_create_checkout_url_token_flow_has_only_signed_token():
     query = parse_qs(parsed.query)
     assert parsed.path == "/pro.html"
     assert "st" in query and query["st"][0]
+    assert query["openExternalBrowser"] == ["1"]
     assert "api_base" not in query
 
 
@@ -152,4 +153,5 @@ def test_create_checkout_url_token_flow_still_works_without_api_base():
     assert url is not None
     query = parse_qs(urlparse(url).query)
     assert "st" in query and query["st"][0]
+    assert query["openExternalBrowser"] == ["1"]
     assert "api_base" not in query

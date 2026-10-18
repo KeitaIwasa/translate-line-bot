@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib
 import logging
 from datetime import datetime, timedelta, timezone
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlencode
 from typing import Optional
 
 from ..ports import MessageRepositoryPort
@@ -58,7 +58,9 @@ class SubscriptionService:
             },
             secret=self._subscription_token_secret,
         )
-        return f"{self._subscription_frontend_base_url}{page_path}?st={quote_plus(token)}"
+        # LINE内ブラウザではログインのリダイレクトが途切れることがあるため、外部ブラウザで開く。
+        query = urlencode((("openExternalBrowser", "1"), ("st", token)))
+        return f"{self._subscription_frontend_base_url}{page_path}?{query}"
 
     def _create_legacy_checkout_url(self, group_id: str) -> Optional[str]:
         stripe = self._load_stripe()

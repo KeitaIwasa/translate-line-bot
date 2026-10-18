@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import base64
+import html
 import importlib
 import json
 import logging
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
@@ -42,6 +45,155 @@ RENEWAL_RESERVED_MESSAGE = "Another member has already reserved the next billing
 DEFAULT_RETURN_PATH = "/pro.html"
 ALLOWED_RETURN_PATHS = {"/pro.html", "/en/pro.html", "/zh-tw/pro.html", "/th/pro.html"}
 PENDING_BILLING_OWNER_TTL = timedelta(minutes=30)
+MEMBERSHIP_MEMBER = "member"
+MEMBERSHIP_NOT_MEMBER = "not_member"
+MEMBERSHIP_UNAVAILABLE = "unavailable"
+_LINE_ERROR_CODE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+# ブラウザ遷移で行き止まりになる認証失敗の案内。英語を原文にし、表示言語へ翻訳する。
+_AUTH_HELP_COPY: Dict[str, Dict[str, Dict[str, Any]]] = {
+    "invalid_token": {
+        "en": {
+            "title": "This plan link has expired",
+            "paragraphs": (
+                "This signup link works for 24 hours after KOTORI sends it.",
+                "Mention KOTORI in the LINE group and open Plan again to receive a new link.",
+            ),
+        },
+        "ja": {
+            "title": "このプラン用リンクは期限切れです",
+            "paragraphs": (
+                "この申し込みリンクは、KOTORIが送ってから24時間だけ有効です。",
+                "LINEグループでKOTORIにメンションし、プラン案内を開き直して、新しいリンクを受け取ってください。",
+            ),
+        },
+        "zh-TW": {
+            "title": "此方案連結已過期",
+            "paragraphs": (
+                "此申購連結在 KOTORI 送出後 24 小時內有效。",
+                "請在 LINE 群組中提及 KOTORI，重新開啟方案選單以取得新連結。",
+            ),
+        },
+        "th": {
+            "title": "ลิงก์แพ็กเกจนี้หมดอายุแล้ว",
+            "paragraphs": (
+                "ลิงก์สมัครนี้ใช้ได้ 24 ชั่วโมงหลังจาก KOTORI ส่ง",
+                "ในกลุ่ม LINE ให้กล่าวถึง KOTORI แล้วเปิดเมนูแพ็กเกจอีกครั้งเพื่อรับลิงก์ใหม่",
+            ),
+        },
+    },
+    "missing_token": {
+        "en": {
+            "title": "The group link is missing",
+            "paragraphs": (
+                "Open the plan link that KOTORI sent in the LINE group.",
+            ),
+        },
+        "ja": {
+            "title": "グループ用リンクが見つかりません",
+            "paragraphs": (
+                "LINEグループでKOTORIが送ったプランのリンクから開き直してください。",
+            ),
+        },
+        "zh-TW": {
+            "title": "找不到群組連結",
+            "paragraphs": (
+                "請從 KOTORI 在 LINE 群組中傳送的方案連結重新開啟。",
+            ),
+        },
+        "th": {
+            "title": "ไม่พบลิงก์ของกลุ่ม",
+            "paragraphs": (
+                "กรุณาเปิดลิงก์แพ็กเกจที่ KOTORI ส่งในกลุ่ม LINE",
+            ),
+        },
+    },
+    "login_failed": {
+        "en": {
+            "title": "LINE login could not be completed",
+            "paragraphs": (
+                "LINE did not finish signing you in. This can happen if the screen was cancelled, left open for more than 10 minutes, or interrupted in LINE's in-app browser.",
+                "Open a fresh plan link from the group. On iPhone, use the LINE menu and choose Open in Safari, then try again.",
+            ),
+        },
+        "ja": {
+            "title": "LINEログインを完了できませんでした",
+            "paragraphs": (
+                "ログイン画面をキャンセルした、10分以上放置した、またはLINEアプリ内ブラウザで中断された可能性があります。",
+                "グループのプランリンクを開き直してください。iPhoneではLINEのメニューからSafariで開いて、もう一度お試しください。",
+            ),
+        },
+        "zh-TW": {
+            "title": "無法完成 LINE 登入",
+            "paragraphs": (
+                "可能是取消了登入、畫面放置超過 10 分鐘，或在 LINE 內建瀏覽器中被中斷。",
+                "請重新開啟群組中的方案連結。iPhone 請從 LINE 選單選擇以 Safari 開啟後再試一次。",
+            ),
+        },
+        "th": {
+            "title": "ไม่สามารถเข้าสู่ระบบ LINE ให้เสร็จได้",
+            "paragraphs": (
+                "อาจเกิดจากการยกเลิก การเปิดหน้าค้างไว้นานกว่า 10 นาที หรือการถูกขัดจังหวะในเบราว์เซอร์ภายใน LINE",
+                "เปิดลิงก์แพ็กเกจจากกลุ่มอีกครั้ง บน iPhone ให้เลือกเปิดใน Safari จากเมนูของ LINE แล้วลองใหม่",
+            ),
+        },
+    },
+    "login_unavailable": {
+        "en": {
+            "title": "LINE login is temporarily unavailable",
+            "paragraphs": (
+                "Please wait a moment and open the plan link from the LINE group again.",
+            ),
+        },
+        "ja": {
+            "title": "LINEログインを一時的に利用できません",
+            "paragraphs": (
+                "しばらく待ってから、LINEグループのプランリンクを開き直してください。",
+            ),
+        },
+        "zh-TW": {
+            "title": "暫時無法使用 LINE 登入",
+            "paragraphs": (
+                "請稍候，再從 LINE 群組中的方案連結重新開啟。",
+            ),
+        },
+        "th": {
+            "title": "ยังไม่สามารถใช้การเข้าสู่ระบบ LINE ได้ชั่วคราว",
+            "paragraphs": (
+                "กรุณารอสักครู่ แล้วเปิดลิงก์แพ็กเกจจากกลุ่ม LINE อีกครั้ง",
+            ),
+        },
+    },
+    "membership_unavailable": {
+        "en": {
+            "title": "Group membership could not be verified",
+            "paragraphs": (
+                "KOTORI could not confirm your LINE group membership because LINE did not respond.",
+                "Wait a moment and try the same link again.",
+            ),
+        },
+        "ja": {
+            "title": "グループ所属を確認できませんでした",
+            "paragraphs": (
+                "LINEから応答がなく、このグループのメンバーかどうか確認できませんでした。",
+                "しばらく待ってから、同じリンクでもう一度お試しください。",
+            ),
+        },
+        "zh-TW": {
+            "title": "無法確認群組成員身分",
+            "paragraphs": (
+                "因為 LINE 沒有回應，無法確認您是否為此群組的成員。",
+                "請稍候後，再用同一個連結試一次。",
+            ),
+        },
+        "th": {
+            "title": "ไม่สามารถยืนยันสมาชิกภาพของกลุ่มได้",
+            "paragraphs": (
+                "KOTORI ยืนยันไม่ได้ว่าคุณเป็นสมาชิกของกลุ่ม LINE นี้ เนื่องจาก LINE ไม่ตอบกลับ",
+                "รอสักครู่แล้วลองลิงก์เดิมอีกครั้ง",
+            ),
+        },
+    },
+}
 
 
 def lambda_handler(event: Dict[str, Any], _context) -> Dict[str, Any]:
@@ -70,15 +222,16 @@ def lambda_handler(event: Dict[str, Any], _context) -> Dict[str, Any]:
 
 def _handle_auth_start(event: Dict[str, Any]) -> Dict[str, Any]:
     token = _extract_subscription_token(event)
+    return_to = _extract_return_to(event)
     if not token:
-        return _json_response(400, {"message": "st is required"})
+        return _auth_help_response(400, "missing_token", return_to)
 
     payload = _verify_subscription_token(token)
     if payload is None:
-        return _json_response(401, {"message": "invalid token"})
+        return _auth_help_response(401, "invalid_token", return_to)
 
     if not _line_login_ready():
-        return _json_response(503, {"message": "LINE Login is not available"})
+        return _auth_help_response(503, "login_unavailable", return_to)
 
     state = issue_token(
         {
@@ -105,39 +258,59 @@ def _handle_auth_start(event: Dict[str, Any]) -> Dict[str, Any]:
 def _handle_auth_callback(event: Dict[str, Any]) -> Dict[str, Any]:
     code = _extract_query_param(event, "code")
     state = _extract_query_param(event, "state")
+    line_error = _safe_line_error_code(_extract_query_param(event, "error"))
+    if line_error and not code:
+        logger.warning("LINE Login returned error: %s", line_error)
+        return _auth_help_response(401, "login_failed", DEFAULT_RETURN_PATH)
+
     if not code or not state:
-        return _json_response(400, {"message": "code and state are required"})
+        return _auth_help_response(400, "login_failed", DEFAULT_RETURN_PATH)
 
     try:
         state_payload = verify_token(state, secret=_checkout_session_secret(), scope=CHECKOUT_OAUTH_STATE_SCOPE)
-    except TokenError:
-        return _json_response(401, {"message": "invalid state"})
+    except TokenError as exc:
+        logger.warning("LINE Login state rejected: %s", exc)
+        return _auth_help_response(401, "login_failed", DEFAULT_RETURN_PATH)
 
     token = str(state_payload.get("st") or "").strip()
+    return_to = _sanitize_return_to(state_payload.get("return_to"))
     subscription_payload = _verify_subscription_token(token)
     if subscription_payload is None:
-        return _json_response(401, {"message": "invalid token"})
+        return _auth_help_response(401, "invalid_token", return_to)
 
     group_id = str(subscription_payload.get("group_id") or "").strip()
     if not group_id:
-        return _json_response(400, {"message": "token missing group_id"})
+        return _auth_help_response(400, "invalid_token", return_to)
 
     try:
         access_token = _exchange_line_login_code(code)
         line_user_id = _fetch_line_user_id(access_token)
     except (RuntimeError, HTTPError, URLError) as exc:
         logger.warning("LINE Login callback failed: %s", exc)
-        return _json_response(401, {"message": "line login failed"})
+        return _auth_help_response(
+            401,
+            "login_failed",
+            return_to,
+            retry_url=_frontend_retry_url(token=token, return_to=return_to),
+        )
 
     repo = _get_repo()
-    if not repo.is_group_member(group_id, line_user_id):
+    membership = _ensure_checkout_membership(repo, group_id, line_user_id)
+    if membership == MEMBERSHIP_NOT_MEMBER:
         return _redirect_response(
             _build_frontend_url(
                 token=token,
                 checkout_session=None,
-                return_to=_sanitize_return_to(state_payload.get("return_to")),
+                return_to=return_to,
                 error="not_member",
             )
+        )
+    if membership != MEMBERSHIP_MEMBER:
+        return _auth_help_response(
+            503,
+            "membership_unavailable",
+            return_to,
+            retry_url=_frontend_retry_url(token=token, return_to=return_to),
         )
 
     checkout_session = issue_token(
@@ -456,8 +629,19 @@ def _authorize_member(event: Dict[str, Any]) -> _CheckoutAuth:
         return _CheckoutAuth(error_response=_json_response(401, {"message": "token mismatch"}))
 
     repo = _get_repo()
-    if not repo.is_group_member(group_id, line_user_id):
+    membership = _ensure_checkout_membership(repo, group_id, line_user_id)
+    if membership == MEMBERSHIP_NOT_MEMBER:
         return _CheckoutAuth(error_response=_json_response(403, {"message": NOT_GROUP_MEMBER_MESSAGE, "reason": "not_member"}))
+    if membership != MEMBERSHIP_MEMBER:
+        return _CheckoutAuth(
+            error_response=_json_response(
+                503,
+                {
+                    "message": "Membership could not be verified. Please retry.",
+                    "reason": "membership_unavailable",
+                },
+            )
+        )
 
     (
         billing_owner_lost,
@@ -807,6 +991,125 @@ def _extract_subscription_item(subscription: Dict[str, Any]) -> Tuple[Optional[s
     return (price_id, item_id)
 
 
+def _ensure_checkout_membership(repo: NeonMessageRepository, group_id: str, line_user_id: str) -> str:
+    """DBの所属記録を優先し、無い場合だけ LINE のメンバープロフィールで確認する。"""
+    if repo.is_group_member(group_id, line_user_id):
+        return MEMBERSHIP_MEMBER
+
+    verdict = _lookup_line_membership(group_id, line_user_id)
+    # メッセージ処理と同じく user_id を残し、Login 側と Messaging API 側の ID 不一致を追えるようにする。
+    logger.warning(
+        "checkout membership db miss group_id=%s user_id=%s verdict=%s",
+        group_id,
+        line_user_id,
+        verdict,
+    )
+    if verdict != MEMBERSHIP_MEMBER:
+        return verdict
+
+    ensure = getattr(repo, "ensure_group_member", None)
+    if callable(ensure):
+        try:
+            ensure(group_id, line_user_id)
+        except Exception:
+            logger.warning("failed to persist LINE-confirmed group member", exc_info=True)
+    return MEMBERSHIP_MEMBER
+
+
+def _lookup_line_membership(group_id: str, user_id: str) -> str:
+    """Messaging API のメンバープロフィールで、今そのグループに居るかを判定する。"""
+    token = (settings.line_channel_access_token or "").strip()
+    if not token or not group_id or not user_id:
+        return MEMBERSHIP_UNAVAILABLE
+
+    source = "room" if group_id.startswith("R") else "group"
+    url = f"https://api.line.me/v2/bot/{source}/{quote(group_id, safe='')}/member/{quote(user_id, safe='')}"
+    req = Request(url, headers={"Authorization": f"Bearer {token}"}, method="GET")
+    try:
+        with urlopen(req, timeout=5) as resp:  # noqa: S310
+            status = int(getattr(resp, "status", 200))
+            if 200 <= status < 300:
+                return MEMBERSHIP_MEMBER
+    except HTTPError as exc:
+        if exc.code == 404:
+            return MEMBERSHIP_NOT_MEMBER
+        logger.warning("LINE member profile lookup failed status=%s", exc.code)
+        return MEMBERSHIP_UNAVAILABLE
+    except (URLError, TimeoutError) as exc:
+        logger.warning("LINE member profile lookup unreachable: %s", exc)
+        return MEMBERSHIP_UNAVAILABLE
+    return MEMBERSHIP_UNAVAILABLE
+
+
+def _frontend_retry_url(*, token: str, return_to: str) -> Optional[str]:
+    if not settings.subscription_frontend_base_url or not token:
+        return None
+    return _build_frontend_url(token=token, checkout_session=None, return_to=return_to)
+
+
+def _safe_line_error_code(value: Optional[str]) -> Optional[str]:
+    if not value or not _LINE_ERROR_CODE.fullmatch(value):
+        return None
+    return value
+
+
+def _auth_help_response(
+    status: int,
+    reason: str,
+    return_to: str,
+    *,
+    retry_url: Optional[str] = None,
+) -> Dict[str, Any]:
+    """ブラウザ遷移の認証失敗を、再発行方法が分かるHTMLで返す。"""
+    copy = _AUTH_HELP_COPY.get(reason) or _AUTH_HELP_COPY["login_failed"]
+    sections = []
+    for lang in ("en", "ja", "zh-TW", "th"):
+        block = copy[lang]
+        paragraphs = "".join(f"<p>{html.escape(line)}</p>" for line in block["paragraphs"])
+        sections.append(f"<section lang=\"{html.escape(lang)}\"><h2>{html.escape(block['title'])}</h2>{paragraphs}</section>")
+
+    retry = ""
+    if retry_url:
+        labels = ("Try again", "もう一度試す", "再試一次", "ลองอีกครั้ง")
+        links = "".join(
+            f'<a href="{html.escape(retry_url, quote=True)}">{html.escape(label)}</a>'
+            for label in labels
+        )
+        retry = f"<p>{links}</p>"
+
+    lang_attr = {
+        "/pro.html": "ja",
+        "/en/pro.html": "en",
+        "/zh-tw/pro.html": "zh-Hant",
+        "/th/pro.html": "th",
+    }.get(_sanitize_return_to(return_to), "ja")
+    title = html.escape(copy["en"]["title"])
+    body = (
+        "<!DOCTYPE html>"
+        f"<html lang=\"{lang_attr}\">"
+        "<head>"
+        "<meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        "<meta name=\"referrer\" content=\"no-referrer\">"
+        f"<title>{title}</title>"
+        "<style>"
+        "body{font-family:sans-serif;margin:2rem auto;max-width:40rem;line-height:1.6;padding:0 1rem;}"
+        "h1{font-size:1.25rem;}h2{font-size:1.05rem;margin-top:1.5rem;}a{margin-right:1rem;}"
+        "</style>"
+        "</head>"
+        f"<body><h1>{title}</h1>{''.join(sections)}{retry}</body>"
+        "</html>"
+    )
+    return {
+        "statusCode": status,
+        "headers": {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store",
+        },
+        "body": body,
+    }
+
+
 def _line_login_ready() -> bool:
     return all(
         [
@@ -897,8 +1200,23 @@ def _sanitize_return_to(value: Any) -> str:
 def _verify_subscription_token(token: str) -> Optional[Dict[str, Any]]:
     try:
         return verify_token(token, secret=settings.subscription_token_secret, scope=CHECKOUT_SCOPE)
-    except TokenError:
+    except TokenError as exc:
+        # 署名検証後の期限切れだけ group_id を残す。トークン本文は出さない。
+        group_id = _signed_group_id(token) if str(exc) == "token expired" else ""
+        logger.warning("subscription token rejected: %s group_id=%s", exc, group_id or "-")
         return None
+
+
+def _signed_group_id(token: str) -> str:
+    try:
+        encoded = token.split(".", 1)[0]
+        padding = "=" * (-len(encoded) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(encoded + padding))
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("group_id") or "")
 
 
 def _checkout_session_secret() -> str:
