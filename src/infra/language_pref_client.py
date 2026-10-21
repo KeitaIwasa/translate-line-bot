@@ -96,7 +96,7 @@ class LanguagePreferenceAdapter(LanguagePreferencePort):
                 min_confidence=self._jev_min_confidence,
                 text=text,
             )
-            # 言語が無い、という確度の高い結果はそのまま返す。失敗だけ Gemini に戻す
+            # 全言語がはっきり否定されたときだけそのまま返す。閾値直下は low_confidence で Gemini に戻す
             if reason in {"ok", "no_languages"}:
                 return preference
             logger.info("Jev language preference fallback | reason=%s", reason)

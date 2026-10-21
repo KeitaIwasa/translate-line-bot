@@ -62,6 +62,8 @@ _CATALOG_CODES = [code for code, _ in LANGUAGE_CATALOG]
 _CATALOG_NAME_LIST = ", ".join(name for _, name in LANGUAGE_CATALOG)
 _CODE_RE = re.compile(r"^[a-z]{2,3}(?:-[a-z0-9]{2,8})?$")
 _SETTINGS_OPERATIONS = ("show", "reset_all", "add", "remove", "add_and_remove")
+# 閾値未満でも、この値を超える want_* は「言語が無い」とは言い切れない
+_CLEARLY_NEGATIVE_NOUL = 0.2
 
 # 確認文の原文は英語。Jev は文を生成できないので、よく使う言語だけ静的に持つ。
 # 静的訳が無いカタログ言語は空文字を返し、ハンドラーの翻訳経路に渡す。
@@ -81,11 +83,14 @@ class _InvalidAnswers(Exception):
 def confirmation_ack(instruction_language: str) -> str:
     """言語設定の短い確認文。
 
-    英語と、静的訳がある言語だけ文を返す。それ以外は空文字にし、
-    ハンドラーが英語原文を指示言語へ翻訳する。
+    英語と、静的訳がある言語だけ文を返す。書き言葉が未確定のときと、
+    静的訳が無い言語は空文字にし、ハンドラーが英語原文を指示言語へ翻訳する。
     """
     code = (instruction_language or "").lower().replace("_", "-")
-    if not code or code.startswith("en"):
+    # 空のまま英語文を確定すると、後段が本文から言語を直しても ack は作り直されない
+    if not code:
+        return ""
+    if code.startswith("en"):
         return LANGUAGE_SETTINGS_ACK_BASE
     for prefix, text in _ACK_BY_PREFIX:
         if code.startswith(prefix):
@@ -138,8 +143,9 @@ def read_language_preference(
 ) -> tuple[Optional[LanguagePreference], str]:
     """登録メッセージから希望言語を Jev で読む。
 
-    reason "ok" は preference を使う。"no_languages" は言語が無いので None のまま。
-    それ以外は Gemini へ戻す。
+    reason "ok" は preference を使う。
+    "no_languages" は全 want_* がはっきり否定されたときだけで、None のまま返す。
+    閾値未満でも否定しきれないときは "low_confidence" とし、Gemini へ戻す。
     """
     started = time.perf_counter()
     try:
@@ -259,17 +265,21 @@ def _read_language_preference(
         answers = body["answers"]
         primary, primary_confidence = _choice(answers, "primary_language")
         outside = _noul(answers, "outside_catalog")
-        wanted = _selected_codes(answers, "want_", _CATALOG_CODES, min_confidence)
+        want_scores = [_noul(answers, f"want_{code}") for code in _CATALOG_CODES]
     except _InvalidAnswers:
         return None, "invalid_response"
 
+    wanted = [code for code, score in zip(_CATALOG_CODES, want_scores) if score >= min_confidence]
     if outside >= min_confidence:
         return None, "outside_catalog"
     # 確認UIの言語が曖昧、またはカタログ外の書き言葉なら Gemini に任せる
     if primary not in LANGUAGE_NAMES or primary_confidence < min_confidence:
         return None, "low_confidence"
     if not wanted:
-        return None, "no_languages"
+        # 0.79 のように閾値直下は曖昧。全スコアがはっきり否定のときだけ言語なしとする
+        if all(score <= _CLEARLY_NEGATIVE_NOUL for score in want_scores):
+            return None, "no_languages"
+        return None, "low_confidence"
     return (
         LanguagePreference(
             supported=[_choice_for(code) for code in wanted],

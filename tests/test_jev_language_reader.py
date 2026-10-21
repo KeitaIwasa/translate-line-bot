@@ -10,7 +10,7 @@ from src.domain.services.language_detection_service import LanguageDetectionServ
 from src.infra.gemini_mention_followup import GeminiMentionFollowUp
 from src.infra.jev_command_router import JevFirstPassCommandRouter
 from src.infra.jev_language_followup import JevLanguageMentionFollowUp
-from src.infra.jev_language_reader import LANGUAGE_CATALOG
+from src.infra.jev_language_reader import LANGUAGE_CATALOG, LANGUAGE_SETTINGS_ACK_BASE, confirmation_ack
 from src.infra.language_pref_client import LanguagePreferenceAdapter
 
 ROUTER_INPUT = json.dumps(
@@ -245,6 +245,9 @@ _JEV_PHRASE_ANSWERS = {
 class _PhraseJevSession:
     """分類は language_settings。設定の答えは文面ごとに固定する。"""
 
+    def __init__(self, extra_answers=None):
+        self.extra_answers = extra_answers or {}
+
     def post(self, url, headers=None, json=None, timeout=None, params=None):
         message = (json or {}).get("state", {}).get("message")
         questions = (json or {}).get("questions") or {}
@@ -261,13 +264,17 @@ class _PhraseJevSession:
                     }
                 },
             )
-        settings = JevSession(**_JEV_PHRASE_ANSWERS[message])
+        answers = {**_JEV_PHRASE_ANSWERS, **self.extra_answers}
+        settings = JevSession(**answers[message])
         return settings.post(url, headers=headers, json=json, timeout=timeout, params=params)
 
 
 class _Line:
-    def reply_text(self, _token, _text):
-        return None
+    def __init__(self):
+        self.last_text = None
+
+    def reply_text(self, _token, text):
+        self.last_text = text
 
 
 class _Translator:
@@ -300,6 +307,11 @@ class _Repo:
     def set_translation_enabled(self, _group_id, enabled):
         self.enabled.append(enabled)
 
+    def add_group_languages(self, _group_id, languages):
+        for code, _name in languages:
+            if code not in self.languages:
+                self.languages.append(code)
+
     def reset_group_language_settings(self, *_args):
         self.reset_called = True
 
@@ -329,8 +341,9 @@ def _handler_with_jev(repo, session):
         api_key_provider=lambda: "ts-key",
         session=session,
     )
+    line = _Line()
     handler = MessageHandler(
-        line_client=_Line(),
+        line_client=line,
         translation_service=_Translator(),
         interface_translation=_Translator(),
         language_detector=LanguageDetectionService(),
@@ -342,7 +355,7 @@ def _handler_with_jev(repo, session):
         translation_retry=1,
         bot_mention_name="通訳AI",
     )
-    return handler, gemini
+    return handler, gemini, line
 
 
 def test_jev_path_resets_only_when_explicit_reset_clears_the_threshold():
@@ -355,7 +368,7 @@ def test_jev_path_resets_only_when_explicit_reset_clears_the_threshold():
     )
     for text, should_reset in cases:
         repo = _Repo()
-        handler, gemini = _handler_with_jev(repo, _PhraseJevSession())
+        handler, gemini, _line = _handler_with_jev(repo, _PhraseJevSession())
         event = models.MessageEvent(
             event_type="message",
             reply_token="token",
@@ -376,6 +389,49 @@ def test_jev_path_resets_only_when_explicit_reset_clears_the_threshold():
             assert False in repo.enabled
         else:
             assert repo.enabled == []
+
+
+def test_uncertain_message_language_leaves_ack_for_the_handler_to_translate():
+    """書き言葉が低信頼でも、日本語の追加依頼は英語の確認文に固定しない。"""
+
+    text = "英語を追加して"
+    session = _PhraseJevSession(
+        {
+            text: {
+                "operation": "add",
+                "language_confidence": 0.2,
+                "yes_codes": {"en"},
+            }
+        }
+    )
+    repo = _Repo()
+    repo.languages = ["ja"]
+    handler, gemini, line = _handler_with_jev(repo, session)
+    event = models.MessageEvent(
+        event_type="message",
+        reply_token="token",
+        timestamp=0,
+        text=text,
+        user_id="U",
+        group_id="G",
+        sender_type="group",
+        destination="BOT",
+        mentionees=[],
+    )
+
+    handler._handle_command(event, text)
+
+    assert gemini._session.calls == []
+    assert "en" in repo.languages
+    assert line.last_text == "[ja]Language settings have been updated."
+    assert line.last_text != LANGUAGE_SETTINGS_ACK_BASE
+
+
+def test_confirmation_ack_stays_empty_when_the_message_language_is_unknown():
+    assert confirmation_ack("") == ""
+    assert confirmation_ack("en") == LANGUAGE_SETTINGS_ACK_BASE
+    assert confirmation_ack("ja") == "言語設定を更新しました。"
+    assert confirmation_ack("fr") == ""
 
 
 def test_show_with_a_named_language_falls_back_to_gemini():
@@ -451,7 +507,7 @@ def test_catalog_language_without_static_ack_leaves_translation_to_handler():
     follow_up, gemini = _follow_up(jev)
     decision = follow_up.complete("language_settings", ROUTER_INPUT)
     assert decision.instruction_language == ""
-    assert decision.ack_text == "Language settings have been updated."
+    assert decision.ack_text == ""
     assert gemini._session.calls == []
 
 
@@ -462,6 +518,7 @@ def test_low_instruction_confidence_keeps_languages():
     decision = follow_up.complete("language_settings", ROUTER_INPUT)
 
     assert decision.instruction_language == ""
+    assert decision.ack_text == ""
     assert [item.code for item in decision.languages_to_add] == ["en"]
     assert gemini._session.calls == []
 
@@ -577,6 +634,45 @@ def test_enrollment_reads_languages_from_jev():
 
 def test_enrollment_confident_empty_does_not_call_gemini():
     session = HybridSession(language="ja", gemini_text=_ENROLLMENT_GEMINI)
+    assert _adapter(session).analyze("hello") is None
+    assert len(session.calls) == 1
+    assert session.gemini_calls == []
+
+
+def test_enrollment_near_threshold_falls_back_to_gemini():
+    """英語 0.79 のように閾値直下は言語なしにせず、初期設定を Gemini に任せる。"""
+
+    session = HybridSession(
+        language="ja",
+        noul_overrides={"want_en": 0.79},
+        gemini_text=_ENROLLMENT_GEMINI,
+    )
+    preference = _adapter(session).analyze("英語")
+
+    assert [item.code for item in preference.supported] == ["en"]
+    assert len(session.calls) == 1
+    assert len(session.gemini_calls) == 1
+
+
+def test_enrollment_barely_positive_score_falls_back_to_gemini():
+    session = HybridSession(
+        language="ja",
+        noul_overrides={"want_en": 0.21},
+        gemini_text=_ENROLLMENT_GEMINI,
+    )
+    preference = _adapter(session).analyze("英語")
+
+    assert [item.code for item in preference.supported] == ["en"]
+    assert len(session.gemini_calls) == 1
+
+
+def test_enrollment_clearly_negative_scores_skip_gemini():
+    session = HybridSession(
+        language="ja",
+        noul_overrides={"want_en": 0.2, "want_ja": 0.2},
+        gemini_text=_ENROLLMENT_GEMINI,
+    )
+
     assert _adapter(session).analyze("hello") is None
     assert len(session.calls) == 1
     assert session.gemini_calls == []
