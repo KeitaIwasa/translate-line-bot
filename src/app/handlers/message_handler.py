@@ -27,6 +27,7 @@ from ...domain.services.interface_translation_service import InterfaceTranslatio
 from ...domain.services.language_detection_service import LanguageDetectionService
 from ...domain.services.current_languages_question import (
     current_languages_base_text,
+    current_languages_localized_text,
     is_current_languages_question,
 )
 from ...infra.gemini_translation import GeminiRateLimitError
@@ -988,12 +989,17 @@ class MessageHandler:
     ) -> bool:
         """現在の翻訳言語を、設定を変えずに返す。"""
 
-        base = current_languages_base_text(self._group_languages_for_reply(event.group_id))
-        message = self._safe_translate_for_instruction(
-            base,
-            instruction_lang,
-            command_trace=command_trace,
-        )
+        records = self._group_language_records(event.group_id)
+        # ja / en は言語名を確定して返す。それ以外は英語名を翻訳する
+        localized = current_languages_localized_text(records, instruction_lang)
+        if localized is not None:
+            message = localized
+        else:
+            message = self._safe_translate_for_instruction(
+                current_languages_base_text(records),
+                instruction_lang,
+                command_trace=command_trace,
+            )
         self._reply_text(event, message, command_trace=command_trace)
         return True
 
@@ -1027,6 +1033,26 @@ class MessageHandler:
         except Exception:
             logger.debug("Instruction language detect failed", exc_info=True)
             return ""
+
+    def _group_language_records(self, group_id: str) -> List[Tuple[str, str]]:
+        """保存済みの (言語コード, 表示名)。名前が取れないときはコードだけ。"""
+
+        fetcher = getattr(self._repo, "fetch_group_language_records", None)
+        if fetcher:
+            try:
+                rows = fetcher(group_id) or []
+                records: List[Tuple[str, str]] = []
+                for row in rows:
+                    if isinstance(row, str):
+                        records.append((row, ""))
+                        continue
+                    code = row[0] if row else ""
+                    name = row[1] if row and len(row) > 1 and isinstance(row[1], str) else ""
+                    records.append((code or "", name or ""))
+                return records
+            except Exception:
+                logger.debug("Failed to fetch group language names", exc_info=True)
+        return [(code, "") for code in self._group_languages_for_reply(group_id)]
 
     def _group_languages_for_reply(self, group_id: str) -> List[str]:
         try:

@@ -412,6 +412,31 @@ class NeonMessageRepository(MessageRepositoryPort):
             rows = cur.fetchall()
         return [row[0] for row in rows]
 
+    def fetch_group_language_records(self, group_id: str) -> List[Tuple[str, str]]:
+        """group_languages の lang_code と lang_name を、言語コード順で返す。"""
+
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT lang_code, lang_name
+                    FROM group_languages
+                    WHERE group_id = %s
+                    ORDER BY lang_code
+                    """,
+                    (group_id,),
+                )
+                rows = cur.fetchall()
+        except errors.UndefinedColumn:
+            return [(code, "") for code in self.fetch_group_languages(group_id)]
+        records: List[Tuple[str, str]] = []
+        for row in rows:
+            if not row or not row[0]:
+                continue
+            name = row[1] if len(row) > 1 and row[1] else ""
+            records.append((row[0], name))
+        return records
+
     def fetch_recent_messages(self, group_id: str, limit: int) -> List[ContextMessage]:
         started = time.perf_counter()
         try:
