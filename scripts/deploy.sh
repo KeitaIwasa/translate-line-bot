@@ -6,7 +6,8 @@ set -euo pipefail
 # 2) SAM build / deploy
 # 環境変数で上書き可能なパラメータ:
 # STACK_NAME, PROFILE, REGION, STAGE, GEMINI_MODEL, FUNCTION_MEMORY_SIZE, FUNCTION_TIMEOUT,
-# MAX_CONTEXT_MESSAGES, TRANSLATION_RETRY, RUNTIME_SECRET_ARN, S3_BUCKET, PYTHON_BIN
+# MAX_CONTEXT_MESSAGES, TRANSLATION_RETRY, RUNTIME_SECRET_ARN, S3_BUCKET, PYTHON_BIN,
+# TYPESAFE_API_KEY_SSM_PARAMETER（既定: /kotori/<STAGE>/typesafe-api-key）
 
 STACK_NAME="${STACK_NAME:-translate-line-bot-stg}"
 PROFILE="${PROFILE:-line-translate-bot}"
@@ -30,6 +31,19 @@ if [[ -z "$RUNTIME_SECRET_ARN" ]]; then
   else
     RUNTIME_SECRET_ARN="stg/line-translate-bot-secrets"
   fi
+fi
+
+# Jev（TypeSafe）の API キーは SSM SecureString から読む。
+# キーが無いとメンション判定が全部エラーになるので、存在しなければデプロイを止める。
+TYPESAFE_API_KEY_SSM_PARAMETER="${TYPESAFE_API_KEY_SSM_PARAMETER:-/kotori/${STAGE}/typesafe-api-key}"
+if ! aws ssm get-parameter \
+  --name "$TYPESAFE_API_KEY_SSM_PARAMETER" \
+  --region "$REGION" \
+  --profile "$PROFILE" \
+  --query Parameter.Name \
+  --output text >/dev/null; then
+  echo "SSM parameter '$TYPESAFE_API_KEY_SSM_PARAMETER' (TypeSafe API key) not found. Create it before deploying." >&2
+  exit 1
 fi
 
 if [[ -x ".venv/bin/python" && "$PYTHON_BIN" == "python3" ]]; then
@@ -65,6 +79,7 @@ deploy_args=(
     RuntimeSecretArn="$RUNTIME_SECRET_ARN"
     DeployNonce="$DEPLOY_NONCE"
     EnableStripe="$ENABLE_STRIPE"
+    TypesafeApiKeySsmParameter="$TYPESAFE_API_KEY_SSM_PARAMETER"
 )
 
 if [[ -n "$S3_BUCKET" ]]; then
