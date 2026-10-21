@@ -295,6 +295,9 @@ def _settings_decision(
         languages_to_remove=[_choice_for(code) for code in remove_codes],
         instruction_language=instruction,
         ack_text="" if operation == "show" else confirmation_ack(instruction),
+        # reset_all を返すのは explicit_reset が閾値を超えたときだけ。
+        # ハンドラーは英語・日本語以外の全消去を、このフラグが無いと show に落とす。
+        explicit_reset=operation == "reset_all",
     )
 
 

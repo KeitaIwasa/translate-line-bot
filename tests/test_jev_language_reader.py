@@ -3,8 +3,12 @@ import json
 import pytest
 import requests
 
+from src.app.handlers.message_handler import MessageHandler
+from src.domain import models
 from src.domain.models import LanguageChoice
+from src.domain.services.language_detection_service import LanguageDetectionService
 from src.infra.gemini_mention_followup import GeminiMentionFollowUp
+from src.infra.jev_command_router import JevFirstPassCommandRouter
 from src.infra.jev_language_followup import JevLanguageMentionFollowUp
 from src.infra.jev_language_reader import LANGUAGE_CATALOG
 from src.infra.language_pref_client import LanguagePreferenceAdapter
@@ -175,6 +179,7 @@ def test_reset_all_clears_language_lists_only_when_explicit():
     decision = follow_up.complete("language_settings", ROUTER_INPUT)
 
     assert decision.operation == "reset_all"
+    assert decision.explicit_reset is True
     assert decision.languages_to_add == []
     assert decision.languages_to_remove == []
     assert gemini._session.calls == []
@@ -187,6 +192,7 @@ def test_reset_without_explicit_request_returns_show():
     decision = follow_up.complete("language_settings", ROUTER_INPUT)
 
     assert decision.operation == "show"
+    assert decision.explicit_reset is False
     assert decision.action == "language_settings"
     assert decision.languages_to_add == []
     assert decision.languages_to_remove == []
@@ -215,13 +221,161 @@ def test_show_operation_keeps_languages_unchanged():
 def test_explicit_reset_follows_confidence_threshold():
     jev = JevSession(operation="reset_all", noul_overrides={"explicit_reset": 0.8})
     follow_up, gemini = _follow_up(jev)
-    assert follow_up.complete("language_settings", ROUTER_INPUT).operation == "reset_all"
+    decision = follow_up.complete("language_settings", ROUTER_INPUT)
+    assert decision.operation == "reset_all"
+    assert decision.explicit_reset is True
     assert gemini._session.calls == []
 
     jev = JevSession(operation="reset_all", noul_overrides={"explicit_reset": 0.79})
     follow_up, gemini = _follow_up(jev)
-    assert follow_up.complete("language_settings", ROUTER_INPUT).operation == "show"
+    decision = follow_up.complete("language_settings", ROUTER_INPUT)
+    assert decision.operation == "show"
+    assert decision.explicit_reset is False
     assert gemini._session.calls == []
+
+
+# 文面ごとの Jev の答え。explicit_reset が閾値未満の reset_all は show になる
+_JEV_PHRASE_ANSWERS = {
+    "borra todos los idiomas": {"operation": "reset_all", "noul_overrides": {"explicit_reset": 0.99}},
+    "言語を追加したい": {"operation": "reset_all", "noul_overrides": {"explicit_reset": 0.01}},
+    "今の翻訳言語は何?": {"operation": "show", "noul_overrides": {"explicit_reset": 0.01}},
+}
+
+
+class _PhraseJevSession:
+    """分類は language_settings。設定の答えは文面ごとに固定する。"""
+
+    def post(self, url, headers=None, json=None, timeout=None, params=None):
+        message = (json or {}).get("state", {}).get("message")
+        questions = (json or {}).get("questions") or {}
+        if "action" in questions:
+            return _Response(
+                200,
+                {
+                    "answers": {
+                        "action": {
+                            "type": "choice",
+                            "choice": "language_settings",
+                            "confidence": 0.99,
+                        }
+                    }
+                },
+            )
+        settings = JevSession(**_JEV_PHRASE_ANSWERS[message])
+        return settings.post(url, headers=headers, json=json, timeout=timeout, params=params)
+
+
+class _Line:
+    def reply_text(self, _token, _text):
+        return None
+
+
+class _Translator:
+    def translate(self, **kwargs):
+        lang = kwargs["candidate_languages"][0]
+        return [models.TranslationResult(lang=lang, text=f"[{lang}]{kwargs['message_text']}")]
+
+
+class _Repo:
+    def __init__(self):
+        self.languages = ["ja", "en"]
+        self.reset_called = False
+        self.enabled = []
+
+    def fetch_group_languages(self, _group_id):
+        return list(self.languages)
+
+    def fetch_translation_runtime_state(self, _group_id):
+        return models.TranslationRuntimeState(
+            translation_enabled=True,
+            group_languages=list(self.languages),
+            subscription_status=None,
+            period_start=None,
+            period_end=None,
+            period_key="2026-10",
+            usage=0,
+            limit_notice_plan=None,
+        )
+
+    def set_translation_enabled(self, _group_id, enabled):
+        self.enabled.append(enabled)
+
+    def reset_group_language_settings(self, *_args):
+        self.reset_called = True
+
+    def is_translation_enabled(self, *_args):
+        return True
+
+    def get_usage(self, *_args, **_kwargs):
+        return 0
+
+    def get_subscription_period(self, *_args):
+        return (None, None, None)
+
+
+def _handler_with_jev(repo, session):
+    gemini = GeminiMentionFollowUp(
+        api_key="gem-key",
+        model="gemini-flash-latest",
+        session=GeminiSession(text=_gemini_language_settings()),
+    )
+    follow_up = JevLanguageMentionFollowUp(
+        gemini=gemini,
+        api_key_provider=lambda: "ts-key",
+        session=session,
+    )
+    router = JevFirstPassCommandRouter(
+        follow_up=follow_up,
+        api_key_provider=lambda: "ts-key",
+        session=session,
+    )
+    handler = MessageHandler(
+        line_client=_Line(),
+        translation_service=_Translator(),
+        interface_translation=_Translator(),
+        language_detector=LanguageDetectionService(),
+        language_pref_service=object(),
+        command_router=router,
+        repo=repo,
+        max_context_messages=1,
+        max_group_languages=5,
+        translation_retry=1,
+        bot_mention_name="通訳AI",
+    )
+    return handler, gemini
+
+
+def test_jev_path_resets_only_when_explicit_reset_clears_the_threshold():
+    """スペイン語の全消去は Jev の explicit_reset をハンドラーまで伝える。追加希望と現状の質問は消さない。"""
+
+    cases = (
+        ("borra todos los idiomas", True),
+        ("言語を追加したい", False),
+        ("今の翻訳言語は何?", False),
+    )
+    for text, should_reset in cases:
+        repo = _Repo()
+        handler, gemini = _handler_with_jev(repo, _PhraseJevSession())
+        event = models.MessageEvent(
+            event_type="message",
+            reply_token="token",
+            timestamp=0,
+            text=text,
+            user_id="U",
+            group_id="G",
+            sender_type="group",
+            destination="BOT",
+            mentionees=[],
+        )
+
+        handler._handle_command(event, text)
+
+        assert repo.reset_called is should_reset, text
+        assert gemini._session.calls == [], text
+        if should_reset:
+            assert False in repo.enabled
+        else:
+            assert repo.enabled == []
 
 
 def test_show_with_a_named_language_falls_back_to_gemini():
