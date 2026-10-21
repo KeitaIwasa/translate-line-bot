@@ -460,6 +460,32 @@ def test_mixed_add_and_remove_falls_back_to_gemini():
     assert len(gemini._session.calls) == 1
 
 
+def test_uncertain_outside_catalog_on_mention_falls_back_to_gemini():
+    """「英語とサンスクリット」で outside が 0.79 でも、英語だけ確定せず Gemini に戻す。"""
+
+    jev = JevSession(yes_codes={"en"}, outside=0.79)
+    follow_up, gemini = _follow_up(jev)
+
+    decision = follow_up.complete("language_settings", ROUTER_INPUT)
+
+    assert decision.ack_text == "フランス語を追加します"
+    assert len(jev.calls) == 1
+    assert len(gemini._session.calls) == 1
+
+
+def test_clearly_negative_outside_catalog_on_mention_stays_on_jev():
+    """outside が 0.5 未満ならカタログ内の追加だけを Jev で確定する。"""
+
+    jev = JevSession(yes_codes={"en"}, outside=0.49)
+    follow_up, gemini = _follow_up(jev)
+
+    decision = follow_up.complete("language_settings", ROUTER_INPUT)
+
+    assert [item.code for item in decision.languages_to_add] == ["en"]
+    assert decision.ack_text == "言語設定を更新しました。"
+    assert gemini._session.calls == []
+
+
 def test_low_confidence_outside_catalog_and_empty_add_fall_back():
     cases = [
         JevSession(operation_confidence=0.5, yes_codes={"en"}),
@@ -682,6 +708,40 @@ def test_blank_enrollment_text_skips_both_models():
     session = HybridSession()
     assert _adapter(session).analyze("  ") is None
     assert session.calls == []
+    assert session.gemini_calls == []
+
+
+def test_enrollment_uncertain_outside_catalog_falls_back_to_gemini():
+    """初期設定でも outside 0.79 は英語だけにせず、サンスクリットを Gemini に読ませる。"""
+
+    session = HybridSession(
+        language="ja",
+        yes_codes={"en"},
+        outside=0.79,
+        gemini_text=_ENROLLMENT_GEMINI,
+    )
+    preference = _adapter(session).analyze("英語とサンスクリット")
+
+    assert [item.code for item in preference.supported] == ["en"]
+    assert [item.code for item in preference.unsupported] == ["sa"]
+    assert len(session.calls) == 1
+    assert len(session.gemini_calls) == 1
+
+
+def test_enrollment_clearly_negative_outside_catalog_stays_on_jev():
+    """outside が 0.5 未満なら初期設定も Jev のカタログ内結果のままにする。"""
+
+    session = HybridSession(
+        language="ja",
+        yes_codes={"en"},
+        outside=0.49,
+        gemini_text=_ENROLLMENT_GEMINI,
+    )
+    preference = _adapter(session).analyze("英語")
+
+    assert [item.code for item in preference.supported] == ["en"]
+    assert preference.unsupported == []
+    assert len(session.calls) == 1
     assert session.gemini_calls == []
 
 

@@ -13,7 +13,7 @@ from .jev_api import extract_current_languages, extract_user_message, post_syste
 logger = logging.getLogger(__name__)
 
 # Jev は自由文を生成できないため、翻訳でよく頼まれる言語だけを yes/no で読む。
-# ここに無い言語は outside_catalog が立ったとき Gemini へ戻す。
+# ここに無い言語は outside_catalog が閾値以上、または不確実帯なら Gemini へ戻す。
 LANGUAGE_CATALOG: tuple[tuple[str, str], ...] = (
     ("ja", "Japanese"),
     ("en", "English"),
@@ -64,6 +64,8 @@ _CODE_RE = re.compile(r"^[a-z]{2,3}(?:-[a-z0-9]{2,8})?$")
 _SETTINGS_OPERATIONS = ("show", "reset_all", "add", "remove", "add_and_remove")
 # 閾値未満でも、この値を超える want_* は「言語が無い」とは言い切れない
 _CLEARLY_NEGATIVE_NOUL = 0.2
+# outside_catalog がこの値以上なら、閾値未満でもカタログ外を否定しきれない
+_UNCERTAIN_OUTSIDE_NOUL = 0.5
 
 # 確認文の原文は英語。Jev は文を生成できないので、よく使う言語だけ静的に持つ。
 # 静的訳が無いカタログ言語は空文字を返し、ハンドラーの翻訳経路に渡す。
@@ -145,7 +147,8 @@ def read_language_preference(
 
     reason "ok" は preference を使う。
     "no_languages" は全 want_* がはっきり否定されたときだけで、None のまま返す。
-    閾値未満でも否定しきれないときは "low_confidence" とし、Gemini へ戻す。
+    閾値未満でも否定しきれないときと、outside_catalog の不確実帯は
+    "low_confidence" とし、Gemini へ戻す。閾値以上のカタログ外は "outside_catalog"。
     """
     started = time.perf_counter()
     try:
@@ -207,8 +210,10 @@ def _read_language_settings(
         return None, "low_confidence"
     if operation not in _SETTINGS_OPERATIONS:
         return None, "invalid_choice"
-    if outside >= min_confidence:
-        return None, "outside_catalog"
+    # 0.79 のように閾値直下でも、カタログ外を落とさず Gemini に任せる
+    outside_reason = _outside_fallback_reason(outside, min_confidence)
+    if outside_reason is not None:
+        return None, outside_reason
 
     instruction = ""
     if instruction_choice in LANGUAGE_NAMES and instruction_confidence >= min_confidence:
@@ -270,8 +275,10 @@ def _read_language_preference(
         return None, "invalid_response"
 
     wanted = [code for code, score in zip(_CATALOG_CODES, want_scores) if score >= min_confidence]
-    if outside >= min_confidence:
-        return None, "outside_catalog"
+    # メンション後と同じく、不確実なカタログ外は初期設定でも Gemini に任せる
+    outside_reason = _outside_fallback_reason(outside, min_confidence)
+    if outside_reason is not None:
+        return None, outside_reason
     # 確認UIの言語が曖昧、またはカタログ外の書き言葉なら Gemini に任せる
     if primary not in LANGUAGE_NAMES or primary_confidence < min_confidence:
         return None, "low_confidence"
@@ -309,6 +316,19 @@ def _settings_decision(
         # ハンドラーは英語・日本語以外の全消去を、このフラグが無いと show に落とす。
         explicit_reset=operation == "reset_all",
     )
+
+
+def _outside_fallback_reason(outside: float, min_confidence: float) -> Optional[str]:
+    """カタログ外スコアが閾値以上、または不確実帯なら Gemini へ戻す理由。
+
+    0.5 未満ははっきりした否定として Jev の結果を使う。
+    閾値そのものが 0.5 より低くても、閾値以上はカタログ外として戻す。
+    """
+    if outside >= min_confidence:
+        return "outside_catalog"
+    if outside >= _UNCERTAIN_OUTSIDE_NOUL:
+        return "low_confidence"
+    return None
 
 
 def _choice_for(code: str) -> LanguageChoice:
