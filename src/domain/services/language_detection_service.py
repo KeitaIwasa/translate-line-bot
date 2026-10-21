@@ -13,18 +13,31 @@ DetectorFactory.seed = 0
 # 数字に付く通貨・単位の文字。これしか文字が無いメッセージは翻訳しない。
 _CURRENCY_LETTERS = frozenset("円元")
 
-_URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
+# スキーム付き・www に加え、パスを含む素のドメインも除く。
+# ru.wikipedia.org/wiki/Москва のように、パス側の非ラテン文字を文字体系へ数えない。
+_URL_RE = re.compile(
+    r"https?://\S+|www\.\S+"
+    r"|(?<![\w@])(?:[a-z0-9-]+\.)+[a-z]{2,}/[^\s]*",
+    re.IGNORECASE,
+)
 _EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w.-]+\.\w+\b")
 _MENTION_RE = re.compile(r"[@＠][^\s@]+")
 _LATIN_WORD_RE = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)?")
 # 文字（Unicode の letter）の連続。数字や記号は語に数えない。
 _WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
-# 文と節。数字の桁区切り（3,000 や 12:30）では切らない。
+# 分かち書きしない文字体系。1文字を1語として、同じ語数の下限を使う。
+_NON_SPACING_WORD_RE = re.compile(
+    r"[\u0e00-\u0e7f\u0e80-\u0eff\u1000-\u109f\u1780-\u17ff"
+    r"\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9d"
+    r"\u4e00-\u9fff\uac00-\ud7af]+"
+)
+# 文と節。小数（3.14）と桁区切り（3,000 や 12:30）では切らない。
+# 数字の直後でも、次が数字でなければ文末（room 3. の次の文）として切る。
 _CLAUSE_SPLIT_RE = re.compile(
     r"[\n\r]+"
-    r"|(?<!\d)[.!?。！？…]+(?!\d)"
+    r"|[.!?。！？…؟।॥۔]+(?!\d)"
     r"|[;；]+"
-    r"|(?<!\d)[,，、](?!\d)"
+    r"|(?<!\d)[,，、،](?!\d)"
     r"|(?<!\d)[:：](?!\d)"
     r"|(?:\s+[—–\-]\s+)"
 )
@@ -35,8 +48,9 @@ _MIN_SEGMENT_WORDS = 4
 _MIN_SEGMENT_PROB = 0.8
 _MAX_SEGMENTS = 12
 
-# langdetect のコードを、このサービスが数える文字体系へ対応付ける。
-# かなとラテン文字のように文字体系が違う組は、上の文字体系判定だけで足りる。
+# langdetect のコードを文字体系へ対応付ける。
+# グループ言語のうち同じ文字体系が2つ以上あるときは、文節ごとの判定に回す。
+# 文字体系が違う組（かなとラテン文字など）は、文字体系の併存だけで混在になる。
 _LANG_SCRIPTS: dict[str, str] = {}
 for _script, _codes in (
     (
@@ -48,6 +62,21 @@ for _script, _codes in (
         ),
     ),
     ("cyrillic", ("bg", "mk", "ru", "uk")),
+    ("arabic", ("ar", "fa", "ur")),
+    ("devanagari", ("hi", "mr", "ne")),
+    ("bengali", ("bn",)),
+    ("gurmukhi", ("pa",)),
+    ("gujarati", ("gu",)),
+    ("tamil", ("ta",)),
+    ("telugu", ("te",)),
+    ("kannada", ("kn",)),
+    ("malayalam", ("ml",)),
+    ("thai", ("th",)),
+    ("hangul", ("ko",)),
+    ("greek", ("el",)),
+    ("hebrew", ("he",)),
+    # かなと漢字は一つの文字体系。日本語と中国語の混在は文節で区別する。
+    ("han", ("ja", "zh-cn", "zh-tw")),
 ):
     for _code in _codes:
         _LANG_SCRIPTS[_code] = _script
@@ -62,7 +91,7 @@ _LANGDETECT_ALIASES = {
     "in": "id",
 }
 
-# 文字体系。かなと漢字は同じ日本語としてまとめる。
+# 文字体系。かなと漢字は同じ han としてまとめる。
 _KANA_RE = re.compile(r"[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9d]")
 _HAN_RE = re.compile(r"[\u4e00-\u9fff]")
 _HANGUL_RE = re.compile(r"[\uac00-\ud7af]")
@@ -75,6 +104,13 @@ _ARABIC_RE = re.compile(r"[\u0600-\u06ff]")
 _CYRILLIC_RE = re.compile(r"[\u0400-\u04ff]")
 _GREEK_RE = re.compile(r"[\u0370-\u03ff]")
 _DEVANAGARI_RE = re.compile(r"[\u0900-\u097f]")
+_BENGALI_RE = re.compile(r"[\u0980-\u09ff]")
+_GURMUKHI_RE = re.compile(r"[\u0a00-\u0a7f]")
+_GUJARATI_RE = re.compile(r"[\u0a80-\u0aff]")
+_TAMIL_RE = re.compile(r"[\u0b80-\u0bff]")
+_TELUGU_RE = re.compile(r"[\u0c00-\u0c7f]")
+_KANNADA_RE = re.compile(r"[\u0c80-\u0cff]")
+_MALAYALAM_RE = re.compile(r"[\u0d00-\u0d7f]")
 
 # 他の文字体系と同時に出たとき、混在とみなす最小文字数
 _SCRIPT_MIN_CHARS = {
@@ -88,6 +124,13 @@ _SCRIPT_MIN_CHARS = {
     "cyrillic": 2,
     "greek": 3,
     "devanagari": 2,
+    "bengali": 2,
+    "gurmukhi": 2,
+    "gujarati": 2,
+    "tamil": 2,
+    "telugu": 2,
+    "kannada": 2,
+    "malayalam": 2,
 }
 
 
@@ -122,8 +165,8 @@ class LanguageDetectionService:
 
         かなの中の LINE や Amazon のような固有名詞・頭字語は混在に数えない。
         meeting のような小文字の語や、別の文字体系（タイ文字など）は数える。
-        英語とスペイン語のように文字体系が同じ言語は、グループ言語に絞った
-        文節ごとの判定で混在にする。
+        英語とスペイン語、アラビア語とペルシア語、日本語と中国語のように
+        文字体系が同じ言語は、グループ言語に絞った文節ごとの判定で混在にする。
         """
 
         normalized = _normalize(text)
@@ -137,13 +180,12 @@ class LanguageDetectionService:
 
 
 def _script_groups(text: str) -> set[str]:
-    """テキストに含まれる文字体系。かなと漢字は同時にあっても日本語一つにまとめる。"""
+    """テキストに含まれる文字体系。かなと漢字は同時にあっても一つの文字体系にまとめる。"""
 
+    text = _strip_nonlinguistic(text)
     groups: set[str] = set()
-    if _KANA_RE.search(text):
-        groups.add("ja")
-    elif _HAN_RE.search(text):
-        groups.add("cjk")
+    if _KANA_RE.search(text) or _HAN_RE.search(text):
+        groups.add("han")
 
     for name, pattern in (
         ("hangul", _HANGUL_RE),
@@ -156,18 +198,25 @@ def _script_groups(text: str) -> set[str]:
         ("cyrillic", _CYRILLIC_RE),
         ("greek", _GREEK_RE),
         ("devanagari", _DEVANAGARI_RE),
+        ("bengali", _BENGALI_RE),
+        ("gurmukhi", _GURMUKHI_RE),
+        ("gujarati", _GUJARATI_RE),
+        ("tamil", _TAMIL_RE),
+        ("telugu", _TELUGU_RE),
+        ("kannada", _KANNADA_RE),
+        ("malayalam", _MALAYALAM_RE),
     ):
         found = pattern.findall(text)
         if len(found) >= _SCRIPT_MIN_CHARS[name]:
             groups.add(name)
 
-    if _has_substantial_latin(_latin_scan_text(text)):
+    if _has_substantial_latin(text):
         groups.add("latin")
     return groups
 
 
-def _latin_scan_text(text: str) -> str:
-    """URL・メール・メンションはラテン語の混在判定から外す。"""
+def _strip_nonlinguistic(text: str) -> str:
+    """URL・メール・メンションは、どの文字体系の判定にも使わない。"""
 
     without_urls = _URL_RE.sub(" ", text)
     without_emails = _EMAIL_RE.sub(" ", without_urls)
@@ -198,7 +247,7 @@ def _same_script_languages_mixed(text: str, group_languages: Sequence[str]) -> b
     if len(candidates) < 2:
         return False
 
-    cleaned = _latin_scan_text(text)
+    cleaned = _strip_nonlinguistic(text)
     letters, _words = _linguistic_stats(cleaned)
     # 言語が2つとも下限を満たすには、全体でその2倍の文字が要る
     if letters < _MIN_SEGMENT_LETTERS * 2:
@@ -253,14 +302,23 @@ def _to_langdetect_code(raw: str) -> str:
 
 
 def _linguistic_stats(text: str) -> tuple[int, int]:
-    """頭字語を除いた文字数と語数。LINE のような全大文字は語としても文字としても数えない。"""
+    """頭字語を除いた文字数と語数。LINE のような全大文字は語としても文字としても数えない。
 
-    words = [
-        word
-        for word in _WORD_RE.findall(text)
-        if len(word) >= 2 and not word.isupper()
-    ]
-    return sum(len(word) for word in words), len(words)
+    漢字・かな・ハングル・タイ文字など分かち書きしない文字は、1文字を1語として数える。
+    文字数と語数の下限はラテン文字と同じまま、文節の長さだけを比べられるようにする。
+    """
+
+    letters = 0
+    words = 0
+    for word in _WORD_RE.findall(text):
+        if len(word) < 2 or word.isupper():
+            continue
+        letters += len(word)
+        if _NON_SPACING_WORD_RE.fullmatch(word):
+            words += len(word)
+        else:
+            words += 1
+    return letters, words
 
 
 def _detect_restricted(text: str, languages: Sequence[str]) -> tuple[str, float] | None:

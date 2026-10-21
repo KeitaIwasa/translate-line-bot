@@ -3,6 +3,10 @@ from datetime import datetime, timezone
 import pytest
 
 from src.domain.models import ContextMessage, TranslationResult
+from src.domain.services.language_detection_service import (
+    LanguageDetectionService,
+    _CLAUSE_SPLIT_RE,
+)
 from src.domain.services.translation_service import TranslationService, detect_language
 
 
@@ -164,3 +168,99 @@ def test_names_urls_and_acronyms_do_not_count_as_same_script_mix():
         "See the details at https://example.com/docs and confirm the time.",
         ["en", "es"],
     ) == ["es"]
+
+
+def test_arabic_script_mix_keeps_each_group_language():
+    # アラビア文字の ar/fa/ur は文節ごとの判定で混在にする
+    text = (
+        "سوف نعقد الاجتماع في المكتب غدا صباحا لمناقشة الخطة الأسبوعية مع الفريق. "
+        "جلسه را فردا صبح در دفتر برگزار می کنیم تا برنامه هفتگی را با تیم بررسی کنیم."
+    )
+    assert _targets_for(text, ["ar", "fa"]) == ["ar", "fa"]
+    urdu = (
+        "سوف نعقد الاجتماع في المكتب غدا صباحا لمناقشة الخطة الأسبوعية مع الفريق. "
+        "ہم کل صبح دفتر میں میٹنگ کریں گے تاکہ ہفتہ وار منصوبے پر تمام اراکین کے ساتھ بات کریں."
+    )
+    assert _targets_for(urdu, ["ar", "ur"]) == ["ar", "ur"]
+
+
+def test_devanagari_mix_keeps_each_group_language():
+    text = (
+        "हम कल सुबह कार्यालय में बैठक करेंगे और साप्ताहिक योजना पर चर्चा करेंगे. "
+        "आपण उद्या सकाळी कार्यालयात बैठक घेऊ आणि साप्ताहिक योजनेवर चर्चा करू."
+    )
+    assert _targets_for(text, ["hi", "mr"]) == ["hi", "mr"]
+    nepali = (
+        "हम कल सुबह कार्यालय में बैठक करेंगे और साप्ताहिक योजना पर चर्चा करेंगे. "
+        "हामी भोलि बिहान कार्यालयमा बैठक गर्नेछौं र साप्ताहिक योजनाबारे सबै सदस्यहरूसँग छलफल गर्नेछौं."
+    )
+    assert _targets_for(nepali, ["hi", "ne"]) == ["hi", "ne"]
+
+
+def test_han_mix_keeps_japanese_and_chinese():
+    # 句点で分かれた十分な長さの文節だけを、日本語と中国語として数える
+    text = (
+        "明日の朝に事務所で来週の予定について全員で打ち合わせをします。"
+        "我们明天上午在办公室开会讨论下周的工作计划请大家提前阅读资料。"
+    )
+    assert _targets_for(text, ["ja", "zh-cn"]) == ["ja", "zh-cn"]
+    traditional = (
+        "明日の朝に事務所で来週の予定について全員で打ち合わせをします。"
+        "我們明天上午在辦公室開會討論下週的工作計畫請大家提前閱讀資料。"
+    )
+    assert _targets_for(traditional, ["ja", "zh-tw"]) == ["ja", "zh-tw"]
+
+
+def test_pure_same_script_language_is_not_mixed():
+    arabic = "سوف نعقد الاجتماع في المكتب غدا صباحا لمناقشة الخطة الأسبوعية مع الفريق."
+    hindi = "हम कल सुबह कार्यालय में बैठक करेंगे और साप्ताहिक योजना पर चर्चा करेंगे."
+    japanese = "明日の朝に事務所で来週の予定について全員で打ち合わせをします。"
+    chinese = "我们明天上午在办公室开会讨论下周的工作计划请大家提前阅读资料。"
+    assert _targets_for(arabic, ["ar", "fa"]) == ["fa"]
+    assert _targets_for(hindi, ["hi", "mr"]) == ["mr"]
+    assert _targets_for(japanese, ["ja", "zh-cn"]) == ["zh-cn"]
+    assert _targets_for(chinese, ["ja", "zh-cn"]) == ["ja"]
+
+
+def test_period_after_digit_splits_sentences_but_decimal_does_not():
+    # 数字の直後のピリオドは文の区切り。小数点（digit.digit）だけは残す。
+    parts = [
+        part.strip()
+        for part in _CLAUSE_SPLIT_RE.split(
+            "The meeting is in room 3. La reunión será en la sala principal."
+        )
+        if part and part.strip()
+    ]
+    assert parts == [
+        "The meeting is in room 3",
+        "La reunión será en la sala principal",
+    ]
+    decimal = [
+        part.strip()
+        for part in _CLAUSE_SPLIT_RE.split("The total price is 3.14 dollars today.")
+        if part and part.strip()
+    ]
+    assert decimal == ["The total price is 3.14 dollars today"]
+
+    text = (
+        "The meeting is in conference room 3. "
+        "La reunión será en la sala principal del edificio."
+    )
+    assert _targets_for(text, ["en", "es"]) == ["en", "es"]
+    decimal_mix = (
+        "The total price is 3.14 dollars today. "
+        "La reunión será en la sala principal del edificio."
+    )
+    assert _targets_for(decimal_mix, ["en", "es"]) == ["en", "es"]
+
+
+def test_urls_emails_and_mentions_do_not_add_other_scripts():
+    detector = LanguageDetectionService()
+    bare = "Please read this page before the meeting tomorrow morning. see ru.wikipedia.org/wiki/Москва"
+    linked = "Please read this page before the meeting tomorrow morning. https://ru.wikipedia.org/wiki/Москва"
+    mention = "Please read this note before the meeting tomorrow morning @Москва"
+    email = "Please read this note before the meeting tomorrow morning user@пример.ru"
+    for text in (bare, linked, mention, email):
+        assert detector.is_mixed_language(text, ["en", "ru"]) is False
+        # 英語の本文だけが残るので、検出言語の英語を翻訳先から外す
+        assert _targets_for(text, ["en", "ru"]) == ["ru"]
