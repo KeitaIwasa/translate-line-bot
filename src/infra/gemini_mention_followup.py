@@ -30,17 +30,24 @@ Return:
 If the user asks to reset or does not name languages, use operation "reset_all" and empty language lists.
 """.strip()
 
-HOWTO_SYSTEM_PROMPT = """
+# グループで使えなかったときの定型文。英語をベース原文にし、英語以外のときだけ翻訳させる
+HOWTO_FALLBACK_TEXT = "Sorry, I can't answer that question. Please contact us here: https://kotori-ai.com/contact.html"
+
+HOWTO_SYSTEM_PROMPT = f"""
 You answer one question about KOTORI, a LINE multilingual translation bot.
 The user's intent is already classified as howto. Do not reclassify it.
+The answer is posted as a reply in the LINE group where the user mentioned KOTORI, so KOTORI is already in this group.
 
 Write ack_text in the same language as the user message.
 Use plain text only. Do not use Markdown.
 Answer from the support guide. Keep it short.
-If the guide does not support a reliable answer, set ack_text to this sentence translated into the user's language:
-申し訳ありませんが、その質問にはお答えできません。こちらからお問い合わせください：https://kotori-ai.com/contact.html
+If the guide does not support a reliable answer, set ack_text to this English sentence. Use it exactly as is when the user writes in English; otherwise translate it into the user's language and keep the URL unchanged:
+{HOWTO_FALLBACK_TEXT}
 Return instruction_language as BCP-47 or ISO 639-1.
 """.strip()
+
+# サポートガイド先頭の個人チャット向け指示は使わず、ガイド本文だけを渡す
+_SUPPORT_GUIDE_MARKER = "# KOTORIガイド"
 
 _LANGUAGE_SCHEMA = {
     "type": "object",
@@ -104,7 +111,7 @@ class GeminiMentionFollowUp:
         self._api_key = api_key
         self._model = model
         self._timeout = timeout_seconds
-        self._support_guide = _load_text(support_prompt_path)
+        self._support_guide = _guide_body(_load_text(support_prompt_path))
         self._session = session or requests.Session()
 
     def complete(self, action: str, router_input: str) -> CommandDecision:
@@ -214,3 +221,11 @@ def _load_text(path: str) -> str:
         logger.warning("Support prompt file not found: %s", path)
         return ""
     return prompt_path.read_text(encoding="utf-8")
+
+
+def _guide_body(text: str) -> str:
+    """個人チャット向けの前置き指示を除き、ガイド本文だけを返す。"""
+    index = text.find(_SUPPORT_GUIDE_MARKER)
+    if index < 0:
+        return text
+    return text[index:]
