@@ -280,11 +280,21 @@ def test_shared_script_prefers_group_language_then_restricted_detection():
     # かなとハングルは従来どおり一意
     assert detector.resolve_instruction_language("こんにちは", group_languages=["fa", "ar"]) == "ja"
     assert detector.resolve_instruction_language("안녕하세요", group_languages=["fa", "ar"]) == "ko"
+    # ベンガル文字・タミル文字・ヘブライ文字はグループ先頭の ja に落とさない
+    bengali = "আপনি কেমন আছেন? অনুগ্রহ করে বাংলা যোগ করুন।"
+    tamil = "வணக்கம், தமிழ் மொழியை சேர்க்கவும்."
+    hebrew = "שלום, איך מאפסים את כל השפות?"
+    assert detector.resolve_instruction_language(bengali, group_languages=["ja", "en", "bn"]) == "bn"
+    assert detector.resolve_instruction_language(tamil, group_languages=["ja", "en"]) == "ta"
+    assert detector.resolve_instruction_language(hebrew, group_languages=["ja", "en"]) == "he"
+    # 未分類の文字体系は group[0] ではなく生の langdetect を使う
+    assert detector.resolve_instruction_language("ᎣᏏᏲ", group_languages=["ja", "en"], detected="chr") == "chr"
 
 
 class _ResetRouter:
-    def __init__(self, operation):
+    def __init__(self, operation, explicit_reset=False):
         self.operation = operation
+        self.explicit_reset = explicit_reset
 
     def decide(self, _text):
         return models.CommandDecision(
@@ -292,6 +302,7 @@ class _ResetRouter:
             operation=self.operation,
             instruction_language="ja",
             ack_text="リセットしました",
+            explicit_reset=self.explicit_reset,
         )
 
 
@@ -311,6 +322,34 @@ def test_unnamed_language_request_does_not_reset_settings():
     assert translator.calls
     assert "Japanese" in translator.calls[0]["message_text"]
     assert "English" in translator.calls[0]["message_text"]
+
+
+def test_spanish_and_persian_reset_requests_clear_languages():
+    """英語・日本語以外でも、モデルの explicit_reset があれば設定を消す。"""
+
+    for text in ("borra todos los idiomas", "همه زبان‌ها را پاک کن"):
+        repo = _Repo(GROUP)
+        translator = _Translator()
+        handler = _handler(repo, translator)
+        handler._command_router = _ResetRouter("reset_all", explicit_reset=True)
+
+        handler._handle_command(_event(f"@bot {text}"), text)
+
+        assert repo.reset_called is True, text
+        assert False in repo.enabled
+
+
+def test_current_languages_question_does_not_reset_settings():
+    repo = _Repo(GROUP)
+    translator = _Translator()
+    handler = _handler(repo, translator)
+    handler._command_router = _ResetRouter("reset_all", explicit_reset=False)
+    text = "今の翻訳言語は何?"
+
+    handler._handle_command(_event(f"@bot {text}"), text)
+
+    assert repo.reset_called is False
+    assert repo.enabled == []
 
 
 def test_explicit_reset_request_still_clears_languages():

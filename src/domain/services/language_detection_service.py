@@ -42,22 +42,82 @@ _SCRIPT_DEFAULT = {
     "hebrew": "he",
     "greek": "el",
 }
+# 一言語にほぼ対応する文字体系。共有文字体系と同じく、グループ言語 → 制限した判定 → 既定
+_SCRIPT_LANGUAGES.update(
+    {
+        "bengali": frozenset({"bn"}),
+        "gurmukhi": frozenset({"pa"}),
+        "gujarati": frozenset({"gu"}),
+        "tamil": frozenset({"ta"}),
+        "telugu": frozenset({"te"}),
+        "kannada": frozenset({"kn"}),
+        "malayalam": frozenset({"ml"}),
+        "sinhala": frozenset({"si"}),
+        "lao": frozenset({"lo"}),
+        "myanmar": frozenset({"my"}),
+        "georgian": frozenset({"ka"}),
+        "armenian": frozenset({"hy"}),
+        "ethiopic": frozenset({"am"}),
+        "khmer": frozenset({"km"}),
+    }
+)
+_SCRIPT_DEFAULT.update(
+    {
+        "bengali": "bn",
+        "gurmukhi": "pa",
+        "gujarati": "gu",
+        "tamil": "ta",
+        "telugu": "te",
+        "kannada": "kn",
+        "malayalam": "ml",
+        "sinhala": "si",
+        "lao": "lo",
+        "myanmar": "my",
+        "georgian": "ka",
+        "armenian": "hy",
+        "ethiopic": "am",
+        "khmer": "km",
+    }
+)
+# (開始, 終了, カウンター名)。かな・ハングル・漢字・ラテン文字は別扱い
+_SCRIPT_RANGES = (
+    (0x0370, 0x03FF, "greek"),
+    (0x0400, 0x04FF, "cyrillic"),
+    (0x0530, 0x058F, "armenian"),
+    (0x0590, 0x05FF, "hebrew"),
+    (0x0600, 0x06FF, "arabic"),
+    (0x0750, 0x077F, "arabic"),
+    (0x0900, 0x097F, "devanagari"),
+    (0x0980, 0x09FF, "bengali"),
+    (0x0A00, 0x0A7F, "gurmukhi"),
+    (0x0A80, 0x0AFF, "gujarati"),
+    (0x0B80, 0x0BFF, "tamil"),
+    (0x0C00, 0x0C7F, "telugu"),
+    (0x0C80, 0x0CFF, "kannada"),
+    (0x0D00, 0x0D7F, "malayalam"),
+    (0x0D80, 0x0DFF, "sinhala"),
+    (0x0E00, 0x0E7F, "thai"),
+    (0x0E80, 0x0EFF, "lao"),
+    (0x1000, 0x109F, "myanmar"),
+    (0x10A0, 0x10FF, "georgian"),
+    (0x1200, 0x137F, "ethiopic"),
+    (0x1780, 0x17FF, "khmer"),
+)
 # langdetect のプロファイル名。zh は簡体として zh-cn を使う
 _PROFILE_OF = {"zh": "zh-cn", "zh-cn": "zh-cn", "zh-tw": "zh-tw"}
 _RESTRICTED_FACTORIES: dict[frozenset[str], _DetectorFactory] = {}
 _PROFILE_NAMES: frozenset[str] | None = None
 
 _EMPTY_SIGNALS = {
-    "kana": 0,
-    "hangul": 0,
-    "han": 0,
-    "latin": 0,
-    "cyrillic": 0,
-    "arabic": 0,
-    "thai": 0,
-    "devanagari": 0,
-    "hebrew": 0,
-    "greek": 0,
+    name: 0
+    for name in (
+        "kana",
+        "hangul",
+        "han",
+        "latin",
+        "other",
+        *_SCRIPT_LANGUAGES.keys(),
+    )
 }
 
 
@@ -105,6 +165,11 @@ class LanguageDetectionService:
 
         script = _primary_script(signals)
         if not script:
+            # 未分類の文字があるときは group[0] に落とさず、生の langdetect を使う
+            if signals["other"] > 0:
+                raw = _normalize_code(self.detect(text) if detected is None else detected)
+                if raw:
+                    return raw
             return group[0] if group else ""
         return _resolve_script(script, text or "", signals, group, detected)
 
@@ -155,19 +220,20 @@ def _script_signals(text: str) -> Mapping[str, int]:
             counts["han"] += 1
         elif _is_latin_letter(char, codepoint):
             counts["latin"] += 1
-        elif 0x0400 <= codepoint <= 0x04FF:
-            counts["cyrillic"] += 1
-        elif 0x0600 <= codepoint <= 0x06FF or 0x0750 <= codepoint <= 0x077F:
-            counts["arabic"] += 1
-        elif 0x0E00 <= codepoint <= 0x0E7F:
-            counts["thai"] += 1
-        elif 0x0900 <= codepoint <= 0x097F:
-            counts["devanagari"] += 1
-        elif 0x0590 <= codepoint <= 0x05FF:
-            counts["hebrew"] += 1
-        elif 0x0370 <= codepoint <= 0x03FF:
-            counts["greek"] += 1
+        elif (script_name := _script_name_for(codepoint)) and unicodedata.category(char).startswith("L"):
+            # 句点（ベンガル語の । など）は文字体系の根拠にしない
+            counts[script_name] += 1
+        elif unicodedata.category(char).startswith("L"):
+            # まだ対応していない文字体系。返信言語は生の langdetect に任せる
+            counts["other"] += 1
     return counts
+
+
+def _script_name_for(codepoint: int) -> str:
+    for start, end, name in _SCRIPT_RANGES:
+        if start <= codepoint <= end:
+            return name
+    return ""
 
 
 def _is_latin_letter(char: str, codepoint: int) -> bool:
@@ -195,23 +261,13 @@ def _language_fits(code: str, signals: Mapping[str, int]) -> bool:
         return han > 0 and kana == 0 and hangul == 0
     if script == "latin":
         return signals["latin"] > 0 and kana == 0 and hangul == 0 and han == 0 and not _other_script(signals)
-    if script == "arabic":
-        return signals["arabic"] > 0
-    if script == "cyrillic":
-        return signals["cyrillic"] > 0
-    if script == "devanagari":
-        return signals["devanagari"] > 0
-    if script == "thai":
-        return signals["thai"] > 0
-    if script == "hebrew":
-        return signals["hebrew"] > 0
-    if script == "greek":
-        return signals["greek"] > 0
+    if script in _SCRIPT_LANGUAGES and script != "han":
+        return signals.get(script, 0) > 0
     return False
 
 
 def _other_script(signals: Mapping[str, int]) -> bool:
-    return any(signals[name] > 0 for name in ("cyrillic", "arabic", "thai", "devanagari", "hebrew", "greek"))
+    return any(signals[name] > 0 for name in _SCRIPT_LANGUAGES if name != "han")
 
 
 def _script_of(code: str) -> str:
@@ -230,9 +286,16 @@ def _primary_script(signals: Mapping[str, int]) -> str:
 
     if signals["han"] > 0:
         return "han"
-    for name in ("arabic", "cyrillic", "thai", "devanagari", "hebrew", "greek"):
-        if signals[name] > 0:
-            return name
+    best = ""
+    best_count = 0
+    for name in _SCRIPT_LANGUAGES:
+        if name == "han":
+            continue
+        if signals[name] > best_count:
+            best = name
+            best_count = signals[name]
+    if best:
+        return best
     if signals["latin"] > 0:
         return "latin"
     return ""

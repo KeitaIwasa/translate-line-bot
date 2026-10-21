@@ -14,6 +14,12 @@ _EXPLICIT_RESET = re.compile(
 
 
 def is_explicit_language_reset(text: str) -> bool:
-    """言語設定の全消去を頼んでいるときだけ True。"""
+    """英語・日本語の全消去表現があるときだけ True。他言語の根拠には使わない。"""
 
     return bool(_EXPLICIT_RESET.search(text or ""))
+
+
+def allows_language_reset(*, explicit_reset: bool, text: str) -> bool:
+    """リセットしてよいか。モデルの明示フラグか、英語・日本語の追加の肯定信号だけを見る。"""
+
+    return bool(explicit_reset) or is_explicit_language_reset(text)

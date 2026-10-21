@@ -47,7 +47,7 @@ from ..subscription_templates import (
 from ...domain.services.subscription_service import SubscriptionService
 from ...domain.services.quota_service import QuotaService
 from ...domain.services.translation_flow_service import TranslationFlowService
-from ...domain.services.explicit_language_reset import is_explicit_language_reset
+from ...domain.services.explicit_language_reset import allows_language_reset
 from ...domain.services.language_settings_service import LanguageSettingsService
 from ...domain.services.private_chat_support_service import PrivateChatSupportService
 from ...domain.services.plan_policy import (
@@ -888,8 +888,11 @@ class MessageHandler:
         command_trace: _CommandTrace | None = None,
     ) -> bool:
         op = decision.operation or "reset_all"
-        # 言語名が無い依頼や「言語を追加したい」では全消去しない。明示的なリセットだけ通す
-        if op == "reset_all" and not is_explicit_language_reset(command_text or ""):
+        # モデルの explicit_reset か、英語・日本語の明示表現があるときだけ全消去する
+        if op == "reset_all" and not allows_language_reset(
+            explicit_reset=decision.explicit_reset,
+            text=command_text or "",
+        ):
             op = "show"
         if op == "show":
             return self._handle_show_languages(
