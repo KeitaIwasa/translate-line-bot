@@ -10,8 +10,8 @@ from langdetect import LangDetectException, detect, DetectorFactory
 # 乱数シードを固定して言語判定結果のブレを防ぐ
 DetectorFactory.seed = 0
 
-# 数字に付く通貨・単位の文字。これしか文字が無いメッセージは翻訳しない。
-_CURRENCY_LETTERS = frozenset("円元")
+# 数値に付いた通貨文字だけを除く。円・元だけのメッセージは語として翻訳する。
+_CURRENCY_AMOUNT_RE = re.compile(r"\d[\d,，.．]*\s*[円元]|[円元]\s*\d[\d,，.．]*")
 
 # スキーム付き・www に加え、パスを含む素のドメインも除く。
 # ru.wikipedia.org/wiki/Москва のように、パス側の非ラテン文字を文字体系へ数えない。
@@ -111,8 +111,35 @@ _TAMIL_RE = re.compile(r"[\u0b80-\u0bff]")
 _TELUGU_RE = re.compile(r"[\u0c00-\u0c7f]")
 _KANNADA_RE = re.compile(r"[\u0c80-\u0cff]")
 _MALAYALAM_RE = re.compile(r"[\u0d00-\u0d7f]")
+# かな・漢字とラテン文字以外。存在判定と文字ごとの文字体系で共用する。
+_OTHER_SCRIPT_RES = (
+    ("hangul", _HANGUL_RE),
+    ("thai", _THAI_RE),
+    ("lao", _LAO_RE),
+    ("khmer", _KHMER_RE),
+    ("myanmar", _MYANMAR_RE),
+    ("hebrew", _HEBREW_RE),
+    ("arabic", _ARABIC_RE),
+    ("cyrillic", _CYRILLIC_RE),
+    ("greek", _GREEK_RE),
+    ("devanagari", _DEVANAGARI_RE),
+    ("bengali", _BENGALI_RE),
+    ("gurmukhi", _GURMUKHI_RE),
+    ("gujarati", _GUJARATI_RE),
+    ("tamil", _TAMIL_RE),
+    ("telugu", _TELUGU_RE),
+    ("kannada", _KANNADA_RE),
+    ("malayalam", _MALAYALAM_RE),
+)
 
-# 他の文字体系と同時に出たとき、混在とみなす最小文字数
+# 別文字体系を混在とみなす下限。単語1つの人名（Мария など）は足りない。
+# 2語以上かつ文字の約15%以上、またはその文字体系だけの節（2語以上）があるとき。
+_MIN_SECONDARY_WORDS = 2
+_MIN_SECONDARY_SHARE = 0.15
+# 分かち書きしない文字体系。語数は1文字を1語として数える。
+_NON_SPACING_SCRIPTS = frozenset({"han", "hangul", "thai", "lao", "khmer", "myanmar"})
+
+# 他の文字体系と同時に出たとき、存在とみなす最小文字数。混在にするには上の割合も要る。
 _SCRIPT_MIN_CHARS = {
     "hangul": 1,
     "thai": 2,
@@ -154,17 +181,21 @@ class LanguageDetectionService:
             return ""
 
     def has_translatable_text(self, text: str) -> bool:
-        """絵文字・数字・記号だけのメッセージは翻訳対象にしない。"""
+        """絵文字・数字・記号だけのメッセージは翻訳対象にしない。
 
-        letters = _letters(_normalize(text))
-        meaningful = [ch for ch in letters if ch not in _CURRENCY_LETTERS]
-        return bool(meaningful)
+        円・元は 3,000円 のように数値へ付くときだけ除く。それ以外は語として残す。
+        """
+
+        normalized = _normalize(text)
+        without_amounts = _CURRENCY_AMOUNT_RE.sub(" ", normalized)
+        return bool(_letters(without_amounts))
 
     def is_mixed_language(self, text: str, group_languages: Sequence[str] | None = None) -> bool:
         """全文が単一言語で書かれていないとき True。
 
-        かなの中の LINE や Amazon のような固有名詞・頭字語は混在に数えない。
-        meeting のような小文字の語や、別の文字体系（タイ文字など）は数える。
+        かなの中の LINE や Amazon、英語文中の Мария のような単語1つは混在に数えない。
+        別の文字体系は、2語以上かつ文字の約15%以上を占めるか、その文字体系だけの節が
+        あるときだけ混在にする。日本語の文と英語の文が並ぶ場合は混在のまま。
         英語とスペイン語、アラビア語とペルシア語、日本語と中国語のように
         文字体系が同じ言語は、グループ言語に絞った文節ごとの判定で混在にする。
         """
@@ -172,7 +203,8 @@ class LanguageDetectionService:
         normalized = _normalize(text)
         if not self.has_translatable_text(normalized):
             return False
-        if len(_script_groups(normalized)) >= 2:
+        scripts = _script_groups(normalized)
+        if len(scripts) >= 2 and _cross_scripts_are_meaningful(normalized, scripts):
             return True
         if not group_languages:
             return False
@@ -187,25 +219,7 @@ def _script_groups(text: str) -> set[str]:
     if _KANA_RE.search(text) or _HAN_RE.search(text):
         groups.add("han")
 
-    for name, pattern in (
-        ("hangul", _HANGUL_RE),
-        ("thai", _THAI_RE),
-        ("lao", _LAO_RE),
-        ("khmer", _KHMER_RE),
-        ("myanmar", _MYANMAR_RE),
-        ("hebrew", _HEBREW_RE),
-        ("arabic", _ARABIC_RE),
-        ("cyrillic", _CYRILLIC_RE),
-        ("greek", _GREEK_RE),
-        ("devanagari", _DEVANAGARI_RE),
-        ("bengali", _BENGALI_RE),
-        ("gurmukhi", _GURMUKHI_RE),
-        ("gujarati", _GUJARATI_RE),
-        ("tamil", _TAMIL_RE),
-        ("telugu", _TELUGU_RE),
-        ("kannada", _KANNADA_RE),
-        ("malayalam", _MALAYALAM_RE),
-    ):
+    for name, pattern in _OTHER_SCRIPT_RES:
         found = pattern.findall(text)
         if len(found) >= _SCRIPT_MIN_CHARS[name]:
             groups.add(name)
@@ -213,6 +227,91 @@ def _script_groups(text: str) -> set[str]:
     if _has_substantial_latin(text):
         groups.add("latin")
     return groups
+
+
+def _cross_scripts_are_meaningful(text: str, scripts: set[str]) -> bool:
+    """2つ以上の文字体系が、それぞれ本文として十分か、独立した節を占めるか。"""
+
+    cleaned = _strip_nonlinguistic(text)
+    letter_counts = _script_letter_counts(cleaned)
+    total = sum(letter_counts.values())
+    if total <= 0:
+        return False
+    word_counts = _script_word_counts(cleaned)
+    clause_scripts = _exclusive_clause_scripts(cleaned)
+    meaningful = 0
+    for script in scripts:
+        words = word_counts.get(script, 0)
+        share = letter_counts.get(script, 0) / total
+        if words >= _MIN_SECONDARY_WORDS and share >= _MIN_SECONDARY_SHARE:
+            meaningful += 1
+            continue
+        if script in clause_scripts:
+            meaningful += 1
+    return meaningful >= 2
+
+
+def _exclusive_clause_scripts(text: str) -> set[str]:
+    """その文字体系の文字だけで、2語以上ある節。"""
+
+    found: set[str] = set()
+    for segment in _CLAUSE_SPLIT_RE.split(text):
+        segment = segment.strip()
+        if not segment:
+            continue
+        counts = _script_letter_counts(segment)
+        if len(counts) != 1:
+            continue
+        script = next(iter(counts))
+        if _script_word_counts(segment).get(script, 0) >= _MIN_SECONDARY_WORDS:
+            found.add(script)
+    return found
+
+
+def _script_letter_counts(text: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for ch in text:
+        script = _char_script(ch)
+        if script:
+            counts[script] = counts.get(script, 0) + 1
+    return counts
+
+
+def _script_word_counts(text: str) -> dict[str, int]:
+    """文字体系ごとの語数。分かち書きしない文字は1文字を1語とする。"""
+
+    counts: dict[str, int] = {}
+    for token in _WORD_RE.findall(text):
+        run_script = ""
+        run_len = 0
+        for ch in token:
+            script = _char_script(ch)
+            if script and script == run_script:
+                run_len += 1
+                continue
+            _add_script_words(counts, run_script, run_len)
+            run_script = script or ""
+            run_len = 1 if script else 0
+        _add_script_words(counts, run_script, run_len)
+    return counts
+
+
+def _add_script_words(counts: dict[str, int], script: str, length: int) -> None:
+    if not script or length <= 0:
+        return
+    added = length if script in _NON_SPACING_SCRIPTS else 1
+    counts[script] = counts.get(script, 0) + added
+
+
+def _char_script(ch: str) -> str | None:
+    if _KANA_RE.match(ch) or _HAN_RE.match(ch):
+        return "han"
+    for name, pattern in _OTHER_SCRIPT_RES:
+        if pattern.match(ch):
+            return name
+    if "A" <= ch <= "Z" or "a" <= ch <= "z":
+        return "latin"
+    return None
 
 
 def _strip_nonlinguistic(text: str) -> str:
@@ -301,16 +400,28 @@ def _to_langdetect_code(raw: str) -> str:
     return _LANGDETECT_ALIASES.get(primary, primary)
 
 
-def _linguistic_stats(text: str) -> tuple[int, int]:
-    """頭字語を除いた文字数と語数。LINE のような全大文字は語としても文字としても数えない。
+def _strip_glued_latin_acronym(word: str) -> str:
+    """全大文字のラテン文字だけを除く。LINEで明日… の日本語は残す。"""
 
+    latin = [ch for ch in word if "A" <= ch <= "Z" or "a" <= ch <= "z"]
+    if latin and all("A" <= ch <= "Z" for ch in latin):
+        return re.sub(r"[A-Za-z]", "", word)
+    return word
+
+
+def _linguistic_stats(text: str) -> tuple[int, int]:
+    """頭字語を除いた文字数と語数。LINE のような全大文字のラテン文字は数えない。
+
+    LINEで明日… のように頭字語が日本語へ接しているときは、ラテン部分だけを除き、
+    同じトークンの非ラテン文字は残す。
     漢字・かな・ハングル・タイ文字など分かち書きしない文字は、1文字を1語として数える。
     文字数と語数の下限はラテン文字と同じまま、文節の長さだけを比べられるようにする。
     """
 
     letters = 0
     words = 0
-    for word in _WORD_RE.findall(text):
+    for raw in _WORD_RE.findall(text):
+        word = _strip_glued_latin_acronym(raw)
         if len(word) < 2 or word.isupper():
             continue
         letters += len(word)

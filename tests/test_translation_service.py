@@ -6,6 +6,7 @@ from src.domain.models import ContextMessage, TranslationResult
 from src.domain.services.language_detection_service import (
     LanguageDetectionService,
     _CLAUSE_SPLIT_RE,
+    _linguistic_stats,
 )
 from src.domain.services.translation_service import TranslationService, detect_language
 
@@ -110,6 +111,19 @@ def test_numbers_only_does_not_translate():
     assert _targets_for("12:30", ["ja", "en"]) == []
     assert _targets_for("100%", ["ja", "en"]) == []
     assert _targets_for("3,000円", ["ja", "en"]) == []
+    assert _targets_for("100元", ["ja", "en"]) == []
+    assert _targets_for("３，０００円", ["ja", "en"]) == []
+
+
+def test_currency_word_alone_is_translatable():
+    # 円・元は数値に付かないときは語。翻訳自体は抑止しない。
+    detector = LanguageDetectionService()
+    assert detector.has_translatable_text("円") is True
+    assert detector.has_translatable_text("元") is True
+    assert detector.has_translatable_text("円高") is True
+    assert detector.has_translatable_text("3,000円") is False
+    assert _targets_for("円", ["ja", "en"])
+    assert _targets_for("元", ["ja", "en"])
 
 
 def test_single_language_messages_still_drop_the_source_language():
@@ -264,3 +278,40 @@ def test_urls_emails_and_mentions_do_not_add_other_scripts():
         assert detector.is_mixed_language(text, ["en", "ru"]) is False
         # 英語の本文だけが残るので、検出言語の英語を翻訳先から外す
         assert _targets_for(text, ["en", "ru"]) == ["ru"]
+
+
+def test_single_foreign_script_name_is_not_mixed():
+    # 英語文の中の人名1語は、別文字体系でも混在にしない
+    detector = LanguageDetectionService()
+    text = "Please invite Мария to the meeting tomorrow."
+    assert detector.is_mixed_language(text, ["en", "ru"]) is False
+    assert detect_language(text).lower().startswith("en")
+    assert _targets_for(text, ["en", "ru"]) == ["ru"]
+
+
+def test_secondary_script_share_or_clause_is_mixed():
+    detector = LanguageDetectionService()
+    # 2語以上かつ文字の約15%以上なら、文の途中でも混在
+    embedded = "Please read приходи завтра утром before the meeting."
+    assert detector.is_mixed_language(embedded, ["en", "ru"]) is True
+    assert _targets_for(embedded, ["en", "ru"]) == ["en", "ru"]
+    # 独立した節なら、短い日本語でも日本語＋英語の混在のまま
+    clause = "I'll join the meeting tomorrow at 3pm if the room is free. 了解です。"
+    assert detector.is_mixed_language(clause, ["en", "ja"]) is True
+    assert _targets_for(clause, ["en", "ja"]) == ["en", "ja"]
+    japanese_and_english = "明日のmeetingはonlineでやりますか? Please confirm by tonight."
+    assert detector.is_mixed_language(japanese_and_english, ["ja", "en"]) is True
+
+
+def test_glued_acronym_keeps_following_japanese():
+    # LINE だけを除き、接している日本語は文節の文字数に残す
+    glued = "LINEで明日の朝に事務所で来週の予定について全員で打ち合わせをします"
+    letters, words = _linguistic_stats(glued)
+    assert letters >= 20
+    assert words >= 4
+    assert _linguistic_stats("LINE") == (0, 0)
+    text = (
+        "LINEで明日の朝に事務所で来週の予定について全員で打ち合わせをします。"
+        "我们明天上午在办公室开会讨论下周的工作计划请大家提前阅读资料。"
+    )
+    assert _targets_for(text, ["ja", "zh-cn"]) == ["ja", "zh-cn"]
