@@ -486,6 +486,67 @@ def test_clearly_negative_outside_catalog_on_mention_stays_on_jev():
     assert gemini._session.calls == []
 
 
+def test_uncertain_add_alongside_confident_add_falls_back_to_gemini():
+    """「英語とタイ語を追加」で英語 0.99・タイ語 0.79 なら、英語だけ追加せず Gemini に戻す。"""
+
+    jev = JevSession(yes_codes={"en"}, noul_overrides={"add_th": 0.79})
+    follow_up, gemini = _follow_up(jev)
+
+    decision = follow_up.complete("language_settings", ROUTER_INPUT)
+
+    assert decision.ack_text == "フランス語を追加します"
+    assert len(jev.calls) == 1
+    assert len(gemini._session.calls) == 1
+
+
+def test_clearly_negative_add_alongside_confident_add_stays_on_jev():
+    """タイ語 0.3 ははっきりした否定なので、英語だけを Jev で追加する。"""
+
+    jev = JevSession(yes_codes={"en"}, noul_overrides={"add_th": 0.3})
+    follow_up, gemini = _follow_up(jev)
+
+    decision = follow_up.complete("language_settings", ROUTER_INPUT)
+
+    assert [item.code for item in decision.languages_to_add] == ["en"]
+    assert decision.ack_text == "言語設定を更新しました。"
+    assert gemini._session.calls == []
+
+
+def test_uncertain_remove_alongside_confident_remove_falls_back_to_gemini():
+    """削除でも英語 0.99・タイ語 0.79 なら、英語だけ外さず Gemini に戻す。"""
+
+    payload = json.dumps(
+        {"user_message": "英語とタイ語を外して", "current_languages": ["en", "th"]},
+        ensure_ascii=False,
+    )
+    jev = JevSession(operation="remove", remove_codes={"en"}, noul_overrides={"remove_th": 0.79})
+    follow_up, gemini = _follow_up(jev)
+
+    decision = follow_up.complete("language_settings", payload)
+
+    assert decision.ack_text == "フランス語を追加します"
+    assert len(jev.calls) == 1
+    assert len(gemini._session.calls) == 1
+
+
+def test_clearly_negative_remove_alongside_confident_remove_stays_on_jev():
+    """削除でタイ語 0.3 は否定なので、英語だけを Jev で外す。"""
+
+    payload = json.dumps(
+        {"user_message": "英語とタイ語を外して", "current_languages": ["en", "th"]},
+        ensure_ascii=False,
+    )
+    jev = JevSession(operation="remove", remove_codes={"en"}, noul_overrides={"remove_th": 0.3})
+    follow_up, gemini = _follow_up(jev)
+
+    decision = follow_up.complete("language_settings", payload)
+
+    assert decision.languages_to_remove == [LanguageChoice(code="en", name="English")]
+    assert decision.languages_to_add == []
+    assert decision.ack_text == "言語設定を更新しました。"
+    assert gemini._session.calls == []
+
+
 def test_low_confidence_outside_catalog_and_empty_add_fall_back():
     cases = [
         JevSession(operation_confidence=0.5, yes_codes={"en"}),
@@ -738,6 +799,39 @@ def test_enrollment_clearly_negative_outside_catalog_stays_on_jev():
         gemini_text=_ENROLLMENT_GEMINI,
     )
     preference = _adapter(session).analyze("英語")
+
+    assert [item.code for item in preference.supported] == ["en"]
+    assert preference.unsupported == []
+    assert len(session.calls) == 1
+    assert session.gemini_calls == []
+
+
+def test_enrollment_uncertain_want_alongside_confident_want_falls_back_to_gemini():
+    """初期設定でも英語 0.99・タイ語 0.79 は英語だけにせず、依頼全体を Gemini に読ませる。"""
+
+    session = HybridSession(
+        language="ja",
+        yes_codes={"en"},
+        noul_overrides={"want_th": 0.79},
+        gemini_text=_ENROLLMENT_GEMINI,
+    )
+    preference = _adapter(session).analyze("英語とタイ語")
+
+    assert [item.code for item in preference.supported] == ["en"]
+    assert len(session.calls) == 1
+    assert len(session.gemini_calls) == 1
+
+
+def test_enrollment_clearly_negative_want_alongside_confident_want_stays_on_jev():
+    """初期設定でタイ語 0.3 は否定なので、英語だけを Jev で採用する。"""
+
+    session = HybridSession(
+        language="ja",
+        yes_codes={"en"},
+        noul_overrides={"want_th": 0.3},
+        gemini_text=_ENROLLMENT_GEMINI,
+    )
+    preference = _adapter(session).analyze("英語とタイ語")
 
     assert [item.code for item in preference.supported] == ["en"]
     assert preference.unsupported == []

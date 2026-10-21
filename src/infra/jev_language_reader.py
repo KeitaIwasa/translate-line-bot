@@ -62,10 +62,11 @@ _CATALOG_CODES = [code for code, _ in LANGUAGE_CATALOG]
 _CATALOG_NAME_LIST = ", ".join(name for _, name in LANGUAGE_CATALOG)
 _CODE_RE = re.compile(r"^[a-z]{2,3}(?:-[a-z0-9]{2,8})?$")
 _SETTINGS_OPERATIONS = ("show", "reset_all", "add", "remove", "add_and_remove")
-# 閾値未満でも、この値を超える want_* は「言語が無い」とは言い切れない
+# 初期設定で全 want_* が閾値未満のとき、この値を超えるスコアは「言語が無い」と言い切れない
 _CLEARLY_NEGATIVE_NOUL = 0.2
-# outside_catalog がこの値以上なら、閾値未満でもカタログ外を否定しきれない
-_UNCERTAIN_OUTSIDE_NOUL = 0.5
+# add_* / remove_* / want_* / outside_catalog がこの値以上かつ閾値未満なら不確実帯。
+# 一つでも残れば、他の言語が閾値以上でも部分採用せず Gemini に戻す。
+_UNCERTAIN_NOUL_FLOOR = 0.5
 
 # 確認文の原文は英語。Jev は文を生成できないので、よく使う言語だけ静的に持つ。
 # 静的訳が無いカタログ言語は空文字を返し、ハンドラーの翻訳経路に渡す。
@@ -147,8 +148,9 @@ def read_language_preference(
 
     reason "ok" は preference を使う。
     "no_languages" は全 want_* がはっきり否定されたときだけで、None のまま返す。
-    閾値未満でも否定しきれないときと、outside_catalog の不確実帯は
-    "low_confidence" とし、Gemini へ戻す。閾値以上のカタログ外は "outside_catalog"。
+    want_* のいずれかが不確実帯 [0.5, 閾値) なら、他言語が閾値以上でも
+    "low_confidence" とし、依頼全体を Gemini に戻す。
+    閾値以上のカタログ外は "outside_catalog"。
     """
     started = time.perf_counter()
     try:
@@ -201,11 +203,12 @@ def _read_language_settings(
         instruction_choice, instruction_confidence = _choice(answers, "instruction_language")
         outside = _noul(answers, "outside_catalog")
         explicit_reset = _noul(answers, "explicit_reset")
-        add_codes = _selected_codes(answers, "add_", _CATALOG_CODES, min_confidence)
-        remove_codes = _selected_codes(answers, "remove_", current, min_confidence)
+        add_scored = _code_scores(answers, "add_", _CATALOG_CODES)
+        remove_scored = _code_scores(answers, "remove_", current)
     except _InvalidAnswers:
         return None, "invalid_response"
 
+    # 操作の確度は「しない」で確定できない。不確実帯より下でも閾値未満は low_confidence
     if operation_confidence < min_confidence:
         return None, "low_confidence"
     if operation not in _SETTINGS_OPERATIONS:
@@ -214,6 +217,16 @@ def _read_language_settings(
     outside_reason = _outside_fallback_reason(outside, min_confidence)
     if outside_reason is not None:
         return None, outside_reason
+    # 英語 0.99 とタイ語 0.79 のように、確定言語があっても不確実帯が残れば全体を戻す
+    uncertain = _uncertain_language_reason(
+        [score for _, score in add_scored] + [score for _, score in remove_scored],
+        min_confidence,
+    )
+    if uncertain is not None:
+        return None, uncertain
+
+    add_codes = _codes_at_or_above(add_scored, min_confidence)
+    remove_codes = _codes_at_or_above(remove_scored, min_confidence)
 
     instruction = ""
     if instruction_choice in LANGUAGE_NAMES and instruction_confidence >= min_confidence:
@@ -282,8 +295,12 @@ def _read_language_preference(
     # 確認UIの言語が曖昧、またはカタログ外の書き言葉なら Gemini に任せる
     if primary not in LANGUAGE_NAMES or primary_confidence < min_confidence:
         return None, "low_confidence"
+    # 英語 0.99 とタイ語 0.79 のように、確定言語があっても不確実帯が残れば全体を戻す
+    uncertain = _uncertain_language_reason(want_scores, min_confidence)
+    if uncertain is not None:
+        return None, uncertain
     if not wanted:
-        # 0.79 のように閾値直下は曖昧。全スコアがはっきり否定のときだけ言語なしとする
+        # 不確実帯未満でも 0.2 を超えるスコアは、言語なしと断定せず Gemini に任せる
         if all(score <= _CLEARLY_NEGATIVE_NOUL for score in want_scores):
             return None, "no_languages"
         return None, "low_confidence"
@@ -318,6 +335,25 @@ def _settings_decision(
     )
 
 
+def _in_uncertain_band(score: float, min_confidence: float) -> bool:
+    """[0.5, 閾値) は肯定とも否定とも言い切れない。
+
+    閾値が 0.5 以下のときは帯が空になり、閾値以上の判定だけが残る。
+    """
+    return _UNCERTAIN_NOUL_FLOOR <= score < min_confidence
+
+
+def _uncertain_language_reason(scores: list[float], min_confidence: float) -> Optional[str]:
+    """add_* / remove_* / want_* の不確実帯が一つでもあれば low_confidence。
+
+    Jev の結果を使うのは、各スコアが閾値以上か 0.5 未満のときだけ。
+    0.5 未満ははっきりした否定として落とし、閾値以上だけを採用する。
+    """
+    if any(_in_uncertain_band(score, min_confidence) for score in scores):
+        return "low_confidence"
+    return None
+
+
 def _outside_fallback_reason(outside: float, min_confidence: float) -> Optional[str]:
     """カタログ外スコアが閾値以上、または不確実帯なら Gemini へ戻す理由。
 
@@ -326,7 +362,7 @@ def _outside_fallback_reason(outside: float, min_confidence: float) -> Optional[
     """
     if outside >= min_confidence:
         return "outside_catalog"
-    if outside >= _UNCERTAIN_OUTSIDE_NOUL:
+    if _in_uncertain_band(outside, min_confidence):
         return "low_confidence"
     return None
 
@@ -475,9 +511,9 @@ def _noul(answers: dict, key: str) -> float:
         raise _InvalidAnswers(key) from exc
 
 
-def _selected_codes(answers: dict, prefix: str, codes: list[str], min_confidence: float) -> list[str]:
-    selected: list[str] = []
-    for code in codes:
-        if _noul(answers, f"{prefix}{code}") >= min_confidence:
-            selected.append(code)
-    return selected
+def _code_scores(answers: dict, prefix: str, codes: list[str]) -> list[tuple[str, float]]:
+    return [(code, _noul(answers, f"{prefix}{code}")) for code in codes]
+
+
+def _codes_at_or_above(scored: list[tuple[str, float]], min_confidence: float) -> list[str]:
+    return [code for code, score in scored if score >= min_confidence]
