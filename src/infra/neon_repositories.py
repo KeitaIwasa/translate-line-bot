@@ -685,7 +685,8 @@ class NeonMessageRepository(MessageRepositoryPort):
                 extra={"group_id": group_id, "requested": [code for code, _ in languages]},
             )
             return
-        with self._client.cursor() as cur:
+        # 複数行の INSERT を一つのトランザクションにまとめる
+        with self._client.connection() as conn, conn.cursor() as cur:
             cur.executemany(
                 """
                 INSERT INTO group_languages (group_id, lang_code, lang_name)
@@ -1746,7 +1747,8 @@ class NeonMessageRepository(MessageRepositoryPort):
         )
 
     def reset_group_language_settings(self, group_id: str) -> None:
-        with self._client.cursor() as cur:
+        # DELETE と UPDATE を一つのトランザクションにまとめる（autocommit だと片方だけ確定しうる）
+        with self._client.connection() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM group_languages WHERE group_id = %s", (group_id,))
             cur.execute(
                 "UPDATE group_members SET last_prompted_at = NULL, last_completed_at = NULL WHERE group_id = %s",
