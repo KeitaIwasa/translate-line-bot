@@ -7,7 +7,7 @@ set -euo pipefail
 # 環境変数で上書き可能なパラメータ:
 # STACK_NAME, PROFILE, REGION, STAGE, GEMINI_MODEL, FUNCTION_MEMORY_SIZE, FUNCTION_TIMEOUT,
 # MAX_CONTEXT_MESSAGES, TRANSLATION_RETRY, RUNTIME_SECRET_ARN, S3_BUCKET, PYTHON_BIN,
-# TYPESAFE_API_KEY_SSM_PARAMETER（既定: /kotori/<STAGE>/typesafe-api-key）
+# TYPESAFE_API_KEY_SSM_PARAMETER（既定は STAGE に対応する既存名。stg→/kotori/stg/...、prod→/kotori/prod/...）
 
 STACK_NAME="${STACK_NAME:-translate-line-bot-stg}"
 PROFILE="${PROFILE:-line-translate-bot}"
@@ -34,15 +34,29 @@ if [[ -z "$RUNTIME_SECRET_ARN" ]]; then
 fi
 
 # Jev（TypeSafe）の API キーは SSM SecureString から読む。
+# deploy.sh の STAGE は stg / prod（prd ではない）。既存パラメーター名にそのまま対応する。
 # キーが無いとメンション判定が全部エラーになるので、存在しなければデプロイを止める。
-TYPESAFE_API_KEY_SSM_PARAMETER="${TYPESAFE_API_KEY_SSM_PARAMETER:-/kotori/${STAGE}/typesafe-api-key}"
+# 値は出さない。--with-decryption は付けず、名前だけ確認する。
+case "$STAGE" in
+  stg)
+    TYPESAFE_API_KEY_SSM_PARAMETER_DEFAULT="/kotori/stg/typesafe-api-key"
+    ;;
+  prod)
+    TYPESAFE_API_KEY_SSM_PARAMETER_DEFAULT="/kotori/prod/typesafe-api-key"
+    ;;
+  *)
+    echo "STAGE must be 'stg' or 'prod' (got '${STAGE}'). TypeSafe API key parameters are /kotori/stg/typesafe-api-key and /kotori/prod/typesafe-api-key." >&2
+    exit 1
+    ;;
+esac
+TYPESAFE_API_KEY_SSM_PARAMETER="${TYPESAFE_API_KEY_SSM_PARAMETER:-$TYPESAFE_API_KEY_SSM_PARAMETER_DEFAULT}"
 if ! aws ssm get-parameter \
   --name "$TYPESAFE_API_KEY_SSM_PARAMETER" \
   --region "$REGION" \
   --profile "$PROFILE" \
   --query Parameter.Name \
   --output text >/dev/null; then
-  echo "SSM parameter '$TYPESAFE_API_KEY_SSM_PARAMETER' (TypeSafe API key) not found. Create it before deploying." >&2
+  echo "SSM parameter '$TYPESAFE_API_KEY_SSM_PARAMETER' (TypeSafe API key) not found. Create it before deploying. The value was not printed." >&2
   exit 1
 fi
 

@@ -163,10 +163,22 @@ Resources:
       Description: Handles LINE webhook events and triggers translation pipeline
       Policies:
         - AWSLambdaBasicExecutionRole
+        # STAGE=stg のスタックは /kotori/stg/typesafe-api-key、prod は /kotori/prod/typesafe-api-key だけを読む。
+        # テンプレートは CMK を作らない。SecureString は AWS 管理キーでも顧客管理キーでも、
+        # SSM 経由かつこのパラメーターの暗号コンテキストに限って復号する。
         - Statement:
-            - Effect: Allow
+            - Sid: ReadTypesafeApiKey
+              Effect: Allow
               Action: ssm:GetParameter
-              Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/kotori/${StageName}/*"
+              Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/kotori/${StageName}/typesafe-api-key"
+            - Sid: DecryptTypesafeApiKey
+              Effect: Allow
+              Action: kms:Decrypt
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  kms:ViaService: !Sub "ssm.${AWS::Region}.amazonaws.com"
+                  kms:EncryptionContext:PARAMETER_ARN: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/kotori/${StageName}/typesafe-api-key"
       Events:
         Webhook:
           Type: HttpApi

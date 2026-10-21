@@ -23,3 +23,4 @@
 [x] 翻訳ホットパスの Neon 往復を1クエリと短TTLキャッシュにまとめ、会員登録と表示名取得は返信後に実行する（本番デプロイはしない）
 [x] グループメンション分類から gpt-5.2 を外し、Jev の6系統判定と Gemini の言語設定抽出・使い方回答だけにする。プランメニュー5文言は Gemini 1回にまとめる（STGデプロイは別途）
 [x] 言語リセットの DELETE/UPDATE と言語追加の複数 INSERT を明示トランザクションにまとめ、スキーマ代替の単文は autocommit のままにする（デプロイはしない）
+[x] deploy.sh が STAGE=stg/prod を `/kotori/stg|prod/typesafe-api-key` に対応させ、パラメーターが無ければ値を出さずに止める。Lambda はそのパラメーターの GetParameter と SSM 経由の kms:Decrypt を持つ（デプロイはしない）
