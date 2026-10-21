@@ -3,24 +3,29 @@ from __future__ import annotations
 import re
 from typing import Sequence
 
-# 言語の追加・削除ではなく、「今どの言語か」を聞いているときの定型応答
+# 言語の追加・削除ではなく、「今どの言語か」を聞いているときの定型応答。
+# current / set / now / 今 / 現在 / 設定 が無い「どの言語」「which languages」は対応言語の質問なので含めない
 _JA_QUESTION = re.compile(
     r"(?:"
-    r"(?:今|現在).{0,8}(?:翻訳)?言語.{0,6}(?:何|なに|なん|どれ)"
-    r"|翻訳言語.{0,8}(?:は|って|を)?(?:何|なに|なん|どれ|教えて|見せて|確認)"
-    r"|どの言語"
-    r"|(?:言語設定|設定している言語|設定中の言語).{0,10}(?:何|教えて|見せて|確認|一覧)"
+    r"(?:今|現在).{0,8}(?:翻訳)?言語.{0,8}(?:何|なに|なん|どれ|教えて|見せて|確認)"
+    r"|(?:言語設定|設定している言語|設定中の言語).{0,10}(?:何|なに|なん|どれ|教えて|見せて|確認|一覧)"
+    r"|(?:今|現在|設定).{0,10}どの言語"
+    r"|どの言語.{0,16}(?:今|現在|設定)"
     r")"
 )
 _JA_MUTATION = re.compile(r"追加|削除|消して|外して|リセット|初期化|変更|変えて|にして|止めて|停止|再開|抜いて|入れて")
+# 対応言語の案内は現在設定の質問にしない
+_JA_SUPPORT = re.compile(r"対応")
+_EN_STATUS = re.compile(r"\b(?:current(?:ly)?|now|set)\b", re.IGNORECASE)
 _EN_QUESTION = re.compile(
     r"(?:"
-    r"\b(?:what|which)\b.{0,40}\blanguages?\b"
-    r"|\bcurrent\b.{0,30}\blanguages?\b"
-    r"|\b(?:show|list)\b.{0,30}\blanguages?\b"
+    r"\b(?:what|which|show|list)\b.{0,60}\blanguages?\b"
+    r"|\bcurrent(?:ly)?\b.{0,40}\blanguages?\b"
+    r"|\blanguages?\b.{0,40}\b(?:current(?:ly)?|set|now)\b"
     r")",
     re.IGNORECASE,
 )
+_EN_SUPPORT = re.compile(r"\bsupports?\b", re.IGNORECASE)
 _EN_MUTATION = re.compile(
     r"\b(?:add|remove|change|reset|switch|stop|pause|delete)\b",
     re.IGNORECASE,
@@ -60,9 +65,18 @@ def is_current_languages_question(text: str) -> bool:
     stripped = (text or "").strip()
     if not stripped:
         return False
-    if _JA_QUESTION.search(stripped) and not _JA_MUTATION.search(stripped):
+    if (
+        _JA_QUESTION.search(stripped)
+        and not _JA_MUTATION.search(stripped)
+        and not _JA_SUPPORT.search(stripped)
+    ):
         return True
-    if _EN_QUESTION.search(stripped) and not _english_requests_change(stripped):
+    if (
+        _EN_QUESTION.search(stripped)
+        and _EN_STATUS.search(stripped)
+        and not _EN_SUPPORT.search(stripped)
+        and not _english_requests_change(stripped)
+    ):
         return True
     return False
 
