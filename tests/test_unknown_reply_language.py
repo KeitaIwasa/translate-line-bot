@@ -245,6 +245,87 @@ def test_language_settings_show_does_not_reset_and_ignores_unrelated_language():
     assert "Korean" not in translator.calls[0]["message_text"]
 
 
+def test_shared_script_prefers_group_language_then_restricted_detection():
+    """アラビア文字などを、グループの言語 → その集合の langdetect → 既定、の順で決める。"""
+
+    detector = LanguageDetectionService()
+    persian = "سلام، حالت چطوره؟ لطفاً زبان را اضافه کنید"
+    urdu = "میں اردو بولتا ہوں، براہ کرم اردو شامل کریں"
+    ukrainian = "Привіт, як справи? Будь ласка, додайте українську мову до перекладу."
+    russian = "Привет, как дела? Пожалуйста, добавьте русский язык к переводу."
+    spanish = "Hola, ¿cómo estás? Por favor dime los idiomas de traducción actuales."
+    english = "how do I use this bot?"
+
+    # ペルシャ語を ar と誤判定しても、グループに fa があれば fa
+    assert detector.resolve_instruction_language(persian, group_languages=["fa", "en"], detected="ar") == "fa"
+    assert detector.resolve_instruction_language(urdu, group_languages=["ur", "en"], detected="ar") == "ur"
+    # グループに両言語があるときは、その集合に限って区別する
+    assert detector.resolve_instruction_language(ukrainian, group_languages=["uk", "ru"]) == "uk"
+    assert detector.resolve_instruction_language(russian, group_languages=["uk", "ru"]) == "ru"
+    assert detector.resolve_instruction_language(ukrainian, group_languages=["uk", "en"]) == "uk"
+    assert detector.resolve_instruction_language(russian, group_languages=["ru", "en"]) == "ru"
+    assert detector.resolve_instruction_language(spanish, group_languages=["es", "en"]) == "es"
+    assert detector.resolve_instruction_language(english, group_languages=["es", "en"]) == "en"
+    # グループにその文字体系が無いときは、集合に限った langdetect を使う（既定の ar にしない）
+    assert detector.resolve_instruction_language(
+        "سلام، حال شما چطور است؟ لطفا زبان ترجمه را به من بگویید.",
+        group_languages=["ja", "en"],
+    ) == "fa"
+    # 短いラテン文は誤検知よりグループ言語を優先する
+    assert detector.resolve_instruction_language("Hola", group_languages=["es", "ja"]) == "es"
+    hindi = "नमस्ते, आप कैसे हैं? कृपया वर्तमान अनुवाद भाषाएँ बताएं।"
+    marathi = "नमस्कार, तुम्ही कसे आहात? कृपया सध्याच्या भाषांतर भाषा सांगा."
+    assert detector.resolve_instruction_language(hindi, group_languages=["hi", "mr"]) == "hi"
+    assert detector.resolve_instruction_language(marathi, group_languages=["hi", "mr"]) == "mr"
+    # かなとハングルは従来どおり一意
+    assert detector.resolve_instruction_language("こんにちは", group_languages=["fa", "ar"]) == "ja"
+    assert detector.resolve_instruction_language("안녕하세요", group_languages=["fa", "ar"]) == "ko"
+
+
+class _ResetRouter:
+    def __init__(self, operation):
+        self.operation = operation
+
+    def decide(self, _text):
+        return models.CommandDecision(
+            action="language_settings",
+            operation=self.operation,
+            instruction_language="ja",
+            ack_text="リセットしました",
+        )
+
+
+def test_unnamed_language_request_does_not_reset_settings():
+    """『言語を追加したい』は言語名もリセット要求も無いので、設定を消さず一覧を返す。"""
+
+    repo = _Repo(GROUP)
+    translator = _Translator()
+    handler = _handler(repo, translator)
+    handler._command_router = _ResetRouter("reset_all")
+    text = "言語を追加したい"
+
+    handler._handle_command(_event(f"@bot {text}"), text)
+
+    assert repo.reset_called is False
+    assert repo.enabled == []
+    assert translator.calls
+    assert "Japanese" in translator.calls[0]["message_text"]
+    assert "English" in translator.calls[0]["message_text"]
+
+
+def test_explicit_reset_request_still_clears_languages():
+    repo = _Repo(GROUP)
+    translator = _Translator()
+    handler = _handler(repo, translator)
+    handler._command_router = _ResetRouter("reset_all")
+    text = "言語設定をリセットして"
+
+    handler._handle_command(_event(f"@bot {text}"), text)
+
+    assert repo.reset_called is True
+    assert False in repo.enabled
+
+
 def test_language_change_is_not_treated_as_current_languages_question():
     assert not is_current_languages_question("言語を英語にして")
     assert not is_current_languages_question("翻訳言語を追加して")
