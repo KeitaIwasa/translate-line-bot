@@ -67,7 +67,7 @@ Parameters:
     Type: String
     Default: ""
     AllowedPattern: "^$|^/kotori/.+"
-    Description: SSM SecureString name holding the TypeSafe API key (e.g. /kotori/stg/typesafe-api-key). Empty disables the SSM lookup
+    Description: SSM SecureString name holding the TypeSafe API key under /kotori/<StageName>/ (e.g. /kotori/stg/typesafe-api-key); the execution role can only read that prefix. Empty disables the SSM lookup
 
 Conditions:
   UseStripe: !Equals [!Ref EnableStripe, "true"]

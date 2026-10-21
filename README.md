@@ -298,7 +298,7 @@ STACK_NAME=translate-line-bot-stg STAGE=stg PROFILE=line-translate-bot GEMINI_MO
 STACK_NAME=translate-line-bot-prod STAGE=prod PROFILE=line-translate-bot GEMINI_MODEL=gemini-2.5-flash ./scripts/deploy.sh
 ```
 
-Jev（TypeSafe）の API キーは SSM SecureString `/kotori/<STAGE>/typesafe-api-key` に置きます（`TYPESAFE_API_KEY_SSM_PARAMETER` で変更可）。
+Jev（TypeSafe）の API キーは SSM SecureString `/kotori/<STAGE>/typesafe-api-key` に置きます（`TYPESAFE_API_KEY_SSM_PARAMETER` で変更可。Lambda が読めるのは `/kotori/<STAGE>/` 配下だけなので、その中で指定）。
 パラメーターが無い場合、`scripts/deploy.sh` はデプロイせずに止まります。
 
 ### 3-1. SAM 直接実行の例（必要時のみ）

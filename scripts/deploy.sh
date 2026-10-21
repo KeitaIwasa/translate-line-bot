@@ -36,6 +36,11 @@ fi
 # Jev（TypeSafe）の API キーは SSM SecureString から読む。
 # キーが無いとメンション判定が全部エラーになるので、存在しなければデプロイを止める。
 TYPESAFE_API_KEY_SSM_PARAMETER="${TYPESAFE_API_KEY_SSM_PARAMETER:-/kotori/${STAGE}/typesafe-api-key}"
+# Lambda の実行ロールが読めるのは /kotori/<STAGE>/ 配下だけなので、それ以外は受け付けない
+if [[ "$TYPESAFE_API_KEY_SSM_PARAMETER" != "/kotori/${STAGE}/"* ]]; then
+  echo "TYPESAFE_API_KEY_SSM_PARAMETER must be under /kotori/${STAGE}/ (got '$TYPESAFE_API_KEY_SSM_PARAMETER')." >&2
+  exit 1
+fi
 if ! aws ssm get-parameter \
   --name "$TYPESAFE_API_KEY_SSM_PARAMETER" \
   --region "$REGION" \
