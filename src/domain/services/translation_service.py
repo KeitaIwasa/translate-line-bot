@@ -50,7 +50,10 @@ class TranslationService:
             return []
 
         # 混在文はどの言語でも「全文がその言語」ではないので、グループの全言語へ訳す
-        mixed = not allow_same_language and self._language_detector.is_mixed_language(message_text)
+        mixed = not allow_same_language and self._language_detector.is_mixed_language(
+            message_text,
+            candidate_languages,
+        )
         if allow_same_language or mixed:
             detected_lang = ""
             filtered_targets = [lang for lang in candidate_languages if lang]

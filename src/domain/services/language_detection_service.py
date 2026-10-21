@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from typing import Sequence
 
+import langdetect.detector_factory as _langdetect_factory
 from langdetect import LangDetectException, detect, DetectorFactory
 
 # 乱数シードを固定して言語判定結果のブレを防ぐ
@@ -15,6 +17,50 @@ _URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
 _EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w.-]+\.\w+\b")
 _MENTION_RE = re.compile(r"[@＠][^\s@]+")
 _LATIN_WORD_RE = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)?")
+# 文字（Unicode の letter）の連続。数字や記号は語に数えない。
+_WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
+# 文と節。数字の桁区切り（3,000 や 12:30）では切らない。
+_CLAUSE_SPLIT_RE = re.compile(
+    r"[\n\r]+"
+    r"|(?<!\d)[.!?。！？…]+(?!\d)"
+    r"|[;；]+"
+    r"|(?<!\d)[,，、](?!\d)"
+    r"|(?<!\d)[:：](?!\d)"
+    r"|(?:\s+[—–\-]\s+)"
+)
+
+# 同じ文字体系の文節を言語判定する下限。短い断片・頭字語・単語1つは混在にしない。
+_MIN_SEGMENT_LETTERS = 20
+_MIN_SEGMENT_WORDS = 4
+_MIN_SEGMENT_PROB = 0.8
+_MAX_SEGMENTS = 12
+
+# langdetect のコードを、このサービスが数える文字体系へ対応付ける。
+# かなとラテン文字のように文字体系が違う組は、上の文字体系判定だけで足りる。
+_LANG_SCRIPTS: dict[str, str] = {}
+for _script, _codes in (
+    (
+        "latin",
+        (
+            "af", "ca", "cs", "cy", "da", "de", "en", "es", "et", "fi", "fr", "hr", "hu",
+            "id", "it", "lt", "lv", "nl", "no", "pl", "pt", "ro", "sk", "sl", "so", "sq",
+            "sv", "sw", "tl", "tr", "vi",
+        ),
+    ),
+    ("cyrillic", ("bg", "mk", "ru", "uk")),
+):
+    for _code in _codes:
+        _LANG_SCRIPTS[_code] = _script
+
+_LANGDETECT_ALIASES = {
+    "zh": "zh-cn",
+    "zh-hans": "zh-cn",
+    "zh-hant": "zh-tw",
+    "nb": "no",
+    "nn": "no",
+    "iw": "he",
+    "in": "id",
+}
 
 # 文字体系。かなと漢字は同じ日本語としてまとめる。
 _KANA_RE = re.compile(r"[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9d]")
@@ -71,43 +117,53 @@ class LanguageDetectionService:
         meaningful = [ch for ch in letters if ch not in _CURRENCY_LETTERS]
         return bool(meaningful)
 
-    def is_mixed_language(self, text: str) -> bool:
+    def is_mixed_language(self, text: str, group_languages: Sequence[str] | None = None) -> bool:
         """全文が単一言語で書かれていないとき True。
 
         かなの中の LINE や Amazon のような固有名詞・頭字語は混在に数えない。
         meeting のような小文字の語や、別の文字体系（タイ文字など）は数える。
+        英語とスペイン語のように文字体系が同じ言語は、グループ言語に絞った
+        文節ごとの判定で混在にする。
         """
 
         normalized = _normalize(text)
         if not self.has_translatable_text(normalized):
             return False
+        if len(_script_groups(normalized)) >= 2:
+            return True
+        if not group_languages:
+            return False
+        return _same_script_languages_mixed(normalized, group_languages)
 
-        groups: set[str] = set()
-        if _KANA_RE.search(normalized):
-            groups.add("ja")
-        elif _HAN_RE.search(normalized):
-            groups.add("cjk")
 
-        for name, pattern in (
-            ("hangul", _HANGUL_RE),
-            ("thai", _THAI_RE),
-            ("lao", _LAO_RE),
-            ("khmer", _KHMER_RE),
-            ("myanmar", _MYANMAR_RE),
-            ("hebrew", _HEBREW_RE),
-            ("arabic", _ARABIC_RE),
-            ("cyrillic", _CYRILLIC_RE),
-            ("greek", _GREEK_RE),
-            ("devanagari", _DEVANAGARI_RE),
-        ):
-            found = pattern.findall(normalized)
-            if len(found) >= _SCRIPT_MIN_CHARS[name]:
-                groups.add(name)
+def _script_groups(text: str) -> set[str]:
+    """テキストに含まれる文字体系。かなと漢字は同時にあっても日本語一つにまとめる。"""
 
-        if _has_substantial_latin(_latin_scan_text(normalized)):
-            groups.add("latin")
+    groups: set[str] = set()
+    if _KANA_RE.search(text):
+        groups.add("ja")
+    elif _HAN_RE.search(text):
+        groups.add("cjk")
 
-        return len(groups) >= 2
+    for name, pattern in (
+        ("hangul", _HANGUL_RE),
+        ("thai", _THAI_RE),
+        ("lao", _LAO_RE),
+        ("khmer", _KHMER_RE),
+        ("myanmar", _MYANMAR_RE),
+        ("hebrew", _HEBREW_RE),
+        ("arabic", _ARABIC_RE),
+        ("cyrillic", _CYRILLIC_RE),
+        ("greek", _GREEK_RE),
+        ("devanagari", _DEVANAGARI_RE),
+    ):
+        found = pattern.findall(text)
+        if len(found) >= _SCRIPT_MIN_CHARS[name]:
+            groups.add(name)
+
+    if _has_substantial_latin(_latin_scan_text(text)):
+        groups.add("latin")
+    return groups
 
 
 def _latin_scan_text(text: str) -> str:
@@ -132,3 +188,97 @@ def _has_substantial_latin(text: str) -> bool:
         return True
     # Please Confirm Tonight のように、大文字始まりが複数ある文
     return len(linguistic) >= 2
+
+
+def _same_script_languages_mixed(text: str, group_languages: Sequence[str]) -> bool:
+    """同じ文字体系のグループ言語が、それぞれ十分な文節を占めるとき True。"""
+
+    scripts = _script_groups(text)
+    candidates = _group_languages_for_scripts(group_languages, scripts)
+    if len(candidates) < 2:
+        return False
+
+    cleaned = _latin_scan_text(text)
+    letters, _words = _linguistic_stats(cleaned)
+    # 言語が2つとも下限を満たすには、全体でその2倍の文字が要る
+    if letters < _MIN_SEGMENT_LETTERS * 2:
+        return False
+
+    covered: dict[str, int] = {}
+    checked = 0
+    for segment in _CLAUSE_SPLIT_RE.split(cleaned):
+        segment = segment.strip()
+        if not segment:
+            continue
+        segment_letters, segment_words = _linguistic_stats(segment)
+        if segment_letters < _MIN_SEGMENT_LETTERS or segment_words < _MIN_SEGMENT_WORDS:
+            continue
+        detected = _detect_restricted(segment, candidates)
+        checked += 1
+        if detected is None:
+            if checked >= _MAX_SEGMENTS:
+                break
+            continue
+        lang, prob = detected
+        if prob >= _MIN_SEGMENT_PROB and lang in candidates:
+            covered[lang] = covered.get(lang, 0) + segment_letters
+        if len([code for code, count in covered.items() if count >= _MIN_SEGMENT_LETTERS]) >= 2:
+            return True
+        if checked >= _MAX_SEGMENTS:
+            break
+    return False
+
+
+def _group_languages_for_scripts(group_languages: Sequence[str], scripts: set[str]) -> list[str]:
+    """テキストの文字体系と一致するグループ言語だけを、langdetect のコードで返す。"""
+
+    codes: list[str] = []
+    for raw in group_languages:
+        code = _to_langdetect_code(raw)
+        if not code or _LANG_SCRIPTS.get(code) not in scripts:
+            continue
+        if code not in codes:
+            codes.append(code)
+    return codes
+
+
+def _to_langdetect_code(raw: str) -> str:
+    code = (raw or "").strip().lower().replace("_", "-")
+    if not code:
+        return ""
+    if code in _LANGDETECT_ALIASES:
+        return _LANGDETECT_ALIASES[code]
+    primary = code.split("-", 1)[0]
+    return _LANGDETECT_ALIASES.get(primary, primary)
+
+
+def _linguistic_stats(text: str) -> tuple[int, int]:
+    """頭字語を除いた文字数と語数。LINE のような全大文字は語としても文字としても数えない。"""
+
+    words = [
+        word
+        for word in _WORD_RE.findall(text)
+        if len(word) >= 2 and not word.isupper()
+    ]
+    return sum(len(word) for word in words), len(words)
+
+
+def _detect_restricted(text: str, languages: Sequence[str]) -> tuple[str, float] | None:
+    """グループ言語だけを事前確率にして、最有力の言語と確度を返す。"""
+
+    _langdetect_factory.init_factory()
+    known = set(_langdetect_factory._factory.get_lang_list())
+    prior = {lang: 1.0 for lang in languages if lang in known}
+    if len(prior) < 2:
+        return None
+    detector = _langdetect_factory._factory.create()
+    detector.set_prior_map(prior)
+    detector.append(text)
+    try:
+        probabilities = detector.get_probabilities()
+    except LangDetectException:
+        return None
+    if not probabilities:
+        return None
+    best = probabilities[0]
+    return best.lang, float(best.prob)

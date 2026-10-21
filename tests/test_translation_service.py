@@ -112,3 +112,55 @@ def test_single_language_messages_still_drop_the_source_language():
     assert _targets_for("こんにちは、元気ですか？", ["ja", "en", "th"]) == ["en", "th"]
     assert _targets_for("Please confirm by tonight.", ["ja", "en"]) == ["ja"]
     assert _targets_for("LINEで送った", ["ja", "en"]) == ["en"]
+
+
+def test_english_spanish_mix_keeps_both_group_languages():
+    # 全文の detect は一方に寄る。文節で en と es の両方が十分な長さなら両方残す。
+    text = "Let's meet at the station tomorrow morning. Nos vemos en la estación mañana por la mañana."
+    detected = detect_language(text).lower()
+    assert detected.startswith("en") or detected.startswith("es")
+    assert _targets_for(text, ["en", "es"]) == ["en", "es"]
+    assert _targets_for(text, ["en", "es", "ja"]) == ["en", "es", "ja"]
+
+
+def test_russian_ukrainian_mix_keeps_both_group_languages():
+    text = "Сегодня мы обсудим план на неделю. Сьогодні ми обговоримо план на тиждень."
+    assert _targets_for(text, ["ru", "uk"]) == ["ru", "uk"]
+
+
+def test_french_vietnamese_mix_keeps_both_group_languages():
+    text = (
+        "Je vais au marché cet après-midi pour acheter des légumes. "
+        "Tôi sẽ đi chợ vào chiều nay để mua rau."
+    )
+    assert _targets_for(text, ["fr", "vi"]) == ["fr", "vi"]
+
+
+def test_single_spanish_word_in_english_is_not_mixed():
+    # 単語1つの外国語では混在にせず、detect が選んだ言語だけを落とす
+    assert detect_language("See you mañana").lower().startswith("es")
+    assert _targets_for("See you mañana", ["en", "es"]) == ["en"]
+
+
+def test_pure_spanish_is_not_mixed():
+    text = "Por favor confirma la reserva para el viernes por la noche."
+    assert detect_language(text).lower().startswith("es")
+    assert _targets_for(text, ["en", "es"]) == ["en"]
+
+
+def test_pure_russian_and_ukrainian_are_not_mixed():
+    russian = "Сегодня хорошая погода и мы пойдём гулять вечером."
+    ukrainian = "Сьогодні гарна погода і ми підемо гуляти ввечері."
+    assert detect_language(russian).lower().startswith("ru")
+    assert detect_language(ukrainian).lower().startswith("uk")
+    assert _targets_for(russian, ["ru", "uk"]) == ["uk"]
+    assert _targets_for(ukrainian, ["ru", "uk"]) == ["ru"]
+
+
+def test_names_urls_and_acronyms_do_not_count_as_same_script_mix():
+    assert _targets_for("Please check LINE tonight and reply when you can.", ["en", "es"]) == ["es"]
+    assert _targets_for("Maria Garcia will join the meeting tomorrow morning.", ["en", "es"]) == ["es"]
+    assert _targets_for(
+        "See the details at https://example.com/docs and confirm the time.",
+        ["en", "es"],
+    ) == ["es"]
