@@ -75,6 +75,24 @@ def test_language_settings_follow_up_extracts_languages_only():
     assert "language_settings" in session.calls[0]["json"]["systemInstruction"]["parts"][0]["text"]
 
 
+def test_language_settings_show_operation_is_preserved():
+    payload = {
+        "operation": "show",
+        "languages_to_add": [],
+        "languages_to_remove": [],
+        "instruction_language": "ja",
+        "ack_text": "",
+    }
+    session = _Session(_Response(text=json.dumps(payload)))
+    decision = _follow_up(session).complete("language_settings", '{"user_message":"今の翻訳言語は何?"}')
+
+    assert decision.action == "language_settings"
+    assert decision.operation == "show"
+    assert decision.instruction_language == "ja"
+    assert decision.languages_to_add == []
+    assert decision.languages_to_remove == []
+
+
 def test_howto_follow_up_returns_answer_text():
     payload = {"instruction_language": "en", "ack_text": "Mention the bot and say how to use."}
     session = _Session(_Response(text=json.dumps(payload)))
