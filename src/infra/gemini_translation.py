@@ -57,6 +57,7 @@ Requirements:
 * Preserve user names (sender_name) exactly as they are; Do NOT translate them.
 * Preserve mention strings (e.g., "@John") in their original form.
 * Produce natural interpretations that match each user's tone and the conversational context.
+* If the source message mixes languages, write each target as one complete, natural sentence entirely in that target language. Translate every part, including words already written in the target language.
 * Do not copy, quote, or directly reproduce the source_message.text in the translation output; return only the translated text for each target language.
 * Output only a JSON object that conforms to the specified JSON Schema.
 * Do NOT include context_messages or target_languages in the output JSON.
