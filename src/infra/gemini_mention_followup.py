@@ -14,7 +14,7 @@ from .gemini_generation_config import build_generation_config
 
 logger = logging.getLogger(__name__)
 
-# Jev が言語設定と判定したあとに、追加・削除する言語だけを取り出す
+# 言語設定の詳細。本番では Jev が先に読み、ここは失敗時のフォールバック。
 LANGUAGE_SYSTEM_PROMPT = """
 You extract language-setting details for a LINE multilingual translation bot.
 The user's intent is already classified as language_settings. Do not reclassify it.
@@ -90,7 +90,7 @@ _VALID_OPERATIONS = {"reset_all", "add", "remove", "add_and_remove"}
 
 
 class GeminiMentionFollowUp:
-    """言語設定の抽出と使い方回答だけを、既存の Gemini モデルへ1回ずつ聞く。"""
+    """使い方の回答と、言語設定抽出のフォールバックを Gemini に聞く。"""
 
     def __init__(
         self,

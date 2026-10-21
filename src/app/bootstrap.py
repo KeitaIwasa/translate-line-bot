@@ -11,6 +11,7 @@ from ..infra.gemini_mention_followup import GeminiMentionFollowUp
 from ..infra.gemini_translation import GeminiTranslationAdapter
 from ..infra.language_pref_client import LanguagePreferenceAdapter
 from ..infra.jev_command_router import JevFirstPassCommandRouter, TypesafeApiKeyProvider
+from ..infra.jev_language_followup import JevLanguageMentionFollowUp
 from ..infra.line_api import LineApiAdapter
 from ..infra.neon_client import get_client
 from ..infra.neon_repositories import NeonMessageRepository
@@ -47,25 +48,37 @@ def build_dispatcher() -> Dispatcher:
     translation_service = TranslationService(translation_adapter)
     interface_translation = InterfaceTranslationService(translation_adapter)
     language_detector = LanguageDetectionService()
+    typesafe_api_key_provider = TypesafeApiKeyProvider(
+        api_key=settings.typesafe_api_key,
+        ssm_parameter_name=settings.typesafe_api_key_ssm_parameter,
+    )
     language_pref_service = LanguagePreferenceAdapter(
         api_key=settings.gemini_api_key,
         model=settings.gemini_model,
         timeout_seconds=settings.gemini_timeout_seconds,
+        jev_api_key_provider=typesafe_api_key_provider,
+        jev_model=settings.jev_model,
+        jev_timeout_seconds=settings.jev_timeout_seconds,
+        jev_min_confidence=settings.jev_min_confidence,
     )
     support_prompt_path = str(Path(__file__).resolve().parent / "prompts" / "kotori_support_prompt.txt")
-    mention_follow_up = GeminiMentionFollowUp(
+    gemini_follow_up = GeminiMentionFollowUp(
         api_key=settings.gemini_api_key,
         model=settings.command_model or settings.gemini_model,
         timeout_seconds=settings.gemini_timeout_seconds,
         support_prompt_path=support_prompt_path,
     )
-    # 全メンションを Jev で分類し、言語設定と使い方だけ Gemini に続きを依頼する
+    # 言語の読み取りは Jev。失敗時だけ Gemini。使い方の回答は Gemini のまま
+    mention_follow_up = JevLanguageMentionFollowUp(
+        gemini=gemini_follow_up,
+        api_key_provider=typesafe_api_key_provider,
+        model=settings.jev_model,
+        timeout_seconds=settings.jev_timeout_seconds,
+        min_confidence=settings.jev_min_confidence,
+    )
     command_router = JevFirstPassCommandRouter(
         follow_up=mention_follow_up,
-        api_key_provider=TypesafeApiKeyProvider(
-            api_key=settings.typesafe_api_key,
-            ssm_parameter_name=settings.typesafe_api_key_ssm_parameter,
-        ),
+        api_key_provider=typesafe_api_key_provider,
         model=settings.jev_model,
         timeout_seconds=settings.jev_timeout_seconds,
         min_confidence=settings.jev_min_confidence,

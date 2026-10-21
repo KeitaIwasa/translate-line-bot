@@ -125,7 +125,7 @@ def test_six_way_routing():
     assert follow_up.calls == []
 
 
-def test_language_and_howto_keep_jev_action_and_call_gemini_once():
+def test_language_and_howto_keep_jev_action_and_call_follow_up_once():
     for action in ["language_settings", "howto"]:
         router, follow_up = _router(_FakeSession(_answer(action)))
         router.decide(ROUTER_INPUT)
