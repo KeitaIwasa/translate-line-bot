@@ -5,7 +5,7 @@ import unicodedata
 from typing import Mapping, Sequence
 
 from langdetect import DetectorFactory, LangDetectException, detect
-from langdetect.detector_factory import DetectorFactory as _DetectorFactory
+from langdetect.detector import Detector
 
 # 乱数シードを固定して言語判定結果のブレを防ぐ
 DetectorFactory.seed = 0
@@ -142,7 +142,9 @@ _FAMILY_TIE_RANK = {name: index for index, name in enumerate(_FAMILY_TIE_BREAK)}
 
 # langdetect のプロファイル名。zh は簡体として zh-cn を使う
 _PROFILE_OF = {"zh": "zh-cn", "zh-cn": "zh-cn", "zh-tw": "zh-tw"}
-_RESTRICTED_FACTORIES: dict[frozenset[str], _DetectorFactory] = {}
+# 言語集合ごとの単語確率表は複製しない。キャッシュは持たない（上限 0）
+_FACTORY_CACHE_LIMIT = 0
+_RESTRICTED_FACTORIES: dict[frozenset[str], Detector] = {}
 _PROFILE_NAMES: frozenset[str] | None = None
 
 _EMPTY_SIGNALS = {
@@ -461,7 +463,7 @@ def _restricted_detect(text: str, pool: Sequence[str]) -> str:
     if len(profiles) < 2:
         return ""
     try:
-        detector = _factory_for(profiles).create()
+        detector = _detector_for(profiles)
         detector.append(text)
         profile = detector.detect()
     except LangDetectException:
@@ -479,21 +481,61 @@ def _profile_names() -> frozenset[str]:
     return _PROFILE_NAMES
 
 
-def _factory_for(profiles: frozenset[str]) -> _DetectorFactory:
-    cached = _RESTRICTED_FACTORIES.get(profiles)
-    if cached is not None:
-        return cached
+def _detector_for(profiles: frozenset[str]) -> Detector:
+    """共有プロファイルの添字だけで判定する。単語確率表は複製しない。"""
+
     import langdetect.detector_factory as detector_factory
 
     detector_factory.init_factory()
     base = detector_factory._factory
     indices = [index for index, lang in enumerate(base.langlist) if lang in profiles]
-    factory = _DetectorFactory()
-    factory.seed = 0
-    factory.langlist = [base.langlist[index] for index in indices]
-    for word, probs in base.word_lang_prob_map.items():
-        sliced = [probs[index] for index in indices]
-        if any(sliced):
-            factory.word_lang_prob_map[word] = sliced
-    _RESTRICTED_FACTORIES[profiles] = factory
-    return factory
+    return _SharedProfileDetector(base, indices)
+
+
+class _SharedProfileDetector(Detector):
+    """共有の word_lang_prob_map を読み、候補言語の確率だけを更新する。"""
+
+    def __init__(self, factory, indices: Sequence[int]):
+        super().__init__(factory)
+        self._indices = tuple(indices)
+        self.langlist = [factory.langlist[index] for index in self._indices]
+
+    def _init_probability(self):
+        size = len(self._indices)
+        return [1.0 / size] * size
+
+    def _extract_ngrams(self):
+        """候補言語の確率がすべて 0 の語は、複製した表から落ちるのと同じように捨てる。"""
+
+        from langdetect.utils.ngram import NGram
+
+        result = []
+        ngram = NGram()
+        span = range(1, NGram.N_GRAM + 1)
+        indices = self._indices
+        prob_map = self.word_lang_prob_map
+        for char in self.text:
+            ngram.add_char(char)
+            if ngram.capitalword:
+                continue
+            for length in span:
+                if len(ngram.grams) < length:
+                    break
+                word = ngram.grams[-length:]
+                if not word or word == " ":
+                    continue
+                probs = prob_map.get(word)
+                if probs is None:
+                    continue
+                if any(probs[index] for index in indices):
+                    result.append(word)
+        return result
+
+    def _update_lang_prob(self, prob, word, alpha):
+        if not word or word not in self.word_lang_prob_map:
+            return False
+        lang_prob_map = self.word_lang_prob_map[word]
+        weight = alpha / self.BASE_FREQ
+        for offset, index in enumerate(self._indices):
+            prob[offset] *= weight + lang_prob_map[index]
+        return True

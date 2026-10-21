@@ -423,6 +423,48 @@ def test_status_set_is_current_languages_question():
     assert not is_current_languages_question("Which languages are currently set? Please set English")
 
 
+def test_support_questions_are_not_current_languages_questions():
+    """対応言語の質問は、現在の設定を聞く文ではない。"""
+
+    assert not is_current_languages_question("Which languages does this bot support?")
+    assert not is_current_languages_question("What languages do you support?")
+    assert not is_current_languages_question("Which languages does this bot currently support?")
+    assert not is_current_languages_question("どの言語に対応していますか")
+    assert not is_current_languages_question("対応している言語は何ですか")
+    assert not is_current_languages_question("どの言語")
+    assert not is_current_languages_question("show the languages")
+    assert is_current_languages_question("今の翻訳言語は何?")
+    assert is_current_languages_question("現在の言語を教えて")
+    assert is_current_languages_question("設定している言語は何?")
+    assert is_current_languages_question("どの言語が設定されていますか")
+    assert is_current_languages_question("what are the current translation languages?")
+    assert is_current_languages_question("Which languages are currently set?")
+
+
+def test_distinct_language_sets_do_not_grow_the_factory_cache():
+    """言語集合がいくつあっても、単語確率表の複製キャッシュは上限を超えない。"""
+
+    import langdetect.detector_factory as detector_factory
+
+    from src.domain.services import language_detection_service as svc
+
+    detector_factory.init_factory()
+    shared_map = detector_factory._factory.word_lang_prob_map
+    names = sorted(svc._profile_names())
+    svc._RESTRICTED_FACTORIES.clear()
+    sample = "Please tell me which translation languages are currently set for this group."
+    seen = 0
+    for index, left in enumerate(names):
+        right = names[(index + 7) % len(names)]
+        if left == right:
+            continue
+        svc._restricted_detect(sample, [left, right])
+        seen += 1
+    assert seen > svc._FACTORY_CACHE_LIMIT
+    assert len(svc._RESTRICTED_FACTORIES) <= svc._FACTORY_CACHE_LIMIT
+    assert detector_factory._factory.word_lang_prob_map is shared_map
+
+
 def test_status_set_question_lists_group_languages():
     repo = _Repo(GROUP)
     translator = _Translator()
