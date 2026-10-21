@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Protocol
 
 import requests
 
@@ -26,30 +26,40 @@ ACTION_CRITERIA: Dict[str, str] = {
     "unknown": "Anything else",
 }
 
-# 定型文で返せる操作（言語非依存）。それ以外は既存のLLMルーターに回す
+# ハンドラーが定型処理する操作。言語設定・使い方以外は Gemini を呼ばない
 TEMPLATE_ACTIONS = frozenset(
     {"pause", "resume", "subscription_menu", "subscription_cancel", "subscription_upgrade"}
 )
+# Jev の判定後に Gemini へ続きの抽出・回答だけを依頼する操作
+FOLLOW_UP_ACTIONS = frozenset({"language_settings", "howto"})
+
+
+class MentionFollowUp(Protocol):
+    def complete(self, action: str, router_input: str) -> CommandDecision:
+        """language_settings または howto の詳細を返す。失敗時は action=error。"""
 
 
 class JevFirstPassCommandRouter(CommandRouterPort):
-    """TypeSafe Jev で操作を一次判定し、定型操作だけ即決する。
+    """グループメンションを TypeSafe Jev で分類する。
 
-    言語設定・質問回答・不明・低確信度・Jevエラー/タイムアウト・APIキー未設定の場合は
-    既存のルーター（fallback）にそのまま委譲する。
+    6系統の扱い:
+    - pause / resume とプラン操作（menu / cancel / upgrade）は確信度が十分なら即決する
+    - language_settings と howto は Jev の分類を維持し、詳細だけ Gemini に聞く
+    - unknown と低確信度は unknown（既存の未認識応答）
+    - Jev の失敗は error（既存の分類失敗応答）
     """
 
     def __init__(
         self,
         *,
-        fallback: CommandRouterPort,
+        follow_up: MentionFollowUp,
         api_key_provider: Callable[[], str],
         model: str = "jev-latest",
         timeout_seconds: float = 1.5,
         min_confidence: float = 0.8,
         session: Optional[requests.Session] = None,
     ) -> None:
-        self._fallback = fallback
+        self._follow_up = follow_up
         self._api_key_provider = api_key_provider
         self._model = model
         self._timeout = timeout_seconds
@@ -60,23 +70,57 @@ class JevFirstPassCommandRouter(CommandRouterPort):
         started = time.perf_counter()
         choice, confidence, reason = self._classify(text)
         elapsed_ms = (time.perf_counter() - started) * 1000
-        if choice in TEMPLATE_ACTIONS and confidence >= self._min_confidence:
+        if reason == "ok" and choice in TEMPLATE_ACTIONS:
             logger.info(
-                "Jev first-pass decided | action=%s confidence=%.2f elapsed_ms=%.0f",
+                "Jev decided | action=%s confidence=%.2f elapsed_ms=%.0f",
                 choice,
                 confidence,
                 elapsed_ms,
             )
             # ack_text と instruction_language は空にして、ハンドラー側の定型文と言語判定に任せる
             return CommandDecision(action=choice, instruction_language="", ack_text="")
+        if reason == "needs_follow_up" and choice in FOLLOW_UP_ACTIONS:
+            logger.info(
+                "Jev follow-up | action=%s confidence=%.2f elapsed_ms=%.0f",
+                choice,
+                confidence,
+                elapsed_ms,
+            )
+            return self._complete_follow_up(choice, text)
+        if reason in {"unknown", "low_confidence"}:
+            logger.info(
+                "Jev unknown | reason=%s action=%s confidence=%.2f elapsed_ms=%.0f",
+                reason,
+                choice or "none",
+                confidence,
+                elapsed_ms,
+            )
+            return CommandDecision(action="unknown", instruction_language="", ack_text="")
         logger.info(
-            "Jev first-pass delegated | reason=%s action=%s confidence=%.2f elapsed_ms=%.0f",
+            "Jev error | reason=%s action=%s confidence=%.2f elapsed_ms=%.0f",
             reason,
             choice or "none",
             confidence,
             elapsed_ms,
         )
-        return self._fallback.decide(text)
+        return CommandDecision(action="error", instruction_language="", ack_text="")
+
+    def _complete_follow_up(self, action: str, router_input: str) -> CommandDecision:
+        try:
+            decision = self._follow_up.complete(action, router_input)
+        except Exception:
+            logger.warning("Mention follow-up raised | action=%s", action)
+            return CommandDecision(action="error", instruction_language="", ack_text="")
+        if decision.action == action:
+            return decision
+        if decision.action == "error":
+            return decision
+        logger.warning(
+            "Mention follow-up action mismatch | expected=%s got=%s",
+            action,
+            decision.action,
+        )
+        return CommandDecision(action="error", instruction_language="", ack_text="")
 
     def _classify(self, text: str) -> tuple[str, float, str]:
         """(action, confidence, reason) を返す。失敗時は action を空にする。"""
@@ -123,11 +167,15 @@ class JevFirstPassCommandRouter(CommandRouterPort):
             return "", 0.0, "invalid_response"
         if choice not in ACTION_CRITERIA:
             return "", 0.0, "invalid_choice"
-        if choice not in TEMPLATE_ACTIONS:
-            return choice, confidence, "language_dependent"
+        if choice == "unknown":
+            return choice, confidence, "unknown"
         if confidence < self._min_confidence:
             return choice, confidence, "low_confidence"
-        return choice, confidence, "ok"
+        if choice in FOLLOW_UP_ACTIONS:
+            return choice, confidence, "needs_follow_up"
+        if choice in TEMPLATE_ACTIONS:
+            return choice, confidence, "ok"
+        return "", 0.0, "invalid_choice"
 
 
 def _extract_user_message(router_input: str) -> str:

@@ -7,9 +7,9 @@ from ..config import get_settings
 from ..domain.services.translation_service import TranslationService
 from ..domain.services.interface_translation_service import InterfaceTranslationService
 from ..domain.services.language_detection_service import LanguageDetectionService
+from ..infra.gemini_mention_followup import GeminiMentionFollowUp
 from ..infra.gemini_translation import GeminiTranslationAdapter
 from ..infra.language_pref_client import LanguagePreferenceAdapter
-from ..infra.command_router import OpenAIGroupMentionCommandRouter
 from ..infra.jev_command_router import JevFirstPassCommandRouter, TypesafeApiKeyProvider
 from ..infra.line_api import LineApiAdapter
 from ..infra.neon_client import get_client
@@ -52,16 +52,16 @@ def build_dispatcher() -> Dispatcher:
         model=settings.gemini_model,
         timeout_seconds=settings.gemini_timeout_seconds,
     )
-    group_prompt_path = str(Path(__file__).resolve().parent / "prompts" / "kotori_group_mention_prompt.txt")
-    llm_command_router = OpenAIGroupMentionCommandRouter(
-        api_key=settings.openai_api_key,
-        model=settings.openai_group_mention_model,
-        prompt_path=group_prompt_path,
+    support_prompt_path = str(Path(__file__).resolve().parent / "prompts" / "kotori_support_prompt.txt")
+    mention_follow_up = GeminiMentionFollowUp(
+        api_key=settings.gemini_api_key,
+        model=settings.command_model or settings.gemini_model,
         timeout_seconds=settings.gemini_timeout_seconds,
+        support_prompt_path=support_prompt_path,
     )
-    # Jev で定型操作を一次判定し、言語依存の操作だけ LLM ルーターに回す
+    # 全メンションを Jev で分類し、言語設定と使い方だけ Gemini に続きを依頼する
     command_router = JevFirstPassCommandRouter(
-        fallback=llm_command_router,
+        follow_up=mention_follow_up,
         api_key_provider=TypesafeApiKeyProvider(
             api_key=settings.typesafe_api_key,
             ssm_parameter_name=settings.typesafe_api_key_ssm_parameter,
@@ -91,12 +91,11 @@ def build_dispatcher() -> Dispatcher:
         max_context_messages=settings.max_context_messages,
         translation_retry=settings.translation_retry,
     )
-    prompt_path = str(Path(__file__).resolve().parent / "prompts" / "kotori_support_prompt.txt")
     private_chat_responder = OpenAISupportAgent(
         api_key=settings.openai_api_key,
         support_model=settings.openai_support_model,
         guardrail_model=settings.openai_guardrail_model,
-        prompt_path=prompt_path,
+        prompt_path=support_prompt_path,
     )
     private_chat_support_service = PrivateChatSupportService(
         repo=repo,

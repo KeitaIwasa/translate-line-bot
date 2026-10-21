@@ -28,42 +28,53 @@ class _FakeSession:
         return self.response
 
 
-class _FakeFallback:
-    def __init__(self):
-        self.inputs = []
+class _FakeFollowUp:
+    def __init__(self, decision=None, exc=None):
+        self.calls = []
+        self.decision = decision or CommandDecision(
+            action="language_settings",
+            operation="add",
+            instruction_language="ja",
+            ack_text="追加します",
+        )
+        self.exc = exc
 
-    def decide(self, text):
-        self.inputs.append(text)
-        return CommandDecision(action="language_settings", operation="add", instruction_language="ja", ack_text="LLM")
+    def complete(self, action, text):
+        self.calls.append((action, text))
+        if self.exc:
+            raise self.exc
+        if self.decision.action == "language_settings" and action == "howto":
+            return CommandDecision(action="howto", instruction_language="ja", ack_text="使い方です")
+        return self.decision
 
 
 def _answer(choice, confidence=0.99):
     return _FakeResponse(200, {"answers": {"action": {"type": "choice", "choice": choice, "confidence": confidence}}})
 
 
-def _router(session, key="ts-key", **kwargs):
-    fallback = _FakeFallback()
+def _router(session, key="ts-key", follow_up=None, **kwargs):
+    follow_up = follow_up or _FakeFollowUp()
     router = JevFirstPassCommandRouter(
-        fallback=fallback,
+        follow_up=follow_up,
         api_key_provider=lambda: key,
         session=session,
         **kwargs,
     )
-    return router, fallback
+    return router, follow_up
 
 
 ROUTER_INPUT = json.dumps({"user_message": "翻訳止めて", "translation_enabled": True}, ensure_ascii=False)
 
 
-def test_template_action_is_decided_by_jev_without_llm():
+def test_template_action_is_decided_by_jev_without_gemini():
     session = _FakeSession(_answer("pause"))
-    router, fallback = _router(session, timeout_seconds=1.5)
+    router, follow_up = _router(session, timeout_seconds=1.5)
 
     decision = router.decide(ROUTER_INPUT)
 
     assert decision.action == "pause"
     assert decision.ack_text == ""
-    assert fallback.inputs == []
+    assert follow_up.calls == []
     call = session.calls[0]
     assert call["url"] == "https://api.typesafe.ai/v1/systemone"
     assert call["headers"]["Authorization"] == "Bearer ts-key"
@@ -73,49 +84,97 @@ def test_template_action_is_decided_by_jev_without_llm():
     assert call["timeout"] == 1.5
 
 
-def test_all_template_actions_skip_llm():
+def test_pause_resume_and_plan_actions_skip_gemini():
     for action in ["pause", "resume", "subscription_menu", "subscription_cancel", "subscription_upgrade"]:
-        router, fallback = _router(_FakeSession(_answer(action)))
+        router, follow_up = _router(_FakeSession(_answer(action)))
         assert router.decide(ROUTER_INPUT).action == action
-        assert fallback.inputs == []
+        assert follow_up.calls == []
 
 
-def test_language_dependent_actions_fall_through_to_llm():
-    for action in ["language_settings", "howto", "unknown"]:
-        router, fallback = _router(_FakeSession(_answer(action)))
+def test_six_way_routing():
+    direct = {
+        "pause": "pause",
+        "resume": "resume",
+        "subscription_menu": "subscription_menu",
+        "subscription_upgrade": "subscription_upgrade",
+    }
+    for choice, expected in direct.items():
+        router, follow_up = _router(_FakeSession(_answer(choice)))
         decision = router.decide(ROUTER_INPUT)
-        assert decision.ack_text == "LLM"
-        assert fallback.inputs == [ROUTER_INPUT]
+        assert decision.action == expected
+        assert follow_up.calls == []
+
+    router, follow_up = _router(_FakeSession(_answer("language_settings")))
+    decision = router.decide(ROUTER_INPUT)
+    assert decision.action == "language_settings"
+    assert decision.operation == "add"
+    assert follow_up.calls == [("language_settings", ROUTER_INPUT)]
+
+    router, follow_up = _router(_FakeSession(_answer("howto")))
+    decision = router.decide(ROUTER_INPUT)
+    assert decision.action == "howto"
+    assert decision.ack_text == "使い方です"
+    assert follow_up.calls == [("howto", ROUTER_INPUT)]
+
+    router, follow_up = _router(_FakeSession(_answer("unknown")))
+    assert router.decide(ROUTER_INPUT).action == "unknown"
+    assert follow_up.calls == []
+
+    router, follow_up = _router(_FakeSession(exc=requests.Timeout()))
+    assert router.decide(ROUTER_INPUT).action == "error"
+    assert follow_up.calls == []
 
 
-def test_low_confidence_falls_back():
-    router, fallback = _router(_FakeSession(_answer("pause", 0.5)), min_confidence=0.8)
-    assert router.decide(ROUTER_INPUT).ack_text == "LLM"
-    assert fallback.inputs == [ROUTER_INPUT]
+def test_language_and_howto_keep_jev_action_and_call_gemini_once():
+    for action in ["language_settings", "howto"]:
+        router, follow_up = _router(_FakeSession(_answer(action)))
+        router.decide(ROUTER_INPUT)
+        assert follow_up.calls == [(action, ROUTER_INPUT)]
 
 
-def test_missing_key_falls_back_without_calling_jev():
+def test_low_confidence_is_unknown_without_gemini():
+    router, follow_up = _router(_FakeSession(_answer("pause", 0.5)), min_confidence=0.8)
+    assert router.decide(ROUTER_INPUT).action == "unknown"
+    assert follow_up.calls == []
+
+    router, follow_up = _router(_FakeSession(_answer("language_settings", 0.5)), min_confidence=0.8)
+    assert router.decide(ROUTER_INPUT).action == "unknown"
+    assert follow_up.calls == []
+
+
+def test_missing_key_is_error_without_calling_jev():
     session = _FakeSession(_answer("pause"))
-    router, fallback = _router(session, key="")
-    assert router.decide(ROUTER_INPUT).ack_text == "LLM"
+    router, follow_up = _router(session, key="")
+    assert router.decide(ROUTER_INPUT).action == "error"
     assert session.calls == []
+    assert follow_up.calls == []
 
 
-def test_timeout_falls_back():
-    router, fallback = _router(_FakeSession(exc=requests.Timeout()))
-    assert router.decide(ROUTER_INPUT).ack_text == "LLM"
+def test_timeout_is_error():
+    router, _ = _router(_FakeSession(exc=requests.Timeout()))
+    assert router.decide(ROUTER_INPUT).action == "error"
 
 
-def test_http_error_falls_back():
-    router, fallback = _router(_FakeSession(_FakeResponse(401, {"error": "unauthorized"})))
-    assert router.decide(ROUTER_INPUT).ack_text == "LLM"
+def test_http_error_is_error():
+    router, _ = _router(_FakeSession(_FakeResponse(401, {"error": "unauthorized"})))
+    assert router.decide(ROUTER_INPUT).action == "error"
 
 
-def test_invalid_response_falls_back():
-    router, fallback = _router(_FakeSession(_FakeResponse(200, {"unexpected": True})))
-    assert router.decide(ROUTER_INPUT).ack_text == "LLM"
-    router, fallback = _router(_FakeSession(_answer("delete_everything")))
-    assert router.decide(ROUTER_INPUT).ack_text == "LLM"
+def test_invalid_response_is_error():
+    router, _ = _router(_FakeSession(_FakeResponse(200, {"unexpected": True})))
+    assert router.decide(ROUTER_INPUT).action == "error"
+    router, _ = _router(_FakeSession(_answer("delete_everything")))
+    assert router.decide(ROUTER_INPUT).action == "error"
+
+
+def test_follow_up_failure_is_error():
+    follow_up = _FakeFollowUp(exc=RuntimeError("boom"))
+    router, _ = _router(_FakeSession(_answer("howto")), follow_up=follow_up)
+    assert router.decide(ROUTER_INPUT).action == "error"
+
+    mismatch = _FakeFollowUp(decision=CommandDecision(action="pause", ack_text="nope"))
+    router, _ = _router(_FakeSession(_answer("howto")), follow_up=mismatch)
+    assert router.decide(ROUTER_INPUT).action == "error"
 
 
 def test_non_json_router_input_is_sent_as_message():

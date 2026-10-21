@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Sequence
 
 from .subscription_postback import encode_subscription_payload
 from .subscription_texts import (
@@ -18,6 +18,26 @@ TruncateFn = Callable[[str, int], str]
 NormalizeFn = Callable[[str], str]
 
 
+def _resolve_menu_texts(
+    ordered: Sequence[str],
+    translate: TranslateFn,
+    translate_batch: Optional[Callable[[Sequence[str]], Sequence[str]]],
+) -> list[str]:
+    """一括翻訳を優先し、件数や中身が欠けた項目は原文（または個別翻訳）に戻す。"""
+
+    if translate_batch is not None:
+        try:
+            batched = list(translate_batch(ordered))
+        except Exception:
+            batched = []
+        if len(batched) == len(ordered):
+            return [
+                item.strip() if isinstance(item, str) and item.strip() else original
+                for item, original in zip(batched, ordered)
+            ]
+    return [(translate(text) or text) for text in ordered]
+
+
 def build_subscription_menu_message(
     *,
     group_id: str,
@@ -32,25 +52,41 @@ def build_subscription_menu_message(
     translate: TranslateFn,
     truncate: TruncateFn,
     normalize_text: NormalizeFn,
+    translate_batch: Optional[Callable[[Sequence[str]], Sequence[str]]] = None,
 ) -> Optional[Dict]:
     summary = SubscriptionService.build_subscription_summary_text(
         status,
         period_end,
         plan_key=effective_plan,
     )
-    translated_summary = translate(summary) or summary
-    body_text = truncate(normalize_text(translated_summary), 120)
+    # プラン本文・タイトル・通知文・請求ボタン・アップグレードボタン（解約ボタンがあるときだけ追加）
+    ordered = [summary, SUBS_MENU_TITLE, SUBS_MENU_TEXT]
+    if portal_url:
+        ordered.append(SUBS_VIEW_LABEL)
+    if include_cancel:
+        ordered.append(SUBS_CANCEL_LABEL)
+    if include_upgrade and upgrade_url:
+        ordered.append(SUBS_UPGRADE_LABEL)
+    resolved = _resolve_menu_texts(ordered, translate, translate_batch)
 
-    title = translate(SUBS_MENU_TITLE) or SUBS_MENU_TITLE
-    alt_text = translate(SUBS_MENU_TEXT) or SUBS_MENU_TEXT
+    cursor = 0
+    translated_summary = resolved[cursor]
+    cursor += 1
+    title = resolved[cursor]
+    cursor += 1
+    alt_text = resolved[cursor]
+    cursor += 1
+    body_text = truncate(normalize_text(translated_summary), 120)
 
     actions = []
     if portal_url:
-        label = translate(SUBS_VIEW_LABEL) or SUBS_VIEW_LABEL
+        label = resolved[cursor]
+        cursor += 1
         actions.append({"type": "uri", "label": truncate(label, 20), "uri": portal_url})
 
     if include_cancel:
-        label = translate(SUBS_CANCEL_LABEL) or SUBS_CANCEL_LABEL
+        label = resolved[cursor]
+        cursor += 1
         payload = encode_subscription_payload({
             "kind": "cancel",
             "group_id": group_id,
@@ -59,7 +95,7 @@ def build_subscription_menu_message(
         actions.append({"type": "postback", "label": truncate(label, 20), "data": payload})
 
     if include_upgrade and upgrade_url:
-        label = translate(SUBS_UPGRADE_LABEL) or SUBS_UPGRADE_LABEL
+        label = resolved[cursor]
         actions.append({"type": "uri", "label": truncate(label, 20), "uri": upgrade_url})
 
     if not actions:

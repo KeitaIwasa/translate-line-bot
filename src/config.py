@@ -41,7 +41,6 @@ class Settings:
     message_encryption_key: str = ""
     openai_api_key: str = ""
     openai_support_model: str = "gpt-5.2"
-    openai_group_mention_model: str = "gpt-5.2"
     openai_guardrail_model: str = "gpt-4.1-mini"
     private_chat_history_limit: int = 5
     contact_to_email: str = "contact@iwasadigital.com"
@@ -114,7 +113,6 @@ def get_settings() -> Settings:
         message_encryption_key=env.get("MESSAGE_ENCRYPTION_KEY", ""),
         openai_api_key=env.get("OPENAI_API_KEY", ""),
         openai_support_model=env.get("OPENAI_SUPPORT_MODEL", "gpt-5.2"),
-        openai_group_mention_model=env.get("OPENAI_GROUP_MENTION_MODEL", "gpt-5.2"),
         openai_guardrail_model=env.get("OPENAI_GUARDRAIL_MODEL", "gpt-4.1-mini"),
         private_chat_history_limit=int(env.get("PRIVATE_CHAT_HISTORY_LIMIT", "5")),
         contact_to_email=env.get("CONTACT_TO_EMAIL", "contact@iwasadigital.com"),

@@ -1249,10 +1249,10 @@ class MessageHandler:
             upgrade_url=upgrade_url,
             include_upgrade=effective_plan != PRO_PLAN,
             include_cancel=paid,
-            translate=lambda text: self._translate_template(
-                text,
+            translate=lambda text: text,
+            translate_batch=lambda texts: self._translate_plan_menu_strings(
+                list(texts),
                 instruction_lang,
-                force=True,
                 command_trace=command_trace,
             ),
             truncate=self._truncate,
@@ -1271,6 +1271,38 @@ class MessageHandler:
 
         self._reply_messages(event, [message], command_trace=command_trace)
         return True
+
+    def _translate_plan_menu_strings(
+        self,
+        texts: Sequence[str],
+        instruction_lang: str,
+        *,
+        command_trace: _CommandTrace | None = None,
+    ) -> List[str]:
+        """プランメニューの固定文言を1回のGemini呼び出しで翻訳する。失敗時は原文。"""
+
+        originals = [str(text) for text in texts]
+        if not originals or not instruction_lang or instruction_lang.lower().startswith("en"):
+            return originals
+        method = getattr(self._interface_translation, "translate_many", None)
+        if method is None:
+            return originals
+        try:
+            translated = self._run_with_retry(
+                label="Gemini plan menu translation",
+                func=partial(method, originals, instruction_lang),
+                timeout_seconds=getattr(getattr(self._interface_translation, "_translator", None), "_timeout", None),
+                command_trace=command_trace,
+            )
+        except Exception:
+            logger.warning("Plan menu batch translation failed", exc_info=False)
+            return originals
+        if not isinstance(translated, (list, tuple)) or len(translated) != len(originals):
+            return originals
+        return [
+            item if isinstance(item, str) and item.strip() else original
+            for item, original in zip(translated, originals)
+        ]
 
     def _handle_subscription_cancel(
         self,

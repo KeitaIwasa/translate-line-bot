@@ -134,6 +134,7 @@ Globals:
         MESSAGE_ENCRYPTION_KEY: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:MESSAGE_ENCRYPTION_KEY}}"
         OPENAI_API_KEY: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:OPENAI_API_KEY}}"
         OPENAI_SUPPORT_MODEL: gpt-5.2
+        # グループメンション分類は Jev + Gemini に移行済みで未使用。スタック整理時に削除する。
         OPENAI_GROUP_MENTION_MODEL: gpt-5.2
         OPENAI_GUARDRAIL_MODEL: gpt-4.1-mini
         TYPESAFE_API_KEY: !Ref TypesafeApiKey
