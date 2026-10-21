@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 import requests
 
 from src.infra.gemini_translation import GeminiTranslationAdapter
@@ -72,20 +74,22 @@ def test_translate_ui_strings_uses_one_structured_call():
     assert session.calls[0]["json"]["generationConfig"]["responseMimeType"] == "application/json"
 
 
-def test_translate_ui_strings_falls_back_to_source_when_parsing_fails():
+def test_translate_ui_strings_raises_when_parsing_fails():
+    # 失敗は呼び出し元のリトライへ伝える
     session = _Session(_Response(text="not json"))
-    result = _client(session).translate_ui_strings(UI_TEXTS, "ja")
-
-    assert result == UI_TEXTS
+    with pytest.raises(Exception):
+        _client(session).translate_ui_strings(UI_TEXTS, "ja")
     assert len(session.calls) == 1
 
 
-def test_translate_ui_strings_falls_back_when_request_fails():
+def test_translate_ui_strings_raises_when_request_fails():
     session = _Session(exc=requests.Timeout())
-    assert _client(session).translate_ui_strings(UI_TEXTS, "ja") == UI_TEXTS
+    with pytest.raises(requests.Timeout):
+        _client(session).translate_ui_strings(UI_TEXTS, "ja")
 
     session = _Session(_Response(status_code=500, body={"error": "nope"}))
-    assert _client(session).translate_ui_strings(UI_TEXTS, "ja") == UI_TEXTS
+    with pytest.raises(Exception):
+        _client(session).translate_ui_strings(UI_TEXTS, "ja")
 
 
 def test_translate_ui_strings_keeps_original_for_missing_ids():

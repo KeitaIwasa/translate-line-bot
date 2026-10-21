@@ -164,7 +164,10 @@ class GeminiTranslationAdapter(TranslationPort):
         return results
 
     def translate_ui_strings(self, texts: Sequence[str], target_language: str) -> List[str]:
-        """複数のUI文言を1回のGemini呼び出しで翻訳する。失敗時は原文を返す。"""
+        """複数のUI文言を1回のGemini呼び出しで翻訳する。
+
+        失敗は例外のまま呼び出し元へ返す。呼び出し元がリトライし、使い切ったあとで原文に戻す。
+        """
 
         originals = [str(text) for text in texts]
         if not originals:
@@ -172,15 +175,7 @@ class GeminiTranslationAdapter(TranslationPort):
         normalized = (target_language or "").strip()
         if not normalized or normalized.lower().startswith("en"):
             return originals
-        try:
-            return self._translate_ui_strings_once(originals, normalized)
-        except Exception:
-            logger.warning(
-                "Gemini UI batch translation failed; using source strings | model=%s count=%s",
-                self._model,
-                len(originals),
-            )
-            return originals
+        return self._translate_ui_strings_once(originals, normalized)
 
     def _translate_ui_strings_once(self, originals: List[str], target_language: str) -> List[str]:
         items = [{"id": str(index), "text": text} for index, text in enumerate(originals)]
