@@ -1,8 +1,11 @@
 from src.app.handlers.message_handler import UNKNOWN_INSTRUCTION_BASE, MessageHandler
+from src.domain import models
 from src.domain.services.language_settings_service import LanguageSettingsService
+from src.domain.services.quota_service import QuotaDecision
+from src.domain.services.translation_flow_service import TranslationFlowResult
 from src.infra.gemini_mention_followup import HOWTO_SYSTEM_PROMPT, LANGUAGE_SYSTEM_PROMPT
 from src.infra.gemini_translation import SYSTEM_INSTRUCTION, UI_BATCH_SYSTEM
-from src.presentation.list_layout import normalize_inline_lists
+from src.presentation.list_layout import normalize_inline_lists, normalize_translated_user_text
 
 _SCREENSHOT = (
     "1. Add KOTORI as a friend on LINE. 2. Invite KOTORI to the LINE group you want to use. "
@@ -82,6 +85,100 @@ def test_inline_lists_split_across_languages():
     }
     for name, (source, expected) in cases.items():
         assert normalize_inline_lists(source) == expected, name
+
+
+def test_spaced_hyphens_are_not_inline_bullets():
+    assert normalize_inline_lists("Tokyo - Osaka - Kyoto") == "Tokyo - Osaka - Kyoto"
+    assert normalize_inline_lists("10 - 20") == "10 - 20"
+    assert normalize_inline_lists("The fare is 10 - 20 yen.") == "The fare is 10 - 20 yen."
+
+
+def test_bullets_split_only_when_the_line_starts_a_list():
+    assert normalize_inline_lists("- Tokyo - Osaka - Kyoto") == "- Tokyo\n- Osaka\n- Kyoto"
+    assert normalize_inline_lists("Cities: - Tokyo - Osaka - Kyoto") == (
+        "Cities:\n- Tokyo\n- Osaka\n- Kyoto"
+    )
+    assert normalize_inline_lists("Visit Tokyo - Osaka - Kyoto this week.") == (
+        "Visit Tokyo - Osaka - Kyoto this week."
+    )
+
+
+def test_user_translation_keeps_dashes_unless_source_has_line_breaks():
+    translated = "来週は Tokyo - Osaka - Kyoto を回る。所要は 10 - 20 時間です。"
+    assert normalize_translated_user_text("来週は東京 - 大阪 - 京都を回る。", translated) == translated
+    collapsed = "1. 友だち追加 2. グループに招待"
+    source = "1. Add a friend.\n2. Invite the bot."
+    assert normalize_translated_user_text("友だちを追加して招待する", collapsed) == collapsed
+    assert normalize_translated_user_text(source, collapsed) == "1. 友だち追加\n2. グループに招待"
+
+
+class _RecordingLine:
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    def reply_text(self, _reply_token: str, text: str) -> None:
+        self.texts.append(text)
+
+
+class _Dummy:
+    pass
+
+
+def _handler(line: _RecordingLine) -> MessageHandler:
+    return MessageHandler(
+        line_client=line,
+        translation_service=_Dummy(),
+        interface_translation=_Dummy(),
+        language_detector=_Dummy(),
+        language_pref_service=_Dummy(),
+        command_router=_Dummy(),
+        repo=_Dummy(),
+        max_context_messages=1,
+        max_group_languages=5,
+        translation_retry=1,
+        bot_mention_name="bot",
+    )
+
+
+def _group_event(text: str) -> models.MessageEvent:
+    return models.MessageEvent(
+        event_type="message",
+        reply_token="token",
+        group_id="G1",
+        user_id="U1",
+        sender_type="group",
+        text=text,
+        timestamp=1700000000000,
+    )
+
+
+def test_translated_user_sentence_with_dashes_is_sent_unchanged():
+    line = _RecordingLine()
+    handler = _handler(line)
+    sentence = "Let's ride Tokyo - Osaka - Kyoto. Budget is 10 - 20 thousand yen."
+    handler._reply_translation_result(
+        event=_group_event("東京 - 大阪 - 京都に乗ろう。予算は10 - 20だ。"),
+        flow=TranslationFlowResult(
+            decision=QuotaDecision(True, False, False, 1, 50, "2026-10", "free"),
+            reply_text=sentence,
+        ),
+        language_limit=5,
+        removed_languages=[],
+        limit=50,
+        plan_key="free",
+        period_end=None,
+    )
+    assert line.texts == [sentence]
+
+
+def test_bot_reply_still_splits_numbered_steps():
+    line = _RecordingLine()
+    handler = _handler(line)
+    handler._reply_text(
+        _group_event("how do I use this bot?"),
+        "1. Add a friend. 2. Invite the bot.",
+    )
+    assert line.texts == ["1. Add a friend.\n2. Invite the bot."]
 
 
 def test_non_list_text_urls_and_numbers_stay_unchanged():

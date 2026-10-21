@@ -45,13 +45,25 @@ _CLAUSE_ENDINGS = set("。！？!?：:.)）」』")
 def normalize_inline_lists(text: str) -> str:
     """同一行に並んだ番号・箇条書きを、項目ごとの行へ分ける。
 
-    すでに1項目1行の文字列、URL、小数、バージョン番号は変えない。
+    ボットが作った使い方・コマンド・テンプレート向け。すでに1項目1行の文字列、
+    URL、小数、バージョン番号は変えない。空白付きの `-` は、行頭または
+    コロン導入の直後にあるリストだけを分ける。
     """
 
     if not text:
         return text
     numbered = _split_numbered_lists(text)
     return _split_bullet_lists(numbered)
+
+
+def normalize_translated_user_text(source_text: str, translated_text: str) -> str:
+    """ユーザー翻訳は、原文自体に改行があるときだけ箇条書きを戻す。"""
+
+    if not translated_text:
+        return translated_text
+    if "\n" not in (source_text or "") and "\r" not in (source_text or ""):
+        return translated_text
+    return normalize_inline_lists(translated_text)
 
 
 def _split_numbered_lists(text: str) -> str:
@@ -91,11 +103,12 @@ def _split_bullet_lists(text: str) -> str:
 
     spans: list[tuple[int, int]] = []
     for run in _same_line_runs(text, matches):
+        first_at = run[0].start("mark")
+        starts_list = _is_line_start(text, first_at) or _ends_with_colon(_text_before(text, first_at))
+        if not starts_list:
+            continue
         if len(run) == 1:
-            marker_at = run[0].start("mark")
-            if _is_line_start(text, marker_at) or not _ends_with_colon(_text_before(text, marker_at)):
-                continue
-            span = _break_span(text, marker_at)
+            span = _break_span(text, first_at)
             if span:
                 spans.append(span)
             continue

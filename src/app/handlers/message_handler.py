@@ -510,11 +510,14 @@ class MessageHandler:
         text: Optional[str],
         *,
         command_trace: _CommandTrace | None = None,
+        normalize_lists: bool = True,
     ) -> bool:
         if not event.reply_token or not text:
             return False
-        # 使い方・コマンド一覧・言語確認など、翻訳で潰れた箇条書きを送信直前に戻す
-        reply_text = normalize_inline_lists(text)[:LINE_REPLY_TEXT_LIMIT]
+        # 使い方・コマンド・テンプレートだけ送る直前に箇条書きを戻す。
+        # ユーザー翻訳は build_translation_reply 側で、原文に改行があるときだけ整える。
+        reply_text = normalize_inline_lists(text) if normalize_lists else text
+        reply_text = reply_text[:LINE_REPLY_TEXT_LIMIT]
         started = time.perf_counter()
         try:
             self._line.reply_text(event.reply_token, reply_text)
@@ -1187,7 +1190,7 @@ class MessageHandler:
                 messages.append({"type": "text", "text": notice_url})
 
         if len(messages) == 1 and messages[0].get("type") == "text":
-            self._reply_text(event, messages[0].get("text"))
+            self._reply_text(event, messages[0].get("text"), normalize_lists=False)
             return
         self._reply_messages(event, messages)
 

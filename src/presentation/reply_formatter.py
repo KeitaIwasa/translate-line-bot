@@ -4,6 +4,7 @@ import re
 from typing import List, Sequence
 
 from ..domain.models import TranslationResult
+from .list_layout import normalize_translated_user_text
 
 MAX_REPLY_LENGTH = 5000
 
@@ -78,7 +79,10 @@ def format_translations(translations: List[TranslationResult]) -> str:
 
 def build_translation_reply(original_text: str, translations: List[TranslationResult]) -> str:
     cleaned = [
-        TranslationResult(lang=item.lang, text=strip_source_echo(original_text, item.text))
+        TranslationResult(
+            lang=item.lang,
+            text=normalize_translated_user_text(original_text, strip_source_echo(original_text, item.text)),
+        )
         for item in translations
     ]
     return format_translations(cleaned)
