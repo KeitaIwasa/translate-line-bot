@@ -218,6 +218,54 @@ def test_show_operation_keeps_languages_unchanged():
     assert gemini._session.calls == []
 
 
+@pytest.mark.parametrize("bad_score", [float("nan"), float("inf"), "NaN", None, 1.5])
+def test_invalid_explicit_reset_score_falls_back_to_gemini(bad_score):
+    """非有限・範囲外の explicit_reset では reset_all を通さず Gemini に戻す。"""
+
+    jev = JevSession(operation="reset_all", noul_overrides={"explicit_reset": bad_score})
+    follow_up, gemini = _follow_up(jev)
+
+    decision = follow_up.complete("language_settings", ROUTER_INPUT)
+
+    assert decision.ack_text == "フランス語を追加します"
+    assert decision.operation == "add"
+    assert decision.explicit_reset is False
+    assert len(gemini._session.calls) == 1
+
+
+@pytest.mark.parametrize("bad_score", [float("nan"), float("inf"), "NaN", None, 1.5])
+def test_invalid_add_score_falls_back_to_gemini(bad_score):
+    """add_* が非有限・範囲外なら、他言語が閾値以上でも部分採用せず Gemini に戻す。"""
+
+    jev = JevSession(yes_codes={"ja"}, noul_overrides={"add_en": bad_score})
+    follow_up, gemini = _follow_up(jev)
+
+    decision = follow_up.complete("language_settings", ROUTER_INPUT)
+
+    assert decision.ack_text == "フランス語を追加します"
+    assert [item.code for item in decision.languages_to_add] == ["fr"]
+    assert len(gemini._session.calls) == 1
+
+
+@pytest.mark.parametrize("bad_score", [float("nan"), float("inf"), "NaN", None, 1.5])
+def test_invalid_choice_confidence_falls_back_to_gemini(bad_score):
+    """操作の信頼度が非有限・範囲外なら、explicit_reset が閾値以上でも言語を消さない。"""
+
+    jev = JevSession(
+        operation="reset_all",
+        operation_confidence=bad_score,
+        noul_overrides={"explicit_reset": 0.99},
+    )
+    follow_up, gemini = _follow_up(jev)
+
+    decision = follow_up.complete("language_settings", ROUTER_INPUT)
+
+    assert decision.ack_text == "フランス語を追加します"
+    assert decision.operation == "add"
+    assert decision.explicit_reset is False
+    assert len(gemini._session.calls) == 1
+
+
 def test_explicit_reset_follows_confidence_threshold():
     jev = JevSession(operation="reset_all", noul_overrides={"explicit_reset": 0.8})
     follow_up, gemini = _follow_up(jev)

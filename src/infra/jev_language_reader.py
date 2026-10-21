@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 from typing import Callable, Optional
@@ -493,22 +494,30 @@ def _choice(answers: dict, key: str) -> tuple[str, float]:
     raw = answers.get(key)
     if not isinstance(raw, dict):
         raise _InvalidAnswers(key)
-    try:
-        choice = str(raw.get("choice") or "").strip().lower()
-        confidence = float(raw.get("confidence"))
-    except (TypeError, ValueError) as exc:
-        raise _InvalidAnswers(key) from exc
-    return choice, confidence
+    choice = str(raw.get("choice") or "").strip().lower()
+    return choice, _unit_score(raw.get("confidence"), key)
 
 
 def _noul(answers: dict, key: str) -> float:
     raw = answers.get(key)
     if not isinstance(raw, dict) or "noul" not in raw:
         raise _InvalidAnswers(key)
+    return _unit_score(raw["noul"], key)
+
+
+def _unit_score(value: object, key: str) -> float:
+    """有限な [0, 1] だけを信頼度・Noul として受け付ける。
+
+    float("NaN") や inf は例外にならず、その後の < と >= がすべて偽になる。
+    範囲外も同様に回答全体を無効にし、Gemini へ戻す。
+    """
     try:
-        return float(raw["noul"])
+        score = float(value)
     except (TypeError, ValueError) as exc:
         raise _InvalidAnswers(key) from exc
+    if not math.isfinite(score) or score < 0.0 or score > 1.0:
+        raise _InvalidAnswers(key)
+    return score
 
 
 def _code_scores(answers: dict, prefix: str, codes: list[str]) -> list[tuple[str, float]]:
