@@ -137,9 +137,9 @@ def test_resolve_follows_message_language_or_group_language():
     assert detector.resolve_instruction_language("how do I use this bot?", group_languages=GROUP) == "en"
     assert detector.resolve_instruction_language("開始時間は何?", group_languages=GROUP) == "ja"
     assert detector.resolve_instruction_language("言語設定", group_languages=GROUP) == "ja"
-    # かなを含む混合文は日本語。ラテン文字が多いと langdetect は en を返す
-    assert detector.resolve_instruction_language("Please confirm 明日の予定", group_languages=GROUP) == "ja"
-    assert detector.resolve_instruction_language("Add English と 日本語", group_languages=GROUP) == "ja"
+    # ラテン文字が過半数なら英語。かな・漢字が過半数なら日本語
+    assert detector.resolve_instruction_language("Please confirm 明日の予定", group_languages=GROUP) == "en"
+    assert detector.resolve_instruction_language("Add English と 日本語", group_languages=GROUP) == "en"
     assert detector.resolve_instruction_language("Hello こんにちは、元気？", group_languages=GROUP) == "ja"
     # 本文がハングルなら、グループに無くても韓国語
     assert detector.resolve_instruction_language("지금 뭐해?", group_languages=GROUP) == "ko"
@@ -158,8 +158,8 @@ def test_unknown_mentions_reply_in_the_message_language():
         ("開始時間は何?", "ja"),
         ("言語設定", "ja"),
         ("how do I use this bot?", "en"),
-        ("Please confirm 明日の予定", "ja"),
-        ("Add English と 日本語", "ja"),
+        ("Please confirm 明日の予定", "en"),
+        ("Add English と 日本語", "en"),
         ("👍😂🎉", "ja"),
         ("12345 678", "ja"),
         (f"\uFFFD\u0296\uFFFDAI 開始時間は何?", "ja"),
@@ -372,3 +372,65 @@ def test_language_change_is_not_treated_as_current_languages_question():
     assert not is_current_languages_question("how do I use this bot?")
     assert is_current_languages_question("今の翻訳言語は何?")
     assert is_current_languages_question("what are the current translation languages?")
+
+
+def test_dominant_script_decides_mixed_reply_language():
+    """英語の文に日本語が少しあるときは en。日本語が過半数なら ja。"""
+
+    detector = LanguageDetectionService()
+    assert detector.resolve_instruction_language(
+        "What does ありがとう mean in English?",
+        group_languages=GROUP,
+    ) == "en"
+    assert detector.resolve_instruction_language(
+        "How do I say 日本語?",
+        group_languages=GROUP,
+    ) == "en"
+    assert detector.resolve_instruction_language(
+        "Please show the current languages, including 日本語",
+        group_languages=GROUP,
+    ) == "en"
+    assert detector.resolve_instruction_language(
+        "明日の会議は10時です please",
+        group_languages=GROUP,
+    ) == "ja"
+    assert detector.resolve_instruction_language(
+        "Hello こんにちは、元気？",
+        group_languages=GROUP,
+    ) == "ja"
+    # URL とメンション、絵文字のラテン文字や記号は数えない
+    assert detector.resolve_instruction_language(
+        "@Christopher https://example.com/Current_translation_languages 今の翻訳言語は何?",
+        preferred="ko",
+        group_languages=GROUP,
+    ) == "ja"
+    assert detector.resolve_instruction_language(
+        "What does ありがとう mean in English? 👍😂🎉",
+        group_languages=GROUP,
+    ) == "en"
+
+
+def test_status_set_is_current_languages_question():
+    """状態の set は現在の言語の質問。命令の set は変更のまま。"""
+
+    assert is_current_languages_question("Which languages are currently set?")
+    assert is_current_languages_question("What languages are set now?")
+    assert is_current_languages_question("Which language is set?")
+    assert is_current_languages_question("What languages are set?")
+    assert not is_current_languages_question("set English and Thai")
+    assert not is_current_languages_question("please set English and Thai")
+    assert not is_current_languages_question("Please set the current languages to English and Thai")
+    assert not is_current_languages_question("Which languages are currently set? Please set English")
+
+
+def test_status_set_question_lists_group_languages():
+    repo = _Repo(GROUP)
+    translator = _Translator()
+    handler = _handler(repo, translator)
+    text = "Which languages are currently set?"
+
+    handler._handle_command(_event(text), text)
+
+    assert translator.calls == []
+    assert handler._line.last_text == "The current translation languages are Japanese, English."
+    assert repo.reset_called is False

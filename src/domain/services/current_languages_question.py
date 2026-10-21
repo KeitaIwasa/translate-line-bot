@@ -22,7 +22,13 @@ _EN_QUESTION = re.compile(
     re.IGNORECASE,
 )
 _EN_MUTATION = re.compile(
-    r"\b(?:add|remove|change|reset|switch|stop|pause|delete|set)\b",
+    r"\b(?:add|remove|change|reset|switch|stop|pause|delete)\b",
+    re.IGNORECASE,
+)
+# 「set English」は変更。「are set」「currently set」「set now」「is set」は状態の質問
+_EN_SET = re.compile(r"\bset\b", re.IGNORECASE)
+_EN_SET_STATUS = re.compile(
+    r"\b(?:are|is)\s+set\b|\bcurrently\s+set\b|\bset\s+now\b",
     re.IGNORECASE,
 )
 
@@ -56,9 +62,18 @@ def is_current_languages_question(text: str) -> bool:
         return False
     if _JA_QUESTION.search(stripped) and not _JA_MUTATION.search(stripped):
         return True
-    if _EN_QUESTION.search(stripped) and not _EN_MUTATION.search(stripped):
+    if _EN_QUESTION.search(stripped) and not _english_requests_change(stripped):
         return True
     return False
+
+
+def _english_requests_change(text: str) -> bool:
+    """言語の追加・変更を求めているとき True。状態の set は変更にしない。"""
+
+    if _EN_MUTATION.search(text):
+        return True
+    without_status = _EN_SET_STATUS.sub(" ", text)
+    return _EN_SET.search(without_status) is not None
 
 
 def current_languages_base_text(language_codes: Sequence[str]) -> str:

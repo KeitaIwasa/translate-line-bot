@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import unicodedata
 from typing import Mapping, Sequence
 
@@ -103,6 +104,42 @@ _SCRIPT_RANGES = (
     (0x1200, 0x137F, "ethiopic"),
     (0x1780, 0x17FF, "khmer"),
 )
+# URL とメンションは文字数にも言語判定にも使わない。日本語の本文まで巻き込まない
+_URL_RE = re.compile(
+    r"(?:https?://|www\.)[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+",
+    re.IGNORECASE,
+)
+_MENTION_RE = re.compile(r"[@＠][^\s@＠]+")
+# 同数のときはラテン文字より、かな・ハングル・漢字や他の文字体系を優先する
+_FAMILY_TIE_BREAK = (
+    "kana",
+    "hangul",
+    "han",
+    "arabic",
+    "cyrillic",
+    "devanagari",
+    "bengali",
+    "gurmukhi",
+    "gujarati",
+    "tamil",
+    "telugu",
+    "kannada",
+    "malayalam",
+    "sinhala",
+    "thai",
+    "lao",
+    "myanmar",
+    "khmer",
+    "hebrew",
+    "greek",
+    "georgian",
+    "armenian",
+    "ethiopic",
+    "latin",
+    "other",
+)
+_FAMILY_TIE_RANK = {name: index for index, name in enumerate(_FAMILY_TIE_BREAK)}
+
 # langdetect のプロファイル名。zh は簡体として zh-cn を使う
 _PROFILE_OF = {"zh": "zh-cn", "zh-cn": "zh-cn", "zh-tw": "zh-tw"}
 _RESTRICTED_FACTORIES: dict[frozenset[str], _DetectorFactory] = {}
@@ -125,7 +162,7 @@ class LanguageDetectionService:
     """メッセージ言語を判定する。
 
     detect() は langdetect の生の結果を返す。返信言語は resolve_instruction_language() を使い、
-    文字種とグループ言語に合わないコード（漢字の多い日本語を ko と誤検知するなど）は捨てる。
+    文字数の多い文字体系を選んでからグループ言語と制限した langdetect で決める。
     """
 
     def detect(self, text: str) -> str:
@@ -146,10 +183,11 @@ class LanguageDetectionService:
     ) -> str:
         """返信に使う言語コードを返す。判定できないときはグループ言語、それも無ければ空。"""
 
-        signals = _script_signals(text or "")
+        analyzed = _strip_urls_and_mentions(text or "")
+        signals = _script_signals(analyzed)
         group = _normalize_group(group_languages)
         preferred_code = _normalize_code(preferred)
-        # ルーターが付けた言語は、本文の文字種に合い、同じ文字体系のグループ言語と矛盾しないときだけ使う
+        # ルーターが付けた言語は、主要文字体系に合い、同じ文字体系のグループ言語と矛盾しないときだけ使う
         if (
             preferred_code
             and _language_fits(preferred_code, signals)
@@ -157,21 +195,19 @@ class LanguageDetectionService:
         ):
             return preferred_code
 
-        # かなは日本語、ハングルは韓国語。他の言語へ落とさない
-        if signals["kana"] > 0 and signals["kana"] >= signals["hangul"]:
+        family = _dominant_family(signals)
+        if family == "kana":
+            # かながハングル以上の文は日本語。漢字だけの文を ko と誤検知してもここには来ない
             return "ja"
-        if signals["hangul"] > 0:
+        if family == "hangul":
             return "ko"
-
-        script = _primary_script(signals)
-        if not script:
-            # 未分類の文字があるときは group[0] に落とさず、生の langdetect を使う
-            if signals["other"] > 0:
-                raw = _normalize_code(self.detect(text) if detected is None else detected)
-                if raw:
-                    return raw
+        if family == "other":
+            raw = _normalize_code(self.detect(analyzed) if detected is None else detected)
+            if raw:
+                return raw
+        if not family or family == "other":
             return group[0] if group else ""
-        return _resolve_script(script, text or "", signals, group, detected)
+        return _resolve_script(family, analyzed, signals, group, detected)
 
 
 def _normalize_group(languages: Sequence[str]) -> list[str]:
@@ -199,12 +235,34 @@ def _normalize_code(code: str) -> str:
     return lowered.split("-", 1)[0]
 
 
+def _strip_urls_and_mentions(text: str) -> str:
+    """URL と @メンションを除く。返信言語の文字数に入れない。"""
+
+    without_urls = _URL_RE.sub(" ", text)
+    return _MENTION_RE.sub(" ", without_urls)
+
+
+def _is_emoji(codepoint: int) -> bool:
+    """絵文字と結合子。文字数の分母に入れない。"""
+
+    if codepoint in {0x200D, 0xFE0E, 0xFE0F}:
+        return True
+    return (
+        0x2300 <= codepoint <= 0x23FF
+        or 0x2600 <= codepoint <= 0x27BF
+        or 0x2B00 <= codepoint <= 0x2BFF
+        or 0x1F000 <= codepoint <= 0x1FAFF
+    )
+
+
 def _script_signals(text: str) -> Mapping[str, int]:
     counts = dict(_EMPTY_SIGNALS)
     for char in text:
         if char == "\ufffd" or unicodedata.category(char).startswith("C"):
             continue
         codepoint = ord(char)
+        if _is_emoji(codepoint):
+            continue
         # 表示名が欠けると混ざる IPA（例: ʖ）。言語の根拠にしない
         if 0x0250 <= codepoint <= 0x02AF:
             continue
@@ -245,29 +303,20 @@ def _is_latin_letter(char: str, codepoint: int) -> bool:
 
 
 def _language_fits(code: str, signals: Mapping[str, int]) -> bool:
-    """そのコードが本文の文字種で説明できるときだけ True。漢字だけでは韓国語にしない。"""
+    """そのコードが主要文字体系で説明できるときだけ True。少数のかな・漢字では日本語にしない。"""
 
-    kana = signals["kana"]
-    hangul = signals["hangul"]
-    han = signals["han"]
+    family = _dominant_family(signals)
     if code == "ko":
-        return hangul > 0 and hangul >= kana
+        return family == "hangul"
+    if code == "ja":
+        # かながある文と、漢字だけの文。漢字だけは中国語にも合う
+        return family in {"kana", "han"}
     script = _script_of(code)
-    if script == "han" and code == "ja":
-        if hangul > kana:
-            return False
-        return kana > 0 or (han > 0 and hangul == 0)
     if script == "han":
-        return han > 0 and kana == 0 and hangul == 0
-    if script == "latin":
-        return signals["latin"] > 0 and kana == 0 and hangul == 0 and han == 0 and not _other_script(signals)
-    if script in _SCRIPT_LANGUAGES and script != "han":
-        return signals.get(script, 0) > 0
-    return False
-
-
-def _other_script(signals: Mapping[str, int]) -> bool:
-    return any(signals[name] > 0 for name in _SCRIPT_LANGUAGES if name != "han")
+        return family == "han"
+    if not script:
+        return False
+    return family == script
 
 
 def _script_of(code: str) -> str:
@@ -281,24 +330,37 @@ def _script_of(code: str) -> str:
     return ""
 
 
-def _primary_script(signals: Mapping[str, int]) -> str:
-    """かな・ハングル以外で、本文を代表する文字体系。漢字はラテン文字より先に見る。"""
+def _dominant_family(signals: Mapping[str, int]) -> str:
+    """文字数が最大の文字体系。かながある文の漢字は日本語の文字数に含める。"""
 
-    if signals["han"] > 0:
-        return "han"
-    best = ""
-    best_count = 0
+    kana = signals["kana"]
+    hangul = signals["hangul"]
+    han = signals["han"]
+    scores: list[tuple[int, int, str]] = []
+
+    def add(name: str, count: int) -> None:
+        if count <= 0:
+            return
+        # 同数なら定義順が先の文字体系を採る
+        rank = _FAMILY_TIE_RANK.get(name, len(_FAMILY_TIE_RANK))
+        scores.append((count, -rank, name))
+
+    if kana > 0 and kana >= hangul:
+        add("kana", kana + han)
+    elif hangul > 0:
+        add("hangul", hangul + han)
+    else:
+        add("han", han)
+    add("latin", signals["latin"])
     for name in _SCRIPT_LANGUAGES:
         if name == "han":
             continue
-        if signals[name] > best_count:
-            best = name
-            best_count = signals[name]
-    if best:
-        return best
-    if signals["latin"] > 0:
-        return "latin"
-    return ""
+        add(name, signals.get(name, 0))
+    add("other", signals["other"])
+    if not scores:
+        return ""
+    scores.sort()
+    return scores[-1][2]
 
 
 def _group_matches(group: Sequence[str], script: str) -> list[str]:
