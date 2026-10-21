@@ -5,12 +5,16 @@ from typing import Callable, Dict, Optional, Sequence
 
 from .subscription_postback import encode_subscription_payload
 from .subscription_texts import (
+    SUBS_CANCEL_CONFIRM_TEXT,
     SUBS_CANCEL_LABEL,
     SUBS_MENU_TEXT,
     SUBS_MENU_TITLE,
+    SUBS_NO_LABEL,
     SUBS_UPGRADE_LABEL,
     SUBS_VIEW_LABEL,
+    SUBS_YES_LABEL,
 )
+from .ui_strings import ui_text
 from ..domain.services.subscription_service import SubscriptionService
 
 TranslateFn = Callable[[str], str]
@@ -18,24 +22,21 @@ TruncateFn = Callable[[str, int], str]
 NormalizeFn = Callable[[str], str]
 
 
-def _resolve_menu_texts(
-    ordered: Sequence[str],
+def _translate_summary(
+    summary: str,
     translate: TranslateFn,
     translate_batch: Optional[Callable[[Sequence[str]], Sequence[str]]],
-) -> list[str]:
-    """一括翻訳を優先し、件数や中身が欠けた項目は原文（または個別翻訳）に戻す。"""
+) -> str:
+    """プラン状態だけを翻訳する。固定のタイトルやボタンはここを通さない。"""
 
     if translate_batch is not None:
         try:
-            batched = list(translate_batch(ordered))
+            batched = list(translate_batch([summary]))
         except Exception:
             batched = []
-        if len(batched) == len(ordered):
-            return [
-                item.strip() if isinstance(item, str) and item.strip() else original
-                for item, original in zip(batched, ordered)
-            ]
-    return [(translate(text) or text) for text in ordered]
+        if len(batched) == 1 and isinstance(batched[0], str) and batched[0].strip():
+            return batched[0].strip()
+    return (translate(summary) or summary).strip() or summary
 
 
 def build_subscription_menu_message(
@@ -59,34 +60,18 @@ def build_subscription_menu_message(
         period_end,
         plan_key=effective_plan,
     )
-    # プラン本文・タイトル・通知文・請求ボタン・アップグレードボタン（解約ボタンがあるときだけ追加）
-    ordered = [summary, SUBS_MENU_TITLE, SUBS_MENU_TEXT]
-    if portal_url:
-        ordered.append(SUBS_VIEW_LABEL)
-    if include_cancel:
-        ordered.append(SUBS_CANCEL_LABEL)
-    if include_upgrade and upgrade_url:
-        ordered.append(SUBS_UPGRADE_LABEL)
-    resolved = _resolve_menu_texts(ordered, translate, translate_batch)
-
-    cursor = 0
-    translated_summary = resolved[cursor]
-    cursor += 1
-    title = resolved[cursor]
-    cursor += 1
-    alt_text = resolved[cursor]
-    cursor += 1
+    translated_summary = _translate_summary(summary, translate, translate_batch)
+    title = ui_text(SUBS_MENU_TITLE, instruction_lang)
+    alt_text = ui_text(SUBS_MENU_TEXT, instruction_lang)
     body_text = truncate(normalize_text(translated_summary), 120)
 
     actions = []
     if portal_url:
-        label = resolved[cursor]
-        cursor += 1
+        label = ui_text(SUBS_VIEW_LABEL, instruction_lang)
         actions.append({"type": "uri", "label": truncate(label, 20), "uri": portal_url})
 
     if include_cancel:
-        label = resolved[cursor]
-        cursor += 1
+        label = ui_text(SUBS_CANCEL_LABEL, instruction_lang)
         payload = encode_subscription_payload({
             "kind": "cancel",
             "group_id": group_id,
@@ -95,7 +80,7 @@ def build_subscription_menu_message(
         actions.append({"type": "postback", "label": truncate(label, 20), "data": payload})
 
     if include_upgrade and upgrade_url:
-        label = resolved[cursor]
+        label = ui_text(SUBS_UPGRADE_LABEL, instruction_lang)
         actions.append({"type": "uri", "label": truncate(label, 20), "uri": upgrade_url})
 
     if not actions:
@@ -116,14 +101,14 @@ def build_subscription_menu_message(
 def build_subscription_cancel_confirm(
     *,
     group_id: str,
-    translate: TranslateFn,
+    language: str,
     truncate: TruncateFn,
     normalize_text: NormalizeFn,
-    base_confirm_text: str,
+    base_confirm_text: str = SUBS_CANCEL_CONFIRM_TEXT,
 ) -> Dict:
-    confirm_text = translate(base_confirm_text) or base_confirm_text
-    yes_label = translate("Yes") or "Yes"
-    no_label = translate("No") or "No"
+    confirm_text = ui_text(base_confirm_text, language)
+    yes_label = ui_text(SUBS_YES_LABEL, language)
+    no_label = ui_text(SUBS_NO_LABEL, language)
 
     payload_yes = encode_subscription_payload({"kind": "cancel_confirm", "group_id": group_id})
     payload_no = encode_subscription_payload({"kind": "cancel_reject", "group_id": group_id})

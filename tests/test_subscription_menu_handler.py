@@ -172,16 +172,12 @@ def test_free_plan_menu_batches_five_strings_once():
     assert len(interface.calls) == 1
     texts, lang = interface.calls[0]
     assert lang == "ja"
-    assert len(texts) == 5
-    assert texts[1:] == [
-        "Subscription",
-        "Manage your plan. Choose an action below.",
-        "Manage billing",
-        "Upgrade to Pro",
-    ]
+    assert len(texts) == 1
+    assert texts[0].startswith("Plan: Free")
     labels = [action["label"] for action in line.messages[0]["template"]["actions"]]
-    assert labels == ["ja:Manage billing", "ja:Upgrade to Pro"]
-    assert line.messages[0]["template"]["title"] == "ja:Subscription"
+    assert labels == ["お支払い管理", "Proにアップグレード"]
+    assert line.messages[0]["template"]["title"] == "プラン"
+    assert line.messages[0]["template"]["text"].startswith("ja:Plan: Free")
 
 
 def test_free_plan_menu_keeps_english_when_batch_translation_fails():
@@ -193,5 +189,6 @@ def test_free_plan_menu_keeps_english_when_batch_translation_fails():
 
     assert len(interface.calls) == 1
     labels = [action["label"] for action in line.messages[0]["template"]["actions"]]
-    assert labels == ["Manage billing", "Upgrade to Pro"]
-    assert line.messages[0]["template"]["title"] == "Subscription"
+    assert labels == ["お支払い管理", "Proにアップグレード"]
+    assert line.messages[0]["template"]["title"] == "プラン"
+    assert line.messages[0]["template"]["text"].startswith("Plan: Free")

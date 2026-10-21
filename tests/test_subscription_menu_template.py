@@ -1,12 +1,7 @@
 from datetime import datetime
 
-from src.app.subscription_texts import (
-    SUBS_MENU_TEXT,
-    SUBS_MENU_TITLE,
-    SUBS_UPGRADE_LABEL,
-    SUBS_VIEW_LABEL,
-)
-from src.app.subscription_templates import build_subscription_menu_message
+from src.app.subscription_templates import build_subscription_cancel_confirm, build_subscription_menu_message
+from src.app.ui_strings import ui_text
 
 
 class _Translator:
@@ -66,7 +61,7 @@ def test_subscription_menu_shows_cancel_for_paid():
     assert any("Cancel" in (label or "") for label in labels)
 
 
-def test_subscription_menu_translates_five_strings_in_one_batch():
+def test_subscription_menu_translates_only_the_dynamic_summary():
     seen = []
 
     def translate_batch(texts):
@@ -90,23 +85,23 @@ def test_subscription_menu_translates_five_strings_in_one_batch():
     )
 
     assert len(seen) == 1
-    assert seen[0][1:] == [SUBS_MENU_TITLE, SUBS_MENU_TEXT, SUBS_VIEW_LABEL, SUBS_UPGRADE_LABEL]
+    assert len(seen[0]) == 1
     assert seen[0][0].startswith("Plan: Free")
-    assert len(seen[0]) == 5
-    assert msg["template"]["title"] == f"JA:{SUBS_MENU_TITLE}"
-    assert msg["altText"] == f"JA:{SUBS_MENU_TEXT}"
+    assert msg["template"]["title"] == ui_text("Subscription", "ja")
+    assert msg["altText"] == ui_text("Manage your plan. Choose an action below.", "ja")
     labels = [action["label"] for action in msg["template"]["actions"]]
-    assert labels == [f"JA:{SUBS_VIEW_LABEL}", f"JA:{SUBS_UPGRADE_LABEL}"]
+    assert labels == [ui_text("Manage billing", "ja"), ui_text("Upgrade to Pro", "ja")]
     assert msg["template"]["text"].startswith("JA:Plan: Free")
+    assert "サブスク" not in msg["template"]["title"]
 
 
-def test_subscription_menu_batch_failure_falls_back_to_per_string_translate():
+def test_subscription_menu_keeps_fixed_labels_when_summary_translation_fails():
     def translate_batch(_texts):
-        return ["only-one"]
+        raise RuntimeError("batch failed")
 
     msg = build_subscription_menu_message(
         group_id="G",
-        instruction_lang="ja",
+        instruction_lang="ja-JP",
         status=None,
         effective_plan="free",
         period_end=None,
@@ -120,5 +115,23 @@ def test_subscription_menu_batch_failure_falls_back_to_per_string_translate():
         translate_batch=translate_batch,
     )
 
-    assert msg["template"]["title"] == f"FB:{SUBS_MENU_TITLE}"
-    assert msg["template"]["actions"][1]["label"] == f"FB:{SUBS_UPGRADE_LABEL}"
+    assert msg["template"]["title"] == "プラン"
+    assert msg["template"]["text"].startswith("FB:Plan: Free")
+    assert msg["template"]["actions"][1]["label"] == "Proにアップグレード"
+
+
+def test_subscription_cancel_confirm_uses_fixed_labels():
+    msg = build_subscription_cancel_confirm(
+        group_id="G",
+        language="th",
+        truncate=_truncate,
+        normalize_text=_normalize,
+    )
+
+    actions = msg["template"]["actions"]
+    assert actions[0]["label"] == "ใช่"
+    assert actions[1]["label"] == "ไม่"
+    assert msg["template"]["text"] == ui_text(
+        "Are you sure you want to cancel your subscription? It will remain active until the end of the current period.",
+        "th",
+    )

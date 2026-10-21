@@ -32,10 +32,11 @@ from ...presentation.reply_formatter import (
     strip_source_echo,
 )
 from ..subscription_texts import (
-    SUBS_CANCEL_CONFIRM_TEXT,
     SUBS_NOT_PRO_TEXT,
     SUBS_OWNER_ONLY_TEXT,
+    SUBS_STATUS_UNAVAILABLE_TEXT,
 )
+from ..ui_strings import resolve_ui_language, ui_text
 from ..subscription_templates import (
     build_subscription_cancel_confirm,
     build_subscription_menu_message,
@@ -1260,12 +1261,7 @@ class MessageHandler:
         )
 
         if not message:
-            fallback = self._translate_template(
-                "Subscription status is unavailable right now.",
-                instruction_lang,
-                force=True,
-                command_trace=command_trace,
-            )
+            fallback = self._subscription_ui(SUBS_STATUS_UNAVAILABLE_TEXT, instruction_lang, event.group_id)
             self._reply_text(event, fallback, command_trace=command_trace)
             return True
 
@@ -1279,7 +1275,7 @@ class MessageHandler:
         *,
         command_trace: _CommandTrace | None = None,
     ) -> List[str]:
-        """プランメニューの固定文言を1回のGemini呼び出しで翻訳する。失敗時は原文。"""
+        """プラン状態など動的な文言だけを1回のGemini呼び出しで翻訳する。失敗時は原文。"""
 
         originals = [str(text) for text in texts]
         if not originals or not instruction_lang or instruction_lang.lower().startswith("en"):
@@ -1312,12 +1308,7 @@ class MessageHandler:
         command_trace: _CommandTrace | None = None,
     ) -> bool:
         if not self._can_manage_subscription(event.group_id, event.user_id):
-            message = self._translate_interface_single(
-                SUBS_OWNER_ONLY_TEXT,
-                instruction_lang,
-                event.group_id,
-                command_trace=command_trace,
-            )
+            message = self._subscription_ui(SUBS_OWNER_ONLY_TEXT, instruction_lang, event.group_id)
             self._reply_text(event, message, command_trace=command_trace)
             return True
         customer_id, subscription_id, status = getattr(self._repo, "get_subscription_detail", lambda *_: (None, None, None))(
@@ -1325,30 +1316,28 @@ class MessageHandler:
         )
         active = self._is_active_subscription(status)
         if not subscription_id or not customer_id or not active:
-            message = self._translate_interface_single(
-                SUBS_NOT_PRO_TEXT,
-                instruction_lang,
-                event.group_id,
-                command_trace=command_trace,
-            )
+            message = self._subscription_ui(SUBS_NOT_PRO_TEXT, instruction_lang, event.group_id)
             self._reply_text(event, message, command_trace=command_trace)
             return True
 
         confirm = build_subscription_cancel_confirm(
             group_id=event.group_id,
-            translate=lambda text: self._translate_template(
-                text,
-                instruction_lang,
-                force=True,
-                command_trace=command_trace,
-            ),
+            language=self._subscription_language(instruction_lang, event.group_id),
             truncate=self._truncate,
             normalize_text=self._normalize_template_text,
-            base_confirm_text=SUBS_CANCEL_CONFIRM_TEXT,
         )
         if confirm:
             self._reply_messages(event, [confirm], command_trace=command_trace)
         return True
+
+    def _subscription_language(self, instruction_lang: str, group_id: str) -> str:
+        languages: Sequence[str] = []
+        if not (instruction_lang or "").strip():
+            languages = getattr(self._repo, "fetch_group_languages", lambda *_: [])(group_id) or []
+        return resolve_ui_language(instruction_lang, languages)
+
+    def _subscription_ui(self, english: str, instruction_lang: str, group_id: str) -> str:
+        return ui_text(english, self._subscription_language(instruction_lang, group_id))
 
     def _can_manage_subscription(self, group_id: str, user_id: str | None) -> bool:
         if not user_id:

@@ -10,12 +10,13 @@ from ...domain.services.subscription_service import SubscriptionService
 from ...domain.services.language_settings_service import LanguageSettingsService
 from ...presentation.reply_formatter import strip_source_echo
 from ..subscription_texts import (
-    SUBS_CANCEL_CONFIRM_TEXT,
+    SUBS_CANCEL_ABORTED_TEXT,
     SUBS_CANCEL_DONE_TEXT,
     SUBS_CANCEL_FAIL_TEXT,
     SUBS_NOT_PRO_TEXT,
     SUBS_OWNER_ONLY_TEXT,
 )
+from ..ui_strings import has_ui_text, resolve_ui_language, ui_text, ui_text_multilingual
 from ..subscription_postback import decode_postback_payload
 from ..subscription_templates import build_subscription_cancel_confirm
 
@@ -110,6 +111,8 @@ class PostbackHandler:
 
     def _build_multilingual_message(self, base_text: str, group_id: str) -> str:
         languages = self._repo.fetch_group_languages(group_id)
+        if has_ui_text(base_text):
+            return ui_text_multilingual(base_text, languages)
         targets = [lang for lang in languages if lang and not lang.lower().startswith("en")]
         if not self._interface_translation or not targets:
             return base_text
@@ -135,39 +138,6 @@ class PostbackHandler:
 
         return "\n\n".join(lines)[:5000]
 
-    def _translate_for_group(self, base_text: str, group_id: str) -> str:
-        languages = self._repo.fetch_group_languages(group_id)
-        primary = None
-        for lang in languages:
-            if lang and not lang.lower().startswith("en"):
-                primary = lang
-                break
-        if not primary or not self._interface_translation:
-            return base_text
-
-        try:
-            translations = self._interface_translation.translate(base_text, [primary])
-            if translations:
-                cleaned = strip_source_echo(base_text, translations[0].text)
-                return cleaned or translations[0].text or base_text
-        except Exception:  # pylint: disable=broad-except
-            logger.warning("translate_for_group failed", exc_info=True)
-        return base_text
-
-    def _translate_for_instruction_lang(self, base_text: str, instruction_lang: str, group_id: str) -> str:
-        """ボタンテンプレートの言語に合わせて単一言語で翻訳する。"""
-
-        if instruction_lang and self._interface_translation:
-            try:
-                translations = self._interface_translation.translate(base_text, [instruction_lang])
-                if translations:
-                    cleaned = strip_source_echo(base_text, translations[0].text)
-                    return cleaned or translations[0].text or base_text
-            except Exception:  # pylint: disable=broad-except
-                logger.warning("translate_for_instruction_lang failed", exc_info=True)
-
-        return self._translate_for_group(base_text, group_id)
-
     @staticmethod
     def _truncate(text: str, limit: int) -> str:
         if not text:
@@ -184,7 +154,7 @@ class PostbackHandler:
 
         instruction_lang = payload.get("instruction_lang", "")
         if not self._can_manage_subscription(group_id, event.user_id):
-            message = self._translate_for_instruction_lang(SUBS_OWNER_ONLY_TEXT, instruction_lang, group_id)
+            message = self._subscription_ui(SUBS_OWNER_ONLY_TEXT, instruction_lang, group_id)
             if event.reply_token:
                 self._line.reply_text(event.reply_token, message)
             return
@@ -193,31 +163,30 @@ class PostbackHandler:
 
         if kind == "cancel":
             if not subscription_id or not customer_id or not active:
-                message = self._translate_for_instruction_lang(SUBS_NOT_PRO_TEXT, instruction_lang, group_id)
+                message = self._subscription_ui(SUBS_NOT_PRO_TEXT, instruction_lang, group_id)
                 if event.reply_token:
                     self._line.reply_text(event.reply_token, message)
                 return
 
             confirm = build_subscription_cancel_confirm(
                 group_id=group_id,
-                translate=lambda text: self._translate_for_instruction_lang(text, instruction_lang, group_id),
+                language=self._subscription_language(instruction_lang, group_id),
                 truncate=self._truncate,
                 normalize_text=lambda x: x,
-                base_confirm_text=SUBS_CANCEL_CONFIRM_TEXT,
             )
             if event.reply_token and confirm:
                 self._line.reply_messages(event.reply_token, [confirm])
             return
 
         if kind == "cancel_reject":
-            message = self._build_multilingual_message("Subscription cancellation aborted.", group_id)
+            message = self._build_multilingual_message(SUBS_CANCEL_ABORTED_TEXT, group_id)
             if event.reply_token:
                 self._line.reply_text(event.reply_token, message)
             return
 
         if kind == "cancel_confirm":
             if not subscription_id or not customer_id or not active:
-                message = self._translate_for_instruction_lang(SUBS_NOT_PRO_TEXT, instruction_lang, group_id)
+                message = self._subscription_ui(SUBS_NOT_PRO_TEXT, instruction_lang, group_id)
                 if event.reply_token:
                     self._line.reply_text(event.reply_token, message)
                 return
@@ -229,6 +198,15 @@ class PostbackHandler:
             else:
                 if event.reply_token:
                     self._line.reply_text(event.reply_token, self._build_multilingual_message(SUBS_CANCEL_FAIL_TEXT, group_id))
+
+    def _subscription_language(self, instruction_lang: str, group_id: str) -> str:
+        languages: Sequence[str] = []
+        if not (instruction_lang or "").strip():
+            languages = self._repo.fetch_group_languages(group_id) or []
+        return resolve_ui_language(instruction_lang, languages)
+
+    def _subscription_ui(self, english: str, instruction_lang: str, group_id: str) -> str:
+        return ui_text(english, self._subscription_language(instruction_lang, group_id))
 
     def _can_manage_subscription(self, group_id: str, user_id: str | None) -> bool:
         if not user_id:
