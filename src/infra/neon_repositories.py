@@ -274,6 +274,7 @@ class NeonMessageRepository(MessageRepositoryPort):
             self._log_db_step("ensure_group_member", started, group_id)
 
     def _ensure_group_member(self, group_id: str, user_id: str) -> None:
+        # 2文目は active 列が無い環境だけの代替。失敗した文のあとへ進むため autocommit のままにする。
         with self._client.cursor() as cur:
             try:
                 cur.execute(
@@ -332,6 +333,7 @@ class NeonMessageRepository(MessageRepositoryPort):
     def is_group_member(self, group_id: str, user_id: str) -> bool:
         if not group_id or not user_id:
             return False
+        # 読み取りの代替クエリ。両方を書く処理ではないので autocommit のままにする。
         with self._client.cursor() as cur:
             try:
                 cur.execute(
@@ -365,6 +367,7 @@ class NeonMessageRepository(MessageRepositoryPort):
             self._log_db_step("upsert_display_name", started, group_id)
 
     def _upsert_group_member_display_name(self, group_id: str, user_id: str, normalized: str) -> None:
+        # 2文目は active 列が無い環境だけの代替。失敗した文のあとへ進むため autocommit のままにする。
         with self._client.cursor() as cur:
             try:
                 cur.execute(
