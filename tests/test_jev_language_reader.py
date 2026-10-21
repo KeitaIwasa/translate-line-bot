@@ -168,8 +168,8 @@ def test_add_and_remove_keeps_both_lists_in_stable_order():
     assert gemini._session.calls == []
 
 
-def test_reset_all_clears_language_lists():
-    jev = JevSession(operation="reset_all")
+def test_reset_all_clears_language_lists_only_when_explicit():
+    jev = JevSession(operation="reset_all", noul_overrides={"explicit_reset": 0.99})
     follow_up, gemini = _follow_up(jev)
 
     decision = follow_up.complete("language_settings", ROUTER_INPUT)
@@ -178,6 +178,58 @@ def test_reset_all_clears_language_lists():
     assert decision.languages_to_add == []
     assert decision.languages_to_remove == []
     assert gemini._session.calls == []
+
+
+def test_reset_without_explicit_request_returns_show():
+    jev = JevSession(operation="reset_all")
+    follow_up, gemini = _follow_up(jev)
+
+    decision = follow_up.complete("language_settings", ROUTER_INPUT)
+
+    assert decision.operation == "show"
+    assert decision.action == "language_settings"
+    assert decision.languages_to_add == []
+    assert decision.languages_to_remove == []
+    assert decision.ack_text == ""
+    assert gemini._session.calls == []
+
+
+def test_show_operation_keeps_languages_unchanged():
+    jev = JevSession(operation="show", language="ja")
+    follow_up, gemini = _follow_up(jev)
+
+    decision = follow_up.complete("language_settings", ROUTER_INPUT)
+
+    assert decision.operation == "show"
+    assert decision.instruction_language == "ja"
+    assert decision.languages_to_add == []
+    assert decision.languages_to_remove == []
+    assert decision.ack_text == ""
+    criteria = jev.calls[0]["json"]["questions"]["operation"]["criteria"]
+    assert "show" in criteria
+    assert "explicit" in criteria["reset_all"].lower()
+    assert "explicit_reset" in jev.calls[0]["json"]["questions"]
+    assert gemini._session.calls == []
+
+
+def test_explicit_reset_follows_confidence_threshold():
+    jev = JevSession(operation="reset_all", noul_overrides={"explicit_reset": 0.8})
+    follow_up, gemini = _follow_up(jev)
+    assert follow_up.complete("language_settings", ROUTER_INPUT).operation == "reset_all"
+    assert gemini._session.calls == []
+
+    jev = JevSession(operation="reset_all", noul_overrides={"explicit_reset": 0.79})
+    follow_up, gemini = _follow_up(jev)
+    assert follow_up.complete("language_settings", ROUTER_INPUT).operation == "show"
+    assert gemini._session.calls == []
+
+
+def test_show_with_a_named_language_falls_back_to_gemini():
+    jev = JevSession(operation="show", yes_codes={"en"})
+    follow_up, gemini = _follow_up(jev)
+
+    assert follow_up.complete("language_settings", ROUTER_INPUT).ack_text == "フランス語を追加します"
+    assert len(gemini._session.calls) == 1
 
 
 def test_reset_with_a_named_language_falls_back_to_gemini():
@@ -225,12 +277,20 @@ def test_threshold_language_is_kept():
     assert gemini._session.calls == []
 
 
-def test_unknown_instruction_language_uses_english_ack_without_gemini():
+def test_catalog_language_without_static_ack_leaves_translation_to_handler():
     jev = JevSession(language="fr", yes_codes={"fr"})
     follow_up, gemini = _follow_up(jev)
     decision = follow_up.complete("language_settings", ROUTER_INPUT)
     assert decision.instruction_language == "fr"
-    assert decision.ack_text == "Language settings have been updated."
+    assert decision.languages_to_add == [LanguageChoice(code="fr", name="French")]
+    assert decision.ack_text == ""
+    assert gemini._session.calls == []
+
+    jev = JevSession(language="es", yes_codes={"es"})
+    follow_up, gemini = _follow_up(jev)
+    decision = follow_up.complete("language_settings", ROUTER_INPUT)
+    assert decision.instruction_language == "es"
+    assert decision.ack_text == ""
     assert gemini._session.calls == []
 
     jev = JevSession(language="other", language_confidence=0.99, yes_codes={"en"})

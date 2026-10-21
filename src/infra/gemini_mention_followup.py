@@ -22,12 +22,13 @@ The user's intent is already classified as language_settings. Do not reclassify 
 Input is a JSON object. Use user_message and current_languages.
 
 Return:
-- operation: "reset_all" (clear languages and ask again), "add", "remove", or "add_and_remove"
-- languages_to_add / languages_to_remove: languages named in the message. Prefer ISO 639-1 codes.
+- operation: "show" (ask which translation languages are currently set, without changing them), "reset_all" (clear languages and ask again), "add", "remove", or "add_and_remove"
+- languages_to_add / languages_to_remove: languages named in the message. Prefer ISO 639-1 codes. Leave both empty for "show" and "reset_all".
 - instruction_language: BCP-47 or ISO 639-1 of the user message
-- ack_text: a short confirmation in the same language as the user message, without Markdown and without the bot mention
+- ack_text: a short confirmation in the same language as the user message, without Markdown and without the bot mention. For "show", leave ack_text empty.
 
-If the user asks to reset or does not name languages, use operation "reset_all" and empty language lists.
+If the user is only asking which translation languages are currently set, use operation "show".
+Use "reset_all" only when the user asks to clear, reset, or set languages again without naming them. Do not use "reset_all" for a question about the current languages.
 """.strip()
 
 # グループで使えなかったときの定型文。英語をベース原文にし、英語以外のときだけ翻訳させる
@@ -55,7 +56,7 @@ _LANGUAGE_SCHEMA = {
     "properties": {
         "operation": {
             "type": "string",
-            "enum": ["reset_all", "add", "remove", "add_and_remove"],
+            "enum": ["show", "reset_all", "add", "remove", "add_and_remove"],
         },
         "languages_to_add": {
             "type": "array",
@@ -94,7 +95,7 @@ _HOWTO_SCHEMA = {
     "required": ["instruction_language", "ack_text"],
 }
 
-_VALID_OPERATIONS = {"reset_all", "add", "remove", "add_and_remove"}
+_VALID_OPERATIONS = {"show", "reset_all", "add", "remove", "add_and_remove"}
 
 
 class GeminiMentionFollowUp:

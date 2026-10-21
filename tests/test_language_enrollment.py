@@ -440,6 +440,105 @@ def test_language_settings_add_rejects_when_exceeding_limit():
     assert "You can set up to 5 translation languages" in (line.last_text or "")
 
 
+def test_language_settings_ack_without_static_text_uses_translation_path():
+    class RecordingTranslation(DummyTranslationService):
+        def __init__(self):
+            self.texts = []
+
+        def translate(
+            self,
+            sender_name,
+            message_text,
+            timestamp,
+            context_messages,
+            candidate_languages,
+            allow_same_language=False,
+        ):
+            self.texts.append((message_text, list(candidate_languages)))
+            return [models.TranslationResult(lang=candidate_languages[0], text="Paramètres de langue mis à jour.")]
+
+    line = RecordingLineClient()
+    repo = RecordingRepo(initial=["ja"])
+    translation = RecordingTranslation()
+    handler = MessageHandler(
+        line_client=line,
+        translation_service=translation,
+        interface_translation=DummyInterfaceTranslation(),
+        language_detector=LanguageDetectionService(),
+        language_pref_service=DummyLangPrefService(models.LanguagePreference(supported=[])),
+        command_router=DummyCommandRouter(),
+        repo=repo,
+        max_context_messages=1,
+        max_group_languages=5,
+        translation_retry=1,
+        bot_mention_name="bot",
+    )
+    decision = models.CommandDecision(
+        action="language_settings",
+        operation="add",
+        languages_to_add=[models.LanguageChoice(code="fr", name="French")],
+        instruction_language="fr",
+        ack_text="",
+    )
+    event = models.MessageEvent(
+        event_type="message",
+        reply_token="token",
+        timestamp=0,
+        text="@bot ajoute le français",
+        user_id="U",
+        group_id="G",
+        sender_type="group",
+    )
+
+    assert handler._handle_language_settings(event, decision, event.text) is True
+    assert translation.texts
+    assert translation.texts[0][0] == "Language settings have been updated."
+    assert translation.texts[0][1] == ["fr"]
+    assert line.last_text == "Paramètres de langue mis à jour."
+    assert "fr" in repo.languages
+
+
+def test_language_settings_static_ack_is_not_translated_again():
+    class RecordingTranslation(DummyTranslationService):
+        def translate(self, *args, **kwargs):
+            raise AssertionError("static ack should be used as-is")
+
+    line = RecordingLineClient()
+    repo = RecordingRepo(initial=["en"])
+    handler = MessageHandler(
+        line_client=line,
+        translation_service=RecordingTranslation(),
+        interface_translation=DummyInterfaceTranslation(),
+        language_detector=LanguageDetectionService(),
+        language_pref_service=DummyLangPrefService(models.LanguagePreference(supported=[])),
+        command_router=DummyCommandRouter(),
+        repo=repo,
+        max_context_messages=1,
+        max_group_languages=5,
+        translation_retry=1,
+        bot_mention_name="bot",
+    )
+    decision = models.CommandDecision(
+        action="language_settings",
+        operation="add",
+        languages_to_add=[models.LanguageChoice(code="ja", name="Japanese")],
+        instruction_language="ja",
+        ack_text="言語設定を更新しました。",
+    )
+    event = models.MessageEvent(
+        event_type="message",
+        reply_token="token",
+        timestamp=0,
+        text="@bot 日本語を追加",
+        user_id="U",
+        group_id="G",
+        sender_type="group",
+    )
+
+    assert handler._handle_language_settings(event, decision, event.text) is True
+    assert line.last_text == "言語設定を更新しました。"
+
+
 def test_postback_rejects_over_limit():
     class _Line:
         def __init__(self):

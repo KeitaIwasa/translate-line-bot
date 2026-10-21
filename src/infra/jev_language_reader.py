@@ -61,10 +61,11 @@ LANGUAGE_NAMES = dict(LANGUAGE_CATALOG)
 _CATALOG_CODES = [code for code, _ in LANGUAGE_CATALOG]
 _CATALOG_NAME_LIST = ", ".join(name for _, name in LANGUAGE_CATALOG)
 _CODE_RE = re.compile(r"^[a-z]{2,3}(?:-[a-z0-9]{2,8})?$")
-_SETTINGS_OPERATIONS = ("reset_all", "add", "remove", "add_and_remove")
+_SETTINGS_OPERATIONS = ("show", "reset_all", "add", "remove", "add_and_remove")
 
 # 確認文の原文は英語。Jev は文を生成できないので、よく使う言語だけ静的に持つ。
-_ACK_BASE = "Language settings have been updated."
+# 静的訳が無いカタログ言語は空文字を返し、ハンドラーの翻訳経路に渡す。
+LANGUAGE_SETTINGS_ACK_BASE = "Language settings have been updated."
 _ACK_BY_PREFIX = (
     ("ja", "言語設定を更新しました。"),
     ("zh", "已更新语言设置。"),
@@ -78,14 +79,18 @@ class _InvalidAnswers(Exception):
 
 
 def confirmation_ack(instruction_language: str) -> str:
-    """言語設定の短い確認文。英語が原文で、翻訳が無い言語も英語のまま返す。"""
+    """言語設定の短い確認文。
+
+    英語と、静的訳がある言語だけ文を返す。それ以外は空文字にし、
+    ハンドラーが英語原文を指示言語へ翻訳する。
+    """
     code = (instruction_language or "").lower().replace("_", "-")
     if not code or code.startswith("en"):
-        return _ACK_BASE
+        return LANGUAGE_SETTINGS_ACK_BASE
     for prefix, text in _ACK_BY_PREFIX:
         if code.startswith(prefix):
             return text
-    return _ACK_BASE
+    return ""
 
 
 def read_language_settings(
@@ -186,6 +191,7 @@ def _read_language_settings(
         operation, operation_confidence = _choice(answers, "operation")
         instruction_choice, instruction_confidence = _choice(answers, "instruction_language")
         outside = _noul(answers, "outside_catalog")
+        explicit_reset = _noul(answers, "explicit_reset")
         add_codes = _selected_codes(answers, "add_", _CATALOG_CODES, min_confidence)
         remove_codes = _selected_codes(answers, "remove_", current, min_confidence)
     except _InvalidAnswers:
@@ -206,7 +212,14 @@ def _read_language_settings(
         # 言語名がはっきり付いているリセットは、操作の取り違えかもしれないので Gemini に任せる
         if add_codes or remove_codes:
             return None, "reset_conflict"
+        # 明示的なリセットでない「言語を聞いただけ」は設定を変えない
+        if explicit_reset < min_confidence:
+            return _settings_decision("show", [], [], instruction), "ok"
         return _settings_decision("reset_all", [], [], instruction), "ok"
+    if operation == "show":
+        if add_codes or remove_codes or explicit_reset >= min_confidence:
+            return None, "mixed_signals"
+        return _settings_decision("show", [], [], instruction), "ok"
     if operation == "add" and remove_codes:
         return None, "mixed_signals"
     if operation == "remove" and add_codes:
@@ -281,7 +294,7 @@ def _settings_decision(
         languages_to_add=[_choice_for(code) for code in add_codes],
         languages_to_remove=[_choice_for(code) for code in remove_codes],
         instruction_language=instruction,
-        ack_text=confirmation_ack(instruction),
+        ack_text="" if operation == "show" else confirmation_ack(instruction),
     )
 
 
@@ -299,10 +312,30 @@ def _settings_questions(current_languages: list[str]) -> dict:
                 "Which language-setting operation do they want?"
             ),
             "criteria": {
-                "reset_all": "Clear every language and ask again. They do not name languages to keep or add.",
+                "show": (
+                    "Ask which translation languages are currently set, without adding, "
+                    "removing, or resetting them."
+                ),
+                "reset_all": (
+                    "They explicitly ask to clear, reset, or set the languages again, "
+                    "and they do not name languages to keep or add."
+                ),
                 "add": "Add one or more languages and do not remove any.",
                 "remove": "Remove one or more languages and do not add any.",
                 "add_and_remove": "Replace the set, or both add some languages and remove others.",
+            },
+        },
+        "explicit_reset": {
+            "type": "noul",
+            "instructions": (
+                "Did the user explicitly ask to clear, reset, delete, or set the translation "
+                "languages again from scratch? "
+                "Answer no when they ask which languages are currently set, "
+                "and no when they only add or remove named languages."
+            ),
+            "criteria": {
+                "true": "They explicitly asked to reset or set the languages again",
+                "false": "They did not explicitly ask to reset",
             },
         },
         "instruction_language": _message_language_question(),

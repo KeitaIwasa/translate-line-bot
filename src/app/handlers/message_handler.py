@@ -26,6 +26,7 @@ from ...domain.services.translation_service import TranslationService
 from ...domain.services.interface_translation_service import InterfaceTranslationService
 from ...domain.services.language_detection_service import LanguageDetectionService
 from ...infra.gemini_translation import GeminiRateLimitError
+from ...infra.jev_language_reader import LANGUAGE_SETTINGS_ACK_BASE
 from ...presentation.reply_formatter import (
     MAX_REPLY_LENGTH,
     _wrap_bidi_isolate,
@@ -955,8 +956,9 @@ class MessageHandler:
         # 言語変更後は翻訳再開
         self._repo.set_translation_enabled(event.group_id, True)
 
-        ack = decision.ack_text or self._translate_template(
-            "言語設定を更新しました。",
+        # 静的訳が無い指示言語は ack が空。英語原文を既存の翻訳経路で訳す
+        ack = (decision.ack_text or "").strip() or self._safe_translate_for_instruction(
+            LANGUAGE_SETTINGS_ACK_BASE,
             decision.instruction_language,
             command_trace=command_trace,
         )
