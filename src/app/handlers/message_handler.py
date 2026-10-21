@@ -644,24 +644,15 @@ class MessageHandler:
         stripped = stripped.lstrip("-—–:：、，,。.!！?？ ")
         return stripped or ""
 
-    def _resolve_instruction_language(self, command_text: str, group_languages: Sequence[str]) -> str:
-        """メンションとボット名を除き、低信頼のときはグループ言語か文字体系で返信言語を決める。"""
-        resolver = getattr(self._lang_detector, "resolve_reply_language", None)
-        try:
-            if resolver:
-                return resolver(
-                    command_text,
-                    group_languages=group_languages,
-                    bot_mention_name=self._bot_mention_name,
-                ) or ""
-            return self._lang_detector.detect(command_text) or ""
-        except Exception:
-            logger.debug("Instruction language detect failed", exc_info=True)
-            return ""
-
     def _handle_command(self, event: models.MessageEvent, command_text: str) -> bool:
         trace = _CommandTrace(group_id=event.group_id or "")
         try:
+            instr_future: Future[str] | None = None
+            try:
+                instr_future = self._executor.submit(self._lang_detector.detect, command_text)
+            except Exception:
+                logger.debug("Executor submission failed; fallback to sync", exc_info=True)
+
             runtime_started = time.perf_counter()
             try:
                 runtime = self._fetch_command_runtime_state(event.group_id)
@@ -677,12 +668,18 @@ class MessageHandler:
                 trace.log_stage("router_decision", router_started)
 
             language_started = time.perf_counter()
-            instruction_lang = (decision.instruction_language or "").strip()
+            instruction_lang = decision.instruction_language
+            if not instruction_lang and instr_future:
+                try:
+                    instruction_lang = instr_future.result()
+                except Exception:
+                    logger.debug("Instruction language detect failed", exc_info=True)
+                    instruction_lang = decision.instruction_language
             if not instruction_lang and command_text:
-                instruction_lang = self._resolve_instruction_language(
-                    command_text,
-                    runtime.group_languages,
-                )
+                try:
+                    instruction_lang = self._lang_detector.detect(command_text)
+                except Exception:
+                    logger.debug("Instruction language detect failed (sync)", exc_info=True)
             trace.log_stage("instruction_language_resolution", language_started)
 
             trace.set_decision(decision, instruction_lang)
@@ -974,9 +971,7 @@ class MessageHandler:
         *,
         command_trace: _CommandTrace | None = None,
     ) -> bool:
-        detected = (instruction_lang or "").strip()
-        if not detected and original_text:
-            detected = self._resolve_instruction_language(original_text, [])
+        detected = instruction_lang or (self._lang_detector.detect(original_text) if original_text else "")
         fallback = self._build_unknown_response(detected, command_trace=command_trace)
         self._repo.set_translation_enabled(event.group_id, True)
         self._reply_text(event, fallback, command_trace=command_trace)

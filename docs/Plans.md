@@ -25,4 +25,3 @@
 [x] 言語リセットの DELETE/UPDATE と言語追加の複数 INSERT を明示トランザクションにまとめ、スキーマ代替の単文は autocommit のままにする（デプロイはしない）
 [x] deploy.sh が STAGE=stg/prod を `/kotori/stg|prod/typesafe-api-key` に対応させ、パラメーターが無ければ値を出さずに止める。Lambda はそのステージ配下の GetParameter と SSM 経由の kms:Decrypt を持つ（デプロイはしない）
 [x] 使い方の答えられないときの原文を英語にし、グループ向けガイドから個人チャット前提の前置きを外す
-[x] メンションの返信言語はボット名を除いて判定し、低信頼のときはグループ言語か文字体系を優先する（デプロイはしない）
