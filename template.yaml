@@ -67,7 +67,7 @@ Parameters:
     Type: String
     Default: ""
     AllowedPattern: "^$|^/kotori/.+"
-    Description: SSM SecureString name holding the TypeSafe API key (e.g. /kotori/stg/typesafe-api-key). Empty disables the SSM lookup
+    Description: SSM SecureString name under /kotori/<StageName>/ (e.g. /kotori/stg/typesafe-api-key). The execution role can GetParameter and kms:Decrypt only that prefix. Empty disables the SSM lookup
 
 Conditions:
   UseStripe: !Equals [!Ref EnableStripe, "true"]
@@ -163,10 +163,23 @@ Resources:
       Description: Handles LINE webhook events and triggers translation pipeline
       Policies:
         - AWSLambdaBasicExecutionRole
+        # stg スタックは /kotori/stg/*、prod スタックは /kotori/prod/* だけを読む。
+        # 既定のキー名は typesafe-api-key。テンプレートは CMK を作らない。
+        # SecureString は AWS 管理キーでも顧客管理キーでも、SSM 経由かつその配下の暗号コンテキストに限って復号する。
         - Statement:
-            - Effect: Allow
+            - Sid: ReadTypesafeApiKey
+              Effect: Allow
               Action: ssm:GetParameter
               Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/kotori/${StageName}/*"
+            - Sid: DecryptTypesafeApiKey
+              Effect: Allow
+              Action: kms:Decrypt
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  kms:ViaService: !Sub "ssm.${AWS::Region}.amazonaws.com"
+                StringLike:
+                  kms:EncryptionContext:PARAMETER_ARN: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/kotori/${StageName}/*"
       Events:
         Webhook:
           Type: HttpApi

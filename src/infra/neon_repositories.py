@@ -274,6 +274,7 @@ class NeonMessageRepository(MessageRepositoryPort):
             self._log_db_step("ensure_group_member", started, group_id)
 
     def _ensure_group_member(self, group_id: str, user_id: str) -> None:
+        # 2文目は active 列が無い環境だけの代替。失敗した文のあとへ進むため autocommit のままにする。
         with self._client.cursor() as cur:
             try:
                 cur.execute(
@@ -332,6 +333,7 @@ class NeonMessageRepository(MessageRepositoryPort):
     def is_group_member(self, group_id: str, user_id: str) -> bool:
         if not group_id or not user_id:
             return False
+        # 読み取りの代替クエリ。両方を書く処理ではないので autocommit のままにする。
         with self._client.cursor() as cur:
             try:
                 cur.execute(
@@ -365,6 +367,7 @@ class NeonMessageRepository(MessageRepositoryPort):
             self._log_db_step("upsert_display_name", started, group_id)
 
     def _upsert_group_member_display_name(self, group_id: str, user_id: str, normalized: str) -> None:
+        # 2文目は active 列が無い環境だけの代替。失敗した文のあとへ進むため autocommit のままにする。
         with self._client.cursor() as cur:
             try:
                 cur.execute(
@@ -685,7 +688,8 @@ class NeonMessageRepository(MessageRepositoryPort):
                 extra={"group_id": group_id, "requested": [code for code, _ in languages]},
             )
             return
-        with self._client.cursor() as cur:
+        # 複数行の INSERT を一つのトランザクションにまとめる
+        with self._client.connection() as conn, conn.cursor() as cur:
             cur.executemany(
                 """
                 INSERT INTO group_languages (group_id, lang_code, lang_name)
@@ -1746,7 +1750,8 @@ class NeonMessageRepository(MessageRepositoryPort):
         )
 
     def reset_group_language_settings(self, group_id: str) -> None:
-        with self._client.cursor() as cur:
+        # DELETE と UPDATE を一つのトランザクションにまとめる（autocommit だと片方だけ確定しうる）
+        with self._client.connection() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM group_languages WHERE group_id = %s", (group_id,))
             cur.execute(
                 "UPDATE group_members SET last_prompted_at = NULL, last_completed_at = NULL WHERE group_id = %s",
