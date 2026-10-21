@@ -94,6 +94,8 @@ class CommandDecision:
     languages_to_remove: List[LanguageChoice] = field(default_factory=list)
     instruction_language: str = ""
     ack_text: str = ""
+    # 言語設定で、利用者の言語に依存しない「明示的なリセット」フラグ。Jev の explicit_reset と同じ意味
+    explicit_reset: bool = False
 
 
 # === Group language settings ===

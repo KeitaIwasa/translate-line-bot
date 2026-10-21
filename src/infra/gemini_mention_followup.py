@@ -10,6 +10,7 @@ import requests
 from requests import HTTPError
 
 from ..domain.models import CommandDecision, LanguageChoice
+from ..domain.services.explicit_language_reset import allows_language_reset
 from .gemini_generation_config import build_generation_config
 
 logger = logging.getLogger(__name__)
@@ -22,13 +23,15 @@ The user's intent is already classified as language_settings. Do not reclassify 
 Input is a JSON object. Use user_message and current_languages.
 
 Return:
-- operation: "show" (ask which translation languages are currently set, without changing them), "reset_all" (clear languages and ask again), "add", "remove", or "add_and_remove"
+- operation: "show" (list the current translation languages, or ask which language to add, without changing them), "reset_all" (clear languages and ask again), "add", "remove", or "add_and_remove"
 - languages_to_add / languages_to_remove: languages named in the message. Prefer ISO 639-1 codes. Leave both empty for "show" and "reset_all".
 - instruction_language: BCP-47 or ISO 639-1 of the user message
 - ack_text: a short confirmation in the same language as the user message, without Markdown and without the bot mention. For "show", leave ack_text empty.
+- explicit_reset: true only when the user explicitly asks to clear, reset, delete, or set the translation languages again from scratch. This is language-neutral. False when they ask which languages are currently set. False when they only add or remove named languages. False for a message such as "言語を追加したい", which does not ask to reset: use operation "show" so the bot lists the current languages or asks which language to add.
 
-If the user is only asking which translation languages are currently set, use operation "show".
-Use "reset_all" only when the user asks to clear, reset, or set languages again without naming them. Do not use "reset_all" for a question about the current languages.
+If the user is only asking which translation languages are currently set, use operation "show" and explicit_reset false.
+Use operation "reset_all" only together with explicit_reset true.
+Do not use "reset_all" for a question about the current languages.
 """.strip()
 
 # グループで使えなかったときの定型文。英語をベース原文にし、英語以外のときだけ翻訳させる
@@ -82,8 +85,9 @@ _LANGUAGE_SCHEMA = {
         },
         "instruction_language": {"type": "string"},
         "ack_text": {"type": "string"},
+        "explicit_reset": {"type": "boolean"},
     },
-    "required": ["operation", "instruction_language", "ack_text"],
+    "required": ["operation", "instruction_language", "ack_text", "explicit_reset"],
 }
 
 _HOWTO_SCHEMA = {
@@ -130,9 +134,19 @@ class GeminiMentionFollowUp:
 
     def _language_settings(self, router_input: str) -> CommandDecision:
         data = self._generate(LANGUAGE_SYSTEM_PROMPT, _LANGUAGE_SCHEMA, router_input)
-        operation = str(data.get("operation") or "reset_all").strip()
+        operation = str(data.get("operation") or "").strip()
         if operation not in _VALID_OPERATIONS:
-            operation = "reset_all"
+            operation = "show"
+        user_message = _user_message(router_input)
+        # モデルの言語非依存フラグ。英語・日本語の明示表現は追加の肯定信号
+        explicit_reset = allows_language_reset(
+            explicit_reset=_as_bool(data.get("explicit_reset")),
+            text=user_message,
+        )
+        if operation == "reset_all" and not explicit_reset:
+            operation = "show"
+        if operation != "reset_all":
+            explicit_reset = False
         return CommandDecision(
             action="language_settings",
             operation=operation,
@@ -140,6 +154,7 @@ class GeminiMentionFollowUp:
             languages_to_remove=_parse_language_list(data.get("languages_to_remove")),
             instruction_language=str(data.get("instruction_language") or "").strip(),
             ack_text=str(data.get("ack_text") or "").strip(),
+            explicit_reset=explicit_reset,
         )
 
     def _howto(self, router_input: str) -> CommandDecision:
@@ -213,6 +228,26 @@ def _parse_language_list(items: Any) -> List[LanguageChoice]:
         if code:
             parsed.append(LanguageChoice(code=code, name=name or code))
     return parsed
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "yes", "1"}
+    return False
+
+
+def _user_message(router_input: str) -> str:
+    """ルーター入力の JSON から user_message を取り出す。JSON でなければ原文を返す。"""
+
+    try:
+        data = json.loads(router_input)
+    except Exception:
+        return router_input
+    if isinstance(data, dict) and isinstance(data.get("user_message"), str):
+        return data["user_message"]
+    return router_input
 
 
 def _load_text(path: str) -> str:
