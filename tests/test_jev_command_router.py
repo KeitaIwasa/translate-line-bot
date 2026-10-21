@@ -215,3 +215,32 @@ def test_key_provider_returns_empty_on_ssm_error():
 
 def test_key_provider_without_sources_is_empty():
     assert TypesafeApiKeyProvider()() == ""
+
+
+def test_key_provider_retries_after_ssm_error():
+    now = [0.0]
+    calls = []
+
+    class _Ssm:
+        def get_parameter(self, Name, WithDecryption):
+            calls.append(Name)
+            if len(calls) == 1:
+                raise RuntimeError("timeout")
+            return {"Parameter": {"Value": "ssm-key"}}
+
+    provider = TypesafeApiKeyProvider(
+        ssm_parameter_name="/kotori/stg/typesafe-api-key",
+        ssm_client_factory=_Ssm,
+        retry_after_seconds=30,
+        clock=lambda: now[0],
+    )
+    assert provider() == ""
+    # 再試行待ちの間はSSMを叩かない
+    now[0] = 10
+    assert provider() == ""
+    assert len(calls) == 1
+    # 待ち時間を過ぎたら再取得し、成功値はキャッシュする
+    now[0] = 31
+    assert provider() == "ssm-key"
+    assert provider() == "ssm-key"
+    assert len(calls) == 2

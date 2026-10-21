@@ -50,6 +50,11 @@ case "$STAGE" in
     ;;
 esac
 TYPESAFE_API_KEY_SSM_PARAMETER="${TYPESAFE_API_KEY_SSM_PARAMETER:-$TYPESAFE_API_KEY_SSM_PARAMETER_DEFAULT}"
+# Lambda の実行ロールが読めるのは /kotori/<STAGE>/ 配下だけなので、それ以外は受け付けない
+if [[ "$TYPESAFE_API_KEY_SSM_PARAMETER" != "/kotori/${STAGE}/"* ]]; then
+  echo "TYPESAFE_API_KEY_SSM_PARAMETER must be under /kotori/${STAGE}/ (got '$TYPESAFE_API_KEY_SSM_PARAMETER')." >&2
+  exit 1
+fi
 if ! aws ssm get-parameter \
   --name "$TYPESAFE_API_KEY_SSM_PARAMETER" \
   --region "$REGION" \

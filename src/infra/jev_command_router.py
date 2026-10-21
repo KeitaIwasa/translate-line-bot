@@ -190,7 +190,11 @@ def _extract_user_message(router_input: str) -> str:
 
 
 class TypesafeApiKeyProvider:
-    """TYPESAFE_API_KEY を優先し、無ければ SSM SecureString から一度だけ取得してキャッシュする。"""
+    """TYPESAFE_API_KEY を優先し、無ければ SSM SecureString から取得してキャッシュする。
+
+    取得に成功した値だけをキャッシュする。失敗時は retry_after_seconds の間だけ再取得を控え、
+    その後のメンションで再試行する（一時的なSSM障害でコンテナが使えなくなるのを防ぐ）。
+    """
 
     def __init__(
         self,
@@ -198,27 +202,35 @@ class TypesafeApiKeyProvider:
         api_key: str = "",
         ssm_parameter_name: str = "",
         ssm_client_factory: Optional[Callable[[], Any]] = None,
+        retry_after_seconds: float = 30.0,
+        clock: Optional[Callable[[], float]] = None,
     ) -> None:
         self._api_key = (api_key or "").strip()
         self._ssm_parameter_name = (ssm_parameter_name or "").strip()
         self._ssm_client_factory = ssm_client_factory
-        self._loaded = bool(self._api_key)
+        self._retry_after_seconds = retry_after_seconds
+        self._clock = clock or time.monotonic
+        self._next_retry_at: Optional[float] = None
 
     def __call__(self) -> str:
-        if self._loaded:
+        if self._api_key or not self._ssm_parameter_name:
             return self._api_key
-        # 失敗しても毎回SSMを叩かないよう、一度で確定させる
-        self._loaded = True
-        if not self._ssm_parameter_name:
+        now = self._clock()
+        if self._next_retry_at is not None and now < self._next_retry_at:
             return ""
         try:
             client = self._ssm_client_factory() if self._ssm_client_factory else _default_ssm_client()
             result = client.get_parameter(Name=self._ssm_parameter_name, WithDecryption=True)
-            self._api_key = str(result["Parameter"]["Value"] or "").strip()
+            value = str(result["Parameter"]["Value"] or "").strip()
         except Exception:
             logger.warning("Failed to load TypeSafe API key from SSM | parameter=%s", self._ssm_parameter_name)
-            self._api_key = ""
-        return self._api_key
+            value = ""
+        if value:
+            self._api_key = value
+            self._next_retry_at = None
+        else:
+            self._next_retry_at = now + self._retry_after_seconds
+        return value
 
 
 def _default_ssm_client() -> Any:

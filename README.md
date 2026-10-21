@@ -298,7 +298,7 @@ STACK_NAME=translate-line-bot-stg STAGE=stg PROFILE=line-translate-bot GEMINI_MO
 STACK_NAME=translate-line-bot-prod STAGE=prod PROFILE=line-translate-bot GEMINI_MODEL=gemini-2.5-flash ./scripts/deploy.sh
 ```
 
-Jev（TypeSafe）の API キーは SSM SecureString に置きます。`scripts/deploy.sh` は `STAGE` を次の既存名へ対応させ、`TypesafeApiKeySsmParameter` として SAM に渡します（`TYPESAFE_API_KEY_SSM_PARAMETER` で上書き可）。
+Jev（TypeSafe）の API キーは SSM SecureString に置きます。`scripts/deploy.sh` は `STAGE` を次の既存名へ対応させ、`TypesafeApiKeySsmParameter` として SAM に渡します。`TYPESAFE_API_KEY_SSM_PARAMETER` で上書きできますが、Lambda が読めるのは `/kotori/<STAGE>/` 配下だけなので、その中で指定します。
 
 | `STAGE` | SSM パラメーター名 |
 | --- | --- |
@@ -307,7 +307,7 @@ Jev（TypeSafe）の API キーは SSM SecureString に置きます。`scripts/d
 
 `stg` / `prod` 以外（例: `prd`）ではデプロイを始めません。パラメーターが無い場合も、値を表示せず（`aws ssm get-parameter` に `--with-decryption` を付けない）デプロイを止めます。
 
-Lambda `LineWebhookFunction` の実行ロールは、そのステージのパラメーターに対する `ssm:GetParameter` と、SSM 経由の `kms:Decrypt`（暗号コンテキストがそのパラメーターのときだけ）を持ちます。テンプレートは CMK を作成しません。AWS 管理キー `alias/aws/ssm` でも、同じアカウントの顧客管理キーでも復号できます。
+Lambda `LineWebhookFunction` の実行ロールは、デプロイしたステージの `/kotori/<StageName>/*` に対する `ssm:GetParameter` と、SSM 経由の `kms:Decrypt`（暗号コンテキストがその配下のときだけ）を持ちます。テンプレートは CMK を作成しません。AWS 管理キー `alias/aws/ssm` でも、同じアカウントの顧客管理キーでも復号できます。
 
 ### 3-1. SAM 直接実行の例（必要時のみ）
 
