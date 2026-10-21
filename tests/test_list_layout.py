@@ -93,6 +93,45 @@ def test_spaced_hyphens_are_not_inline_bullets():
     assert normalize_inline_lists("The fare is 10 - 20 yen.") == "The fare is 10 - 20 yen."
 
 
+def test_tight_bullets_split_without_space_after_the_marker():
+    assert normalize_inline_lists("コマンド: ・言語設定 ・使い方 ・翻訳停止") == (
+        "コマンド:\n・言語設定\n・使い方\n・翻訳停止"
+    )
+    assert normalize_inline_lists("コマンド:・言語設定 ・使い方 ・翻訳停止") == (
+        "コマンド:\n・言語設定\n・使い方\n・翻訳停止"
+    )
+    assert normalize_inline_lists("•項目A •項目B") == "•項目A\n•項目B"
+    assert normalize_inline_lists("使い方 ・言語設定 ・翻訳停止") == "使い方\n・言語設定\n・翻訳停止"
+    assert normalize_inline_lists("コマンド：\u3000・言語設定\u3000・使い方") == (
+        "コマンド：\n・言語設定\n・使い方"
+    )
+
+
+def test_katakana_middle_dots_inside_words_stay_inline():
+    assert normalize_inline_lists("パワー・ポイント") == "パワー・ポイント"
+    assert normalize_inline_lists("トム・ハンクス") == "トム・ハンクス"
+    assert normalize_inline_lists("パワー・ポイントとトム・ハンクス") == "パワー・ポイントとトム・ハンクス"
+    assert normalize_inline_lists("東京・大阪・京都") == "東京・大阪・京都"
+    assert normalize_inline_lists("コマンド: ・パワー・ポイント ・トム・ハンクス") == (
+        "コマンド:\n・パワー・ポイント\n・トム・ハンクス"
+    )
+    assert normalize_inline_lists("注意: ・重要です") == "注意: ・重要です"
+    assert normalize_inline_lists("•項目A•項目B") == "•項目A•項目B"
+    assert normalize_inline_lists("-項目A -項目B") == "-項目A -項目B"
+    assert normalize_inline_lists("*項目A *項目B") == "*項目A *項目B"
+
+
+def test_user_translation_does_not_reformat_tight_bullets_without_source_breaks():
+    translated = "コマンド: ・言語設定 ・使い方 ・翻訳停止"
+    assert normalize_translated_user_text("commands: language, help, stop", translated) == translated
+    names = "パワー・ポイントとトム・ハンクス"
+    assert normalize_translated_user_text("PowerPoint and Tom Hanks", names) == names
+    source = "Commands:\n・language\n・help\n・stop"
+    assert normalize_translated_user_text(source, translated) == (
+        "コマンド:\n・言語設定\n・使い方\n・翻訳停止"
+    )
+
+
 def test_bullets_split_only_when_the_line_starts_a_list():
     assert normalize_inline_lists("- Tokyo - Osaka - Kyoto") == "- Tokyo\n- Osaka\n- Kyoto"
     assert normalize_inline_lists("Cities: - Tokyo - Osaka - Kyoto") == (

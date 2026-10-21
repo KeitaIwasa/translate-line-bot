@@ -39,6 +39,14 @@ _BULLET_RE = re.compile(
     re.MULTILINE,
 )
 
+# 直後に空白がない中黒・黒丸。単語中の「パワー・ポイント」は、直前が空白・コロン・行頭のときだけ対象
+_TIGHT_BULLET_RE = re.compile(
+    rf"(?:^|[{_HSPACE}]+|(?<=[：:]))"
+    r"(?P<mark>[•・])"
+    rf"(?![{_HSPACE}\n\r0-9０-９٠-٩۰-۹])",
+    re.MULTILINE,
+)
+
 _CLAUSE_ENDINGS = set("。！？!?：:.)）」』")
 
 
@@ -47,13 +55,14 @@ def normalize_inline_lists(text: str) -> str:
 
     ボットが作った使い方・コマンド・テンプレート向け。すでに1項目1行の文字列、
     URL、小数、バージョン番号は変えない。空白付きの `-` は、行頭または
-    コロン導入の直後にあるリストだけを分ける。
+    コロン導入の直後にあるリストだけを分ける。`・` と `•` は直後に空白がなくても、
+    同じ行に2つ以上あり、それぞれが行頭か空白・コロンの直後なら改行する。
     """
 
     if not text:
         return text
     numbered = _split_numbered_lists(text)
-    return _split_bullet_lists(numbered)
+    return _split_tight_bullet_lists(_split_bullet_lists(numbered))
 
 
 def normalize_translated_user_text(source_text: str, translated_text: str) -> str:
@@ -111,6 +120,24 @@ def _split_bullet_lists(text: str) -> str:
             span = _break_span(text, first_at)
             if span:
                 spans.append(span)
+            continue
+        for match in run:
+            span = _break_span(text, match.start("mark"))
+            if span:
+                spans.append(span)
+    return _apply_spans(text, spans)
+
+
+def _split_tight_bullet_lists(text: str) -> str:
+    """空白なしの `・` / `•` を、同一行に2つ以上あるときだけ分ける。"""
+
+    matches = list(_TIGHT_BULLET_RE.finditer(text))
+    if len(matches) < 2:
+        return text
+
+    spans: list[tuple[int, int]] = []
+    for run in _same_line_runs(text, matches):
+        if len(run) < 2:
             continue
         for match in run:
             span = _break_span(text, match.start("mark"))
