@@ -113,3 +113,32 @@ def test_howto_prompt_fallback_base_is_english():
     assert HOWTO_FALLBACK_TEXT.isascii()
     assert HOWTO_FALLBACK_TEXT in HOWTO_SYSTEM_PROMPT
     assert "申し訳" not in HOWTO_SYSTEM_PROMPT
+    assert "own line" in HOWTO_SYSTEM_PROMPT
+
+
+def test_howto_follow_up_splits_inline_numbered_steps():
+    payload = {
+        "instruction_language": "en",
+        "ack_text": (
+            "1. Add KOTORI as a friend on LINE. "
+            "2. Invite KOTORI to the LINE group you want to use. "
+            "3. Enter the languages."
+        ),
+    }
+    session = _Session(_Response(text=json.dumps(payload)))
+    decision = _follow_up(session).complete("howto", '{"user_message":"how do I use this bot?"}')
+
+    assert decision.ack_text == (
+        "1. Add KOTORI as a friend on LINE.\n"
+        "2. Invite KOTORI to the LINE group you want to use.\n"
+        "3. Enter the languages."
+    )
+
+
+def test_howto_follow_up_keeps_already_formatted_answer():
+    formatted = "1. Add KOTORI as a friend on LINE.\n2. Invite KOTORI to the group."
+    payload = {"instruction_language": "ja", "ack_text": formatted}
+    session = _Session(_Response(text=json.dumps(payload)))
+    decision = _follow_up(session).complete("howto", '{"user_message":"使い方を教えて"}')
+
+    assert decision.ack_text == formatted

@@ -22,6 +22,8 @@ You translate short UI strings for a LINE bot subscription menu.
 The user message is JSON with target_language and items[{id, text}].
 Return JSON {"items":[{"id","text"}]} using the same ids, one translation each, in target_language.
 Keep the meaning. Preserve numbers, dates, the plan names Free, Standard and Pro, and URLs.
+Preserve line breaks inside each text. Keep one numbered or bulleted item per line.
+Do not join list items into a single paragraph.
 Do not add explanations or extra items.
 """.strip()
 
@@ -58,6 +60,7 @@ Requirements:
 * Preserve mention strings (e.g., "@John") in their original form.
 * Produce natural interpretations that match each user's tone and the conversational context.
 * Do not copy, quote, or directly reproduce the source_message.text in the translation output; return only the translated text for each target language.
+* Preserve every line break in source_message.text. When the source is a numbered or bulleted list, keep one item per line in every translation. Do not merge list items into a single paragraph, and do not drop blank lines between paragraphs.
 * Output only a JSON object that conforms to the specified JSON Schema.
 * Do NOT include context_messages or target_languages in the output JSON.
 """.strip()

@@ -10,6 +10,7 @@ import requests
 from requests import HTTPError
 
 from ..domain.models import CommandDecision, LanguageChoice
+from ..presentation.list_layout import normalize_inline_lists
 from .gemini_generation_config import build_generation_config
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ Return:
 - languages_to_add / languages_to_remove: languages named in the message. Prefer ISO 639-1 codes.
 - instruction_language: BCP-47 or ISO 639-1 of the user message
 - ack_text: a short confirmation in the same language as the user message, without Markdown and without the bot mention
+- If ack_text lists more than one item, put each item on its own line. Keep those line breaks.
 
 If the user asks to reset or does not name languages, use operation "reset_all" and empty language lists.
 """.strip()
@@ -40,6 +42,10 @@ The answer is posted as a reply in the LINE group where the user mentioned KOTOR
 
 Write ack_text in the same language as the user message.
 Use plain text only. Do not use Markdown.
+Format ack_text for a narrow chat bubble.
+Put each numbered step and each bullet on its own line, using a newline before every item.
+Do not join steps into one paragraph such as "1. ... 2. ...".
+Keep blank lines between paragraphs.
 Answer from the support guide. Keep it short.
 If the guide does not support a reliable answer, set ack_text to this English sentence. Use it exactly as is when the user writes in English; otherwise translate it into the user's language and keep the URL unchanged:
 {HOWTO_FALLBACK_TEXT}
@@ -137,7 +143,7 @@ class GeminiMentionFollowUp:
             languages_to_add=_parse_language_list(data.get("languages_to_add")),
             languages_to_remove=_parse_language_list(data.get("languages_to_remove")),
             instruction_language=str(data.get("instruction_language") or "").strip(),
-            ack_text=str(data.get("ack_text") or "").strip(),
+            ack_text=_readable_ack(data.get("ack_text")),
         )
 
     def _howto(self, router_input: str) -> CommandDecision:
@@ -148,7 +154,7 @@ class GeminiMentionFollowUp:
         return CommandDecision(
             action="howto",
             instruction_language=str(data.get("instruction_language") or "").strip(),
-            ack_text=str(data.get("ack_text") or "").strip(),
+            ack_text=_readable_ack(data.get("ack_text")),
         )
 
     def _generate(self, system_prompt: str, schema: dict, router_input: str) -> dict:
@@ -181,6 +187,12 @@ class GeminiMentionFollowUp:
         if not isinstance(data, dict):
             raise ValueError("gemini follow-up JSON was not an object")
         return data
+
+
+def _readable_ack(value: object) -> str:
+    """生成文のインライン箇条書きを、送信前に1項目1行へ戻す。"""
+
+    return normalize_inline_lists(str(value or "").strip())
 
 
 def _error_decision() -> CommandDecision:
