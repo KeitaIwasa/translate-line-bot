@@ -26,6 +26,7 @@ from ...domain.services.translation_service import TranslationService
 from ...domain.services.interface_translation_service import InterfaceTranslationService
 from ...domain.services.language_detection_service import LanguageDetectionService
 from ...infra.gemini_translation import GeminiRateLimitError
+from ...presentation.list_layout import normalize_inline_lists
 from ...presentation.reply_formatter import (
     MAX_REPLY_LENGTH,
     _wrap_bidi_isolate,
@@ -509,10 +510,14 @@ class MessageHandler:
         text: Optional[str],
         *,
         command_trace: _CommandTrace | None = None,
+        normalize_lists: bool = True,
     ) -> bool:
         if not event.reply_token or not text:
             return False
-        reply_text = text[:LINE_REPLY_TEXT_LIMIT]
+        # 使い方・コマンド・テンプレートだけ送る直前に箇条書きを戻す。
+        # ユーザー翻訳は build_translation_reply 側で、原文に改行があるときだけ整える。
+        reply_text = normalize_inline_lists(text) if normalize_lists else text
+        reply_text = reply_text[:LINE_REPLY_TEXT_LIMIT]
         started = time.perf_counter()
         try:
             self._line.reply_text(event.reply_token, reply_text)
@@ -1185,7 +1190,7 @@ class MessageHandler:
                 messages.append({"type": "text", "text": notice_url})
 
         if len(messages) == 1 and messages[0].get("type") == "text":
-            self._reply_text(event, messages[0].get("text"))
+            self._reply_text(event, messages[0].get("text"), normalize_lists=False)
             return
         self._reply_messages(event, messages)
 
@@ -1625,7 +1630,7 @@ class MessageHandler:
 
         lines: List[str] = []
         if any(lang.startswith("en") for lang in targets_lower):
-            lines.append(_wrap_bidi_isolate(USAGE_MESSAGE, "en"))
+            lines.append(_wrap_bidi_isolate(normalize_inline_lists(USAGE_MESSAGE), "en"))
 
         seen_langs = set()
         for item in translations:
@@ -1634,7 +1639,7 @@ class MessageHandler:
                 continue
             seen_langs.add(lang_code)
             cleaned = strip_source_echo(USAGE_MESSAGE, item.text)
-            lines.append(_wrap_bidi_isolate(cleaned, lang_code))
+            lines.append(_wrap_bidi_isolate(normalize_inline_lists(cleaned), lang_code))
 
         return "\n\n".join(lines)[:MAX_REPLY_LENGTH]
 
@@ -1730,8 +1735,8 @@ class MessageHandler:
         return base_text
 
     def _normalize_bullet_newlines(self, text: str) -> str:
-        """箇条書きのハイフンの前に改行を強制して読みやすくする。"""
-        return re.sub(r"(?<!\n)(- )", "\n- ", text)
+        """番号・箇条書きが1行に潰れていたら、1項目1行に戻す。"""
+        return normalize_inline_lists(text)
 
     def _build_language_limit_message(
         self,
@@ -1953,7 +1958,7 @@ class MessageHandler:
                 text = base_text_en  # ベース英語文をそのまま使う
             else:
                 text = text_by_lang.get(lowered, base_text_en)
-            text = (text or base_text_en).strip()
+            text = normalize_inline_lists((text or base_text_en).strip())
             lines.append(_wrap_bidi_isolate(text, lowered))
 
         return "\n\n".join(lines)[:MAX_REPLY_LENGTH]
@@ -2015,7 +2020,7 @@ class MessageHandler:
             return ""
         normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
         normalized = re.sub(r"\n{3,}", "\n\n", normalized)
-        return normalized
+        return normalize_inline_lists(normalized)
 
     @staticmethod
     def _truncate(text: str, limit: int) -> str:
