@@ -98,12 +98,15 @@ def test_free_limit_notice_includes_reset_date():
         "group1",
         plan_key="free",
         limit=50,
+        period_key="2026-01-01",
         period_end=datetime(2026, 2, 28, 0, 0, tzinfo=timezone.utc),
     )
 
     assert url == "https://short.example.com/cs"
     assert "https://short.example.com/cs" not in notice
-    assert "2026-02-28" in notice
+    # 旧契約の 2/28 ではなく、暦月キーの翌月1日
+    assert "2026-02-01" in notice
+    assert "2026-02-28" not in notice
     assert "used all 50 free messages" in notice
     assert "Standard 4,000/month" in notice
     assert "Pro 40,000/month" in notice

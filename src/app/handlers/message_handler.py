@@ -909,11 +909,14 @@ class MessageHandler:
         return json.dumps(payload, ensure_ascii=False)
 
     def _resolve_next_reset_at_utc(self, runtime: models.TranslationRuntimeState) -> str:
-        if runtime.period_end:
+        plan_key = self._resolve_effective_plan_key(runtime.subscription_status, runtime.entitlement_plan)
+        # 解約後も旧 current_period_end が残る。Free は暦月の period_key から出す。
+        if runtime.period_end and normalize_plan_key(plan_key) != FREE_PLAN:
             return runtime.period_end.astimezone(timezone.utc).isoformat()
         reset_date = self._resolve_quota_reset_date(
             period_key=runtime.period_key,
             period_end=runtime.period_end,
+            plan_key=plan_key,
         )
         if not reset_date:
             return ""
@@ -1160,8 +1163,9 @@ class MessageHandler:
 
         if op == "reset_all" and not replacing:
             self._repo.reset_group_language_settings(event.group_id)
-            # 言語設定モード中は翻訳停止
-            self._repo.set_translation_enabled(event.group_id, False)
+            # 上限停止の理由を消すと翌月の自動再開が外れる。手動停止のときだけ理由を空にする。
+            if not self._translation_stays_paused_for_quota(event.group_id or ""):
+                self._repo.set_translation_enabled(event.group_id, False)
             # リセット時は必ずガイダンス文言を返す（LLM 生成のあいまいな承諾メッセージを避ける）
             ack = self._translate_template(
                 "Your language settings have been reset. Please tell us all the languages ​​you would like to translate.",
@@ -1189,8 +1193,9 @@ class MessageHandler:
             if remove_codes:
                 self._repo.remove_group_languages(event.group_id, remove_codes)
 
-        # 言語変更後は翻訳再開。置き換えも翻訳を止めない
-        self._repo.set_translation_enabled(event.group_id, True)
+        # 言語の追加・削除・置換は通す。上限停止中は翻訳をオンに戻さず、理由も残す。
+        if not self._translation_stays_paused_for_quota(event.group_id or ""):
+            self._repo.set_translation_enabled(event.group_id, True)
 
         # 結果の言語を固定文で言う。「言語設定を更新しました」だけでは何になったか分からない
         ack = completion_prompt(self._resulting_language_pairs(event.group_id), family=family)
@@ -1346,7 +1351,9 @@ class MessageHandler:
             group_languages=self._group_languages_for_reply(event.group_id),
         )
         fallback = self._build_unknown_response(detected, command_trace=command_trace)
-        self._repo.set_translation_enabled(event.group_id, True)
+        # unknown は通常、翻訳をオンに戻す。上限停止中は戻さない。
+        if not self._translation_stays_paused_for_quota(event.group_id or ""):
+            self._repo.set_translation_enabled(event.group_id, True)
         self._reply_text(event, fallback, command_trace=command_trace)
         return True
 
@@ -1855,7 +1862,11 @@ class MessageHandler:
         elif paid is False:
             normalized = FREE_PLAN
 
-        reset_date = self._resolve_quota_reset_date(period_key=period_key, period_end=period_end)
+        reset_date = self._resolve_quota_reset_date(
+            period_key=period_key,
+            period_end=period_end,
+            plan_key=normalized,
+        )
         if normalized == FREE_PLAN:
             base = build_free_limit_notice(
                 limit=limit,
@@ -1928,7 +1939,11 @@ class MessageHandler:
         period_key: Optional[str],
         period_end: Optional[datetime],
     ) -> tuple[str, Optional[str]]:
-        reset_date = self._resolve_quota_reset_date(period_key=period_key, period_end=period_end)
+        reset_date = self._resolve_quota_reset_date(
+            period_key=period_key,
+            period_end=period_end,
+            plan_key=FREE_PLAN,
+        )
         base = build_approaching_notice(
             usage=usage,
             limit=limit,
@@ -1957,7 +1972,11 @@ class MessageHandler:
         period_key: Optional[str],
         period_end: Optional[datetime],
     ) -> str:
-        reset_date = self._resolve_quota_reset_date(period_key=period_key, period_end=period_end)
+        reset_date = self._resolve_quota_reset_date(
+            period_key=period_key,
+            period_end=period_end,
+            plan_key=FREE_PLAN,
+        )
         base = build_quota_reset_notice(limit=limit, reset_date=reset_date)
         text, _url = self._build_multilingual_notice(base, group_id, None, add_missing_link_notice=False)
         return text
@@ -2002,6 +2021,13 @@ class MessageHandler:
                 usage = 0
         return plan_key, period_key, limit, usage
 
+    def _translation_stays_paused_for_quota(self, group_id: str) -> bool:
+        """言語変更や unknown のあとでも、無料枠の停止理由を残すべきか。"""
+
+        if not group_id:
+            return False
+        return self._is_over_free_quota_pause(self._fetch_command_runtime_state(group_id), group_id)
+
     def _is_over_free_quota_pause(self, runtime: models.TranslationRuntimeState, group_id: str) -> bool:
         if runtime.translation_paused_reason != "quota" or runtime.translation_enabled:
             return False
@@ -2035,7 +2061,11 @@ class MessageHandler:
             return
         if repeat != "short":
             return
-        reset_date = self._resolve_quota_reset_date(period_key=period_key, period_end=runtime.period_end)
+        reset_date = self._resolve_quota_reset_date(
+            period_key=period_key,
+            period_end=runtime.period_end,
+            plan_key=plan_key,
+        )
         base = build_resume_blocked_short(limit=limit, reset_date=reset_date)
         text, _url = self._build_multilingual_notice(base, group_id, None, add_missing_link_notice=False)
         self._reply_text(event, text)
@@ -2045,7 +2075,12 @@ class MessageHandler:
         *,
         period_key: Optional[str],
         period_end: Optional[datetime],
+        plan_key: Optional[str] = None,
     ) -> Optional[str]:
+        # 解約済み・未払いでも購読行に旧 current_period_end が残る。
+        # Free は暦月なので、その終了日ではなく period_key の翌月1日（UTC）を使う。
+        if plan_key is not None and normalize_plan_key(plan_key) == FREE_PLAN:
+            period_end = None
         if period_end:
             return period_end.astimezone(timezone.utc).date().isoformat()
 

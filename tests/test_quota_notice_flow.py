@@ -112,6 +112,142 @@ def test_reset_date_uses_period_end_and_clamps_short_months():
     assert handler._resolve_quota_reset_date(period_key="2026-12-01", period_end=None) == "2027-01-01"
     period_end = datetime(2026, 3, 2, 0, 0, tzinfo=timezone.utc)
     assert handler._resolve_quota_reset_date(period_key="2026-01-01", period_end=period_end) == "2026-03-02"
+    assert handler._resolve_quota_reset_date(
+        period_key="2026-01-01",
+        period_end=period_end,
+        plan_key="pro",
+    ) == "2026-03-02"
+    # Free は旧有料契約の終了日を使わず、暦月キーの翌月1日
+    assert handler._resolve_quota_reset_date(
+        period_key="2026-10-01",
+        period_end=period_end,
+        plan_key="free",
+    ) == "2026-11-01"
+
+
+class _MutableLanguageRepo(ProQuotaRepo):
+    def __init__(self, *args, languages=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.languages = list(languages or ["en"])
+
+    def fetch_group_languages(self, _group_id):
+        return list(self.languages)
+
+    def fetch_translation_runtime_state(self, group_id):
+        state = super().fetch_translation_runtime_state(group_id)
+        return replace(state, group_languages=list(self.languages))
+
+    def add_group_languages(self, _group_id, languages):
+        present = {code.lower() for code in self.languages}
+        for code, _name in languages:
+            if code and code.lower() not in present:
+                self.languages.append(code)
+                present.add(code.lower())
+
+    def remove_group_languages(self, _group_id, codes):
+        drop = {code.lower() for code in codes if code}
+        self.languages = [code for code in self.languages if code.lower() not in drop]
+
+    def replace_group_languages(self, _group_id, languages):
+        self.languages = [code for code, _name in languages if code]
+
+
+def _assert_quota_pause(repo: ProQuotaRepo) -> None:
+    assert repo.translation_enabled is False
+    assert repo.paused_reason == "quota"
+
+
+def test_free_notices_use_next_month_when_canceled_period_end_remains():
+    """解約後に残った current_period_end を、無料枠の再開日に使わない。"""
+
+    stale = datetime(2024, 3, 17, tzinfo=timezone.utc)
+    next_month = _next_month(datetime.now(timezone.utc))
+    line = _CapturingLine()
+    repo = ProQuotaRepo(
+        initial_usage=39,
+        paid=False,
+        subscription_status="canceled",
+        period_end=stale,
+        entitlement_plan="standard",
+    )
+    handler = _with_checkout(_build_handler(repo, line, RecordingTranslationService()))
+
+    handler._handle_translation_flow(_build_event("near"), sender_name="user", translation_enabled=True)
+
+    approaching = "\n".join(line.sent_texts)
+    assert "40 of 50" in approaching
+    assert next_month in approaching
+    assert "2024-03-17" not in approaching
+
+    repo.usage = 50
+    repo.translation_enabled = False
+    repo.paused_reason = "quota"
+    line.sent_texts.clear()
+    handler._command_router = _ResumeRouter()
+    handler._handle_command(_build_event("resume"), "resume")
+    reminder = "\n".join(line.sent_texts)
+    assert "still paused" in reminder
+    assert next_month in reminder
+    assert "2024-03-17" not in reminder
+
+    line.sent_texts.clear()
+    handler._handle_command(_build_event("resume"), "resume")
+    short = "\n".join(line.sent_texts)
+    assert "stays paused" in short
+    assert next_month in short
+    assert "2024-03-17" not in short
+
+    repo.usage = 0
+    line.sent_texts.clear()
+    handler._handle_translation_flow(_build_event("new month"), sender_name="user", translation_enabled=False)
+
+    reset = "\n".join(line.sent_texts)
+    assert "has reset" in reset
+    assert next_month in reset
+    assert "2024-03-17" not in reset
+    assert repo.translation_enabled is True
+    assert repo.paused_reason is None
+
+
+def test_language_changes_during_quota_pause_keep_the_reason():
+    """追加・削除・置換と unknown は、上限停止の理由を消さない。"""
+
+    line = RecordingLineClient()
+    repo = _MutableLanguageRepo(
+        initial_usage=50,
+        paid=False,
+        notice_plan="free",
+        translation_enabled=False,
+        paused_reason="quota",
+        languages=["en", "ja"],
+    )
+    handler = _with_checkout(_build_handler(repo, line, RecordingTranslationService()))
+
+    handler._handle_command(_build_event("add Thai"), "add Thai")
+    assert "th" in {code.lower() for code in repo.languages}
+    _assert_quota_pause(repo)
+
+    handler._handle_command(_build_event("remove Japanese"), "remove Japanese")
+    assert "ja" not in {code.lower() for code in repo.languages}
+    _assert_quota_pause(repo)
+
+    handler._handle_command(_build_event("Japanese"), "Japanese")
+    assert [code.lower() for code in repo.languages] == ["ja"]
+    _assert_quota_pause(repo)
+
+    handler._respond_unknown_instruction(_build_event("huh"), "")
+    _assert_quota_pause(repo)
+
+    repo.usage = 0
+    line.sent_texts.clear()
+    handler._handle_translation_flow(_build_event("new month"), sender_name="user", translation_enabled=False)
+
+    assert repo.translation_enabled is True
+    assert repo.paused_reason is None
+    assert repo.usage == 1
+    reset = "\n".join(line.sent_texts)
+    assert "has reset" in reset
+    assert _next_month(datetime.now(timezone.utc)) in reset
 
 
 def test_free_40_sends_approaching_notice_once():
@@ -386,7 +522,8 @@ def test_limit_notice_localizes_known_languages_and_keeps_english_for_unregister
         "group1",
         plan_key="free",
         limit=50,
-        period_end=datetime(2026, 11, 1, tzinfo=timezone.utc),
+        period_key="2026-10-01",
+        period_end=datetime(2024, 3, 17, tzinfo=timezone.utc),
     )
 
     assert url == "https://short.example.com/cs"

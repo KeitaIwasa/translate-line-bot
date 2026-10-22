@@ -60,12 +60,18 @@ class ProQuotaRepo:
         notice_plan: str | None = None,
         translation_enabled: bool = True,
         paused_reason: str | None = None,
+        subscription_status: str | None = None,
+        period_end: datetime | None = None,
+        entitlement_plan: str = "free",
     ):
         self.usage = initial_usage
         self.paid = paid
         self.translation_enabled = translation_enabled
         self.paused_reason = paused_reason
         self.notice_plan = notice_plan
+        self.subscription_status = subscription_status
+        self.period_end = period_end
+        self.entitlement_plan = entitlement_plan
         self.approaching_claimed = False
         self.mention_reminders: set[tuple[str, str]] = set()
 
@@ -104,6 +110,11 @@ class ProQuotaRepo:
         return True
 
     def get_subscription_period(self, _group_id):
+        if self.subscription_status is not None or self.period_end is not None:
+            status = self.subscription_status
+            if status is None:
+                status = "active" if self.paid else "canceled"
+            return (status, None, self.period_end)
         if self.paid:
             return ("active", datetime(2025, 1, 1, tzinfo=timezone.utc), datetime(2025, 2, 1, tzinfo=timezone.utc))
         return (None, None, None)
@@ -143,6 +154,7 @@ class ProQuotaRepo:
             period_key="2025-01-01",
             usage=self.usage,
             limit_notice_plan=self.notice_plan,
+            entitlement_plan=self.entitlement_plan,
             translation_paused_reason=self.paused_reason,
         )
 
