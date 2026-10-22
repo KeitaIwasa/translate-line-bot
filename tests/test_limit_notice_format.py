@@ -62,9 +62,12 @@ def test_pro_limit_notice_includes_reset_date_without_plan_change_prompt():
     )
 
     assert url is None
-    assert "translation has stopped" in notice
+    assert "Translation stopped" in notice
+    assert "Pro plan messages" in notice
     assert "2026-02-28" in notice
     assert "change your plan" not in notice.lower()
+    assert "¥" not in notice
+    assert "$" not in notice
 
 
 def test_standard_limit_notice_includes_reset_date_and_pro_upgrade_prompt():
@@ -80,8 +83,10 @@ def test_standard_limit_notice_includes_reset_date_and_pro_upgrade_prompt():
     )
 
     assert url == "https://short.example.com/cs"
+    assert "https://short.example.com/cs" not in notice
     assert "2026-03-15" in notice
-    assert "upgrade to the Pro plan" in notice
+    assert "Translation stopped" in notice
+    assert "Pro plan includes 40,000" in notice
 
 
 def test_free_limit_notice_includes_reset_date():
@@ -97,5 +102,10 @@ def test_free_limit_notice_includes_reset_date():
     )
 
     assert url == "https://short.example.com/cs"
+    assert "https://short.example.com/cs" not in notice
     assert "2026-02-28" in notice
-    assert "Free quota" in notice
+    assert "used all 50 free messages" in notice
+    assert "Standard 4,000/month" in notice
+    assert "Pro 40,000/month" in notice
+    assert "Prices are on the plan page" in notice
+    assert "¥" not in notice

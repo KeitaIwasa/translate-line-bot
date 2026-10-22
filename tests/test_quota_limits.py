@@ -66,6 +66,8 @@ class ProQuotaRepo:
         self.translation_enabled = translation_enabled
         self.paused_reason = paused_reason
         self.notice_plan = notice_plan
+        self.approaching_claimed = False
+        self.mention_reminders: set[tuple[str, str]] = set()
 
     # group/lang settings
     def fetch_group_languages(self, _group_id):
@@ -87,6 +89,19 @@ class ProQuotaRepo:
 
     def set_limit_notice_plan(self, _group_id, _period_key, plan: str):
         self.notice_plan = plan
+
+    def claim_approaching_notice(self, _group_id, _period_key):
+        if self.approaching_claimed:
+            return False
+        self.approaching_claimed = True
+        return True
+
+    def claim_quota_mention_reminder(self, _group_id, period_key, on_date):
+        key = (period_key, on_date)
+        if key in self.mention_reminders:
+            return False
+        self.mention_reminders.add(key)
+        return True
 
     def get_subscription_period(self, _group_id):
         if self.paid:
@@ -225,7 +240,7 @@ def test_pro_plan_blocks_when_usage_already_over_limit():
     handler._handle_translation_flow(_build_event(), sender_name="user", translation_enabled=True)
 
     assert translation.calls == 0
-    assert any("Pro plan monthly limit" in text for text in line.sent_texts)
+    assert any("Pro plan messages" in text for text in line.sent_texts)
     assert repo.usage == 8000
     assert repo.translation_enabled is True
 
@@ -307,7 +322,8 @@ def test_free_plan_sends_notice_after_50th_translation():
     assert repo.usage == 50
     assert translation.calls == 1  # 50通目は翻訳実行
     assert repo.notice_plan == "free"  # 通知フラグ更新
-    assert any("Free quota" in text for text in line.sent_texts)
+    assert any("free messages" in text for text in line.sent_texts)
+    assert any("Translation stopped" in text for text in line.sent_texts)
 
 
 def test_free_plan_under_limit_allows_translation_even_if_notice_flag_exists():

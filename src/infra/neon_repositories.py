@@ -29,6 +29,21 @@ GROUP_LANG_MARKER = "__group_lang__"
 PRIVATE_ASSISTANT_MARKER = "__assistant__"
 logger = logging.getLogger(__name__)
 
+# 列が未適用の間だけ、同一プロセス内で案内の再送を抑える。
+_LOCAL_QUOTA_CLAIMS: set[tuple] = set()
+_LOCAL_QUOTA_CLAIM_LIMIT = 4096
+
+
+def _claim_local(key: tuple) -> bool:
+    """DB列が無いときのプロセス内dedup。満杯になったら捨てて取り直す。"""
+
+    if key in _LOCAL_QUOTA_CLAIMS:
+        return False
+    if len(_LOCAL_QUOTA_CLAIMS) >= _LOCAL_QUOTA_CLAIM_LIMIT:
+        _LOCAL_QUOTA_CLAIMS.clear()
+    _LOCAL_QUOTA_CLAIMS.add(key)
+    return True
+
 # 言語行の追加。ON CONFLICT は名前の更新だけに使う
 _UPSERT_GROUP_LANGUAGE_SQL = """
 INSERT INTO group_languages (group_id, lang_code, lang_name)
@@ -1101,6 +1116,65 @@ class NeonMessageRepository(MessageRepositoryPort):
             logger.warning("limit_notice_plan column missing; skip setting notice plan", extra={"group_id": group_id})
         except errors.UndefinedTable:
             logger.warning("group_usage_counters table missing; skip setting notice plan", extra={"group_id": group_id})
+
+    def claim_approaching_notice(self, group_id: str, period_key: str) -> bool:
+        """事前案内をこの周期でまだ出していなければ確保する。"""
+
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO group_usage_counters (
+                        group_id, period_key, translation_count, approaching_notice_sent, created_at, updated_at
+                    )
+                    VALUES (%s, %s, 0, TRUE, NOW(), NOW())
+                    ON CONFLICT (group_id, period_key)
+                    DO UPDATE SET
+                        approaching_notice_sent = TRUE,
+                        updated_at = NOW()
+                    WHERE group_usage_counters.approaching_notice_sent IS NOT TRUE
+                    RETURNING group_id
+                    """,
+                    (group_id, period_key),
+                )
+                return cur.fetchone() is not None
+        except errors.UndefinedColumn:
+            logger.warning("approaching_notice_sent column missing; using local claim", extra={"group_id": group_id})
+            return _claim_local(("approaching", group_id, period_key))
+        except errors.UndefinedTable:
+            logger.warning("group_usage_counters table missing; skip approaching notice", extra={"group_id": group_id})
+            return False
+
+    def claim_quota_mention_reminder(self, group_id: str, period_key: str, on_date: str) -> bool:
+        """停止中メンションへの再案内を、UTC日ごとに1回だけ確保する。"""
+
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO group_usage_counters (
+                        group_id, period_key, translation_count, quota_mention_reminder_on, created_at, updated_at
+                    )
+                    VALUES (%s, %s, 0, %s, NOW(), NOW())
+                    ON CONFLICT (group_id, period_key)
+                    DO UPDATE SET
+                        quota_mention_reminder_on = EXCLUDED.quota_mention_reminder_on,
+                        updated_at = NOW()
+                    WHERE group_usage_counters.quota_mention_reminder_on IS DISTINCT FROM EXCLUDED.quota_mention_reminder_on
+                    RETURNING group_id
+                    """,
+                    (group_id, period_key, on_date),
+                )
+                return cur.fetchone() is not None
+        except errors.UndefinedColumn:
+            logger.warning(
+                "quota_mention_reminder_on column missing; using local claim",
+                extra={"group_id": group_id},
+            )
+            return _claim_local(("mention", group_id, period_key, on_date))
+        except errors.UndefinedTable:
+            logger.warning("group_usage_counters table missing; skip mention reminder", extra={"group_id": group_id})
+            return False
 
     def reset_limit_notice_plan(self, group_id: str) -> None:
         """退会時などに上限通知フラグをリセットする。"""
