@@ -160,7 +160,11 @@ def build_dispatcher() -> Dispatcher:
         subscription_service=subscription_service,
         language_settings_service=lang_settings_service,
     )
-    join_handler = JoinHandler(line_client, repo)
+    join_handler = JoinHandler(
+        line_client,
+        repo,
+        language_page_url=subscription_service.create_language_settings_url,
+    )
     leave_handler = LeaveHandler(subscription_service, repo)
     member_joined_handler = MemberJoinedHandler(line_client, repo)
     member_left_handler = MemberLeftHandler(

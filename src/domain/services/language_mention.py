@@ -83,6 +83,10 @@ _SETTINGS_HELP = re.compile(
     r"|言語を変更(?:して(?:ください|ね)?)?"
     r"|change language settings"
     r"|change the language settings"
+    r"|言語設定"
+    r"|設定"
+    r"|settings"
+    r"|language settings"
     r")$"
 )
 _HOWTO = re.compile(
@@ -397,6 +401,67 @@ def unsupported_prompt(names: Sequence[str], family: str) -> str:
     if len(cleaned) == 1:
         return f"{cleaned[0]} isn't supported."
     return f"{_english_join(cleaned)} aren't supported."
+
+
+def settings_page_line(family: str, url: str) -> str:
+    """設定ページへの一行。原文は英語で、ja/zh/ko/th だけ静的に訳す。"""
+
+    if not url:
+        return ""
+    if family == "ja":
+        return f"言語はこのページでも選べるよ。\n{url}"
+    if family == "zh":
+        return f"也可以在这个页面选择语言。\n{url}"
+    if family == "ko":
+        return f"이 페이지에서도 언어를 고를 수 있어.\n{url}"
+    if family == "th":
+        return f"เลือกภาษาในหน้านี้ก็ได้\n{url}"
+    return f"You can also choose languages on this page.\n{url}"
+
+
+def join_settings_page_note(url: str) -> str:
+    """参加直後の多言語案内。リンクは一度だけ添える。"""
+
+    if not url:
+        return ""
+    return (
+        "You can also choose languages on this page.\n"
+        "言語はこのページでも選べるよ。\n"
+        "也可以在这个页面选择语言。\n"
+        "เลือกภาษาในหน้านี้ก็ได้\n"
+        f"{url}"
+    )
+
+
+def web_settings_notice(pairs: Sequence[tuple[str, str]]) -> str:
+    """ウェブで保存したあとにグループへ送る短い確認。同じ内容の連投は呼び出し側で避ける。"""
+
+    families: list[str] = []
+    for code, _name in pairs:
+        family = ui_family(code)
+        if family not in families:
+            families.append(family)
+    if "en" not in families:
+        families.insert(0, "en")
+    return "\n\n".join(_web_settings_line(pairs, family) for family in families)
+
+
+def _web_settings_line(pairs: Sequence[tuple[str, str]], family: str) -> str:
+    names = [language_label(code, family, stored=name) for code, name in pairs if code]
+    if family == "ja":
+        head = "設定ページから更新したよ"
+        return f"{head}: {'・'.join(names)}" if names else head
+    if family == "zh":
+        head = "已从设置页面更新"
+        return f"{head}：{'、'.join(names)}" if names else head
+    if family == "ko":
+        head = "설정 페이지에서 업데이트했어"
+        return f"{head}: {', '.join(names)}" if names else head
+    if family == "th":
+        head = "อัปเดตจากหน้าการตั้งค่าแล้ว"
+        return f"{head}: {', '.join(names)}" if names else head
+    head = "Updated from the settings page"
+    return f"{head}: {_english_join(names)}." if names else f"{head}."
 
 
 def settings_help_prompt(current: Sequence[str], *, family: str, limit: int) -> str:

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Dict, List, Sequence, Tuple
 
 from .. import models
 from ..ports import LanguagePreferencePort, MessageRepositoryPort
+from ...infra.jev_language_reader import LANGUAGE_NAMES
 from .interface_translation_service import InterfaceTranslationService
 from .language_mention import selection_prompt, ui_family, unsupported_prompt
+from .plan_policy import FREE_PLAN, PRO_PLAN, language_limit_for, resolve_effective_plan
 from ...presentation.list_layout import normalize_inline_lists
 from ...presentation.reply_formatter import RTL_LANG_PREFIXES, _wrap_bidi_isolate, strip_source_echo
 
@@ -420,3 +423,84 @@ class LanguageSettingsService:
             "Sorry, I couldn't detect your languages. Please resend after a few seconds (e.g., English, 日本語, 中文, ไทย).\n"
             "ขออภัย ไม่สามารถระบุภาษาได้ กรุณาลองส่งมาใหม่อีกครั้ง (ตัวอย่าง: English, 日本語, 中文, ไทย)"
         )
+
+
+@dataclass(frozen=True)
+class CatalogSelection:
+    """ウェブの言語選択。error があるときは保存しない。"""
+
+    languages: tuple[tuple[str, str], ...]
+    error: str | None
+    unsupported: tuple[str, ...]
+
+
+def normalize_catalog_selection(
+    codes: Sequence[str],
+    *,
+    limit: int,
+    already: Sequence[str] = (),
+) -> CatalogSelection:
+    """チャットと同じ上限で、対応言語の選択を検証する。
+
+    重複は一つにまとめる。未対応コードが一つでもあれば全体を保存しない。
+    空の選択も保存しない。上限を超えた選択は一部だけ採用しない。
+    すでにグループへ入っているコードは、カタログ外でも残せる。
+    """
+
+    resolved_limit = 1 if limit < 1 else limit
+    allowed_existing = {(code or "").strip().lower() for code in already if (code or "").strip()}
+    seen: set[str] = set()
+    languages: list[tuple[str, str]] = []
+    unsupported: list[str] = []
+    for raw in codes:
+        code = (raw or "").strip().lower()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        if code in LANGUAGE_NAMES:
+            languages.append((code, LANGUAGE_NAMES[code]))
+            continue
+        if code in allowed_existing:
+            languages.append((code, code))
+            continue
+        unsupported.append(code)
+
+    selected = tuple(languages)
+    if unsupported:
+        return CatalogSelection(languages=selected, error="unsupported", unsupported=tuple(unsupported))
+    if not selected:
+        return CatalogSelection(languages=(), error="empty", unsupported=())
+    if len(selected) > resolved_limit:
+        return CatalogSelection(languages=selected, error="too_many", unsupported=())
+    return CatalogSelection(languages=selected, error=None, unsupported=())
+
+
+def resolve_group_language_limit(repo: MessageRepositoryPort, group_id: str) -> int:
+    """チャットのメンション更新と同じ有効プランの言語上限。"""
+
+    status, entitlement = _read_group_plan(repo, group_id)
+    plan = resolve_effective_plan(status, entitlement)
+    if status in {"active", "trialing"} and plan == FREE_PLAN:
+        plan = PRO_PLAN
+    return language_limit_for(plan)
+
+
+def _read_group_plan(repo: MessageRepositoryPort, group_id: str) -> tuple[str | None, str | None]:
+    runtime_fetcher = getattr(repo, "fetch_translation_runtime_state", None)
+    if runtime_fetcher:
+        try:
+            runtime = runtime_fetcher(group_id)
+            return getattr(runtime, "subscription_status", None), getattr(runtime, "entitlement_plan", None)
+        except Exception:
+            pass
+
+    plan_fetcher = getattr(repo, "get_subscription_plan", None)
+    if plan_fetcher:
+        try:
+            row = plan_fetcher(group_id)
+            status = row[0] if row else None
+            entitlement = row[1] if row and len(row) > 1 else None
+            return status, entitlement
+        except Exception:
+            pass
+    return None, None

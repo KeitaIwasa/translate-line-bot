@@ -222,6 +222,28 @@ Resources:
             Path: /checkout
             Method: GET
 
+  GroupLanguagePageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src.group_language_handler.lambda_handler
+      Description: Shows and saves a group's translation languages from its signed link
+      Policies:
+        - AWSLambdaBasicExecutionRole
+      Events:
+        GroupLanguagePageGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LineWebhookApi
+            Path: /group-languages
+            Method: GET
+        GroupLanguagePagePost:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LineWebhookApi
+            Path: /group-languages
+            Method: POST
+
   StatsTotalUsersFunction:
     Type: AWS::Serverless::Function
     Properties:

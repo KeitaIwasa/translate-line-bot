@@ -63,6 +63,7 @@ from ...domain.services.language_mention import (
     read_mention,
     selection_prompt,
     settings_help_prompt,
+    settings_page_line,
     swap_prompt,
     unrecognized_prompt,
     unsupported_prompt,
@@ -742,11 +743,11 @@ class MessageHandler:
                     )
                 elif action == "howto":
                     message = (decision.ack_text or "").strip()
+                    howto_family = family_for(instruction_lang or decision.instruction_language, command_text)
                     # 「使い方を教えてと送って」でループさせず、その場で答える
                     if not message or is_howto_loop(message):
-                        message = howto_prompt(
-                            family=family_for(instruction_lang or decision.instruction_language, command_text)
-                        )
+                        message = howto_prompt(family=howto_family)
+                    message = self._with_settings_link(event.group_id, message, howto_family)
                     handled = self._reply_text(event, message, command_trace=trace)
                 elif action == "pause":
                     self._repo.set_translation_enabled(event.group_id, False)
@@ -949,12 +950,20 @@ class MessageHandler:
             ]
             self._reply_text(
                 event,
-                settings_help_prompt(names, family=family, limit=limit),
+                self._with_settings_link(
+                    event.group_id,
+                    settings_help_prompt(names, family=family, limit=limit),
+                    family,
+                ),
                 command_trace=command_trace,
             )
             return True
         if parsed.kind == "howto":
-            self._reply_text(event, howto_prompt(family=family), command_trace=command_trace)
+            self._reply_text(
+                event,
+                self._with_settings_link(event.group_id, howto_prompt(family=family), family),
+                command_trace=command_trace,
+            )
             return True
         if parsed.kind == "unsupported":
             self._reply_text(
@@ -1043,11 +1052,15 @@ class MessageHandler:
                 message = f"{notice}\n{message}"
             self._reply_text(
                 event,
-                self._localize_fixed_reply(
-                    message,
-                    family=family,
-                    instruction_lang=decision.instruction_language,
-                    command_trace=command_trace,
+                self._with_settings_link(
+                    event.group_id,
+                    self._localize_fixed_reply(
+                        message,
+                        family=family,
+                        instruction_lang=decision.instruction_language,
+                        command_trace=command_trace,
+                    ),
+                    family,
                 ),
                 command_trace=command_trace,
             )
@@ -1122,7 +1135,11 @@ class MessageHandler:
                     instruction_lang=decision.instruction_language,
                     command_trace=command_trace,
                 )
-                self._reply_text(event, msg, command_trace=command_trace)
+                self._reply_text(
+                    event,
+                    self._with_settings_link(event.group_id, msg, family),
+                    command_trace=command_trace,
+                )
                 return True
 
         if op == "reset_all" and not replacing:
@@ -1135,6 +1152,7 @@ class MessageHandler:
                 decision.instruction_language,
                 command_trace=command_trace,
             )
+            ack = self._with_settings_link(event.group_id, ack, family)
             self._reply_text(event, ack, command_trace=command_trace)
             return True
 
@@ -1160,21 +1178,37 @@ class MessageHandler:
         self._repo.set_translation_enabled(event.group_id, True)
 
         # 結果の言語を固定文で言う。「言語設定を更新しました」だけでは何になったか分からない
-        ack = completion_prompt(self._resulting_language_pairs(event.group_id), family=family)
+        pairs = self._resulting_language_pairs(event.group_id)
+        ack = completion_prompt(pairs, family=family)
         notice = unsupported_prompt(parsed.unsupported, family)
         if notice:
             ack = f"{ack}\n{notice}"
-        self._reply_text(
-            event,
-            self._localize_fixed_reply(
-                ack,
-                family=family,
-                instruction_lang=decision.instruction_language,
-                command_trace=command_trace,
-            ),
+        ack = self._localize_fixed_reply(
+            ack,
+            family=family,
+            instruction_lang=decision.instruction_language,
             command_trace=command_trace,
         )
+        if len(pairs) < 2:
+            ack = self._with_settings_link(event.group_id, ack, family)
+        self._reply_text(event, ack, command_trace=command_trace)
         return True
+
+    def _language_settings_url(self, group_id: str, family: str) -> str:
+        builder = getattr(self._subscription_service, "create_language_settings_url", None)
+        if not builder or not group_id:
+            return ""
+        try:
+            return builder(group_id, family=family) or ""
+        except Exception:
+            logger.debug("Failed to build language settings url", exc_info=True)
+            return ""
+
+    def _with_settings_link(self, group_id: str, text: str, family: str) -> str:
+        line = settings_page_line(family, self._language_settings_url(group_id, family))
+        if not line:
+            return text
+        return f"{text}\n\n{line}"
 
     def _localize_fixed_reply(
         self,
@@ -1236,6 +1270,12 @@ class MessageHandler:
                 current_languages_base_text(records),
                 instruction_lang,
                 command_trace=command_trace,
+            )
+        if len([code for code, _name in records if code]) < 2:
+            message = self._with_settings_link(
+                event.group_id,
+                message,
+                family_for(instruction_lang),
             )
         self._reply_text(event, message, command_trace=command_trace)
         return True

@@ -155,3 +155,26 @@ def test_create_checkout_url_token_flow_still_works_without_api_base():
     assert "st" in query and query["st"][0]
     assert query["openExternalBrowser"] == ["1"]
     assert "api_base" not in query
+
+
+def test_create_language_settings_url_uses_same_origin_api_path():
+    repo = _RepoStub()
+    service = SubscriptionService(
+        repo,
+        stripe_secret_key="sk_test",
+        stripe_price_monthly_id="price_123",
+        subscription_frontend_base_url="https://kotori-ai.com",
+        checkout_api_base_url="https://api.example.com/prod",
+        subscription_token_secret="secret",
+    )
+
+    url = service.create_language_settings_url("gid_1", family="ja")
+    assert url is not None
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    assert parsed.path == "/api/group-languages"
+    assert query["openExternalBrowser"] == ["1"]
+    assert query["ui"] == ["ja"]
+    assert query["st"][0]
+    assert "gid_1" not in url
+    assert "api_base" not in query
