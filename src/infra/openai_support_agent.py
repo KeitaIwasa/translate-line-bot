@@ -10,6 +10,7 @@ from typing import Any, Sequence
 
 from ..domain import models
 from ..domain.ports import PrivateChatResponderPort
+from ..presentation.list_layout import normalize_inline_lists
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ class OpenAISupportAgent(PrivateChatResponderPort):
 
         try:
             output = self._run_agent(safe_input, masked_history)
-            output = (output or "").strip()
+            output = normalize_inline_lists((output or "").strip())
             if not output:
                 output = SAFETY_MESSAGE
         except Exception:

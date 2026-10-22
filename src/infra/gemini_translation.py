@@ -22,6 +22,8 @@ You translate short UI strings for a LINE bot subscription menu.
 The user message is JSON with target_language and items[{id, text}].
 Return JSON {"items":[{"id","text"}]} using the same ids, one translation each, in target_language.
 Keep the meaning. Preserve numbers, dates, the plan names Free, Standard and Pro, and URLs.
+Preserve line breaks inside each text. Keep one numbered or bulleted item per line.
+Do not join list items into a single paragraph.
 Do not add explanations or extra items.
 """.strip()
 
@@ -57,7 +59,9 @@ Requirements:
 * Preserve user names (sender_name) exactly as they are; Do NOT translate them.
 * Preserve mention strings (e.g., "@John") in their original form.
 * Produce natural interpretations that match each user's tone and the conversational context.
+* If the source message mixes languages, write each target as one complete, natural sentence entirely in that target language. Translate every part, including words already written in the target language.
 * Do not copy, quote, or directly reproduce the source_message.text in the translation output; return only the translated text for each target language.
+* Preserve every line break in source_message.text. When the source is a numbered or bulleted list, keep one item per line in every translation. Do not merge list items into a single paragraph, and do not drop blank lines between paragraphs.
 * Output only a JSON object that conforms to the specified JSON Schema.
 * Do NOT include context_messages or target_languages in the output JSON.
 """.strip()
@@ -164,7 +168,10 @@ class GeminiTranslationAdapter(TranslationPort):
         return results
 
     def translate_ui_strings(self, texts: Sequence[str], target_language: str) -> List[str]:
-        """複数のUI文言を1回のGemini呼び出しで翻訳する。失敗時は原文を返す。"""
+        """複数のUI文言を1回のGemini呼び出しで翻訳する。
+
+        失敗は例外のまま呼び出し元へ返す。呼び出し元がリトライし、使い切ったあとで原文に戻す。
+        """
 
         originals = [str(text) for text in texts]
         if not originals:
@@ -172,15 +179,7 @@ class GeminiTranslationAdapter(TranslationPort):
         normalized = (target_language or "").strip()
         if not normalized or normalized.lower().startswith("en"):
             return originals
-        try:
-            return self._translate_ui_strings_once(originals, normalized)
-        except Exception:
-            logger.warning(
-                "Gemini UI batch translation failed; using source strings | model=%s count=%s",
-                self._model,
-                len(originals),
-            )
-            return originals
+        return self._translate_ui_strings_once(originals, normalized)
 
     def _translate_ui_strings_once(self, originals: List[str], target_language: str) -> List[str]:
         items = [{"id": str(index), "text": text} for index, text in enumerate(originals)]

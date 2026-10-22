@@ -173,6 +173,8 @@ LINE_CHANNEL_SECRET=xxx
 LINE_CHANNEL_ACCESS_TOKEN=xxx
 NEON_DATABASE_URL=postgres://...
 GEMINI_API_KEY=your_google_ai_key
+# グループメンションの判定（Jev）に使う TypeSafe の API キー。空だとメンションが全部判定エラーになる
+TYPESAFE_API_KEY=your_typesafe_api_key
 OPENAI_API_KEY=your_openai_key
 OPENAI_SUPPORT_MODEL=gpt-5.2
 OPENAI_GUARDRAIL_MODEL=gpt-4.1-mini

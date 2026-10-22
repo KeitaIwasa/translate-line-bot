@@ -5,6 +5,7 @@ from typing import Dict, List, Sequence, Tuple
 from .. import models
 from ..ports import LanguagePreferencePort, MessageRepositoryPort
 from .interface_translation_service import InterfaceTranslationService
+from ...presentation.list_layout import normalize_inline_lists
 from ...presentation.reply_formatter import RTL_LANG_PREFIXES, _wrap_bidi_isolate, strip_source_echo
 
 
@@ -268,13 +269,15 @@ class LanguageSettingsService:
 
         target_langs = [lang for lang in deduped if not lang.startswith("en")]
         if not self._interface_translation or not target_langs:
-            return base_text if include_en else "\n\n".join([base_text.strip()] if include_en else [])
+            readable = normalize_inline_lists(base_text) if include_en else base_text
+            return readable if include_en else "\n\n".join([base_text.strip()] if include_en else [])
 
         translations = []
         try:
             translations = self._interface_translation.translate(base_text, target_langs)
         except Exception:  # pylint: disable=broad-except
-            return base_text if include_en else "\n\n".join([base_text.strip()] if include_en else [])
+            readable = normalize_inline_lists(base_text) if include_en else base_text
+            return readable if include_en else "\n\n".join([base_text.strip()] if include_en else [])
 
         text_by_lang = {}
         for item in translations or []:
@@ -282,7 +285,7 @@ class LanguageSettingsService:
             if not lowered or lowered in text_by_lang:
                 continue
             cleaned = strip_source_echo(base_text, item.text)
-            text_by_lang[lowered] = (cleaned or item.text or base_text).strip()
+            text_by_lang[lowered] = normalize_inline_lists((cleaned or item.text or base_text).strip())
 
         def _maybe_wrap_bidi(text: str, lang: str) -> str:
             if (lang or "").lower().startswith(RTL_LANG_PREFIXES):
@@ -292,7 +295,7 @@ class LanguageSettingsService:
         lines: List[str] = []
         seen_texts = set()
         if include_en:
-            base_line = base_text.strip()
+            base_line = normalize_inline_lists(base_text.strip())
             if base_line:
                 lines.append(base_line)
                 seen_texts.add(base_line)
@@ -389,7 +392,7 @@ class LanguageSettingsService:
 
     @staticmethod
     def _normalize_template_text(text: str) -> str:
-        return text.replace("\n\n", "\n").strip()
+        return normalize_inline_lists(text.replace("\n\n", "\n").strip())
 
     @staticmethod
     def _dedup_languages(languages: Sequence[Tuple[str, str]]) -> List[Tuple[str, str]]:
