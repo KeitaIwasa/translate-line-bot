@@ -17,6 +17,7 @@ JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 # Jev に選ばせる操作。キーは CommandDecision.action と一致させる
 ACTION_CRITERIA: Dict[str, str] = {
     "language_settings": "Change, add, remove or reset the translation languages",
+    "show_languages": "Ask which translation languages are currently set, without changing them",
     "howto": "Asks how to use the bot or asks any question about it",
     "pause": "Pause or stop translating for now",
     "resume": "Resume or restart translating",
@@ -28,7 +29,14 @@ ACTION_CRITERIA: Dict[str, str] = {
 
 # ハンドラーが定型処理する操作。言語設定・使い方以外は Gemini を呼ばない
 TEMPLATE_ACTIONS = frozenset(
-    {"pause", "resume", "subscription_menu", "subscription_cancel", "subscription_upgrade"}
+    {
+        "pause",
+        "resume",
+        "subscription_menu",
+        "subscription_cancel",
+        "subscription_upgrade",
+        "show_languages",
+    }
 )
 # Jev の判定後に Gemini へ続きの抽出・回答だけを依頼する操作
 FOLLOW_UP_ACTIONS = frozenset({"language_settings", "howto"})
@@ -42,10 +50,11 @@ class MentionFollowUp(Protocol):
 class JevFirstPassCommandRouter(CommandRouterPort):
     """グループメンションを TypeSafe Jev で分類する。
 
-    6系統の扱い:
-    - pause / resume とプラン操作（menu / cancel / upgrade）は確信度が十分なら即決する
+    操作の扱い:
+    - pause / resume、プラン操作、現在の翻訳言語の表示は確信度が十分なら即決する
+    - show_languages は設定を変えないので、低確信度でも表示する
     - language_settings と howto は Jev の分類を維持し、詳細だけ Gemini に聞く
-    - unknown と低確信度は unknown（既存の未認識応答）
+    - unknown と、それ以外の低確信度は unknown（既存の未認識応答）
     - Jev の失敗は error（既存の分類失敗応答）
     """
 
@@ -87,6 +96,15 @@ class JevFirstPassCommandRouter(CommandRouterPort):
                 elapsed_ms,
             )
             return self._complete_follow_up(choice, text)
+        # 言語一覧の表示は設定を変えない。低確信度でも unknown の定型文には落とさない
+        if reason == "low_confidence" and choice == "show_languages":
+            logger.info(
+                "Jev decided | action=%s confidence=%.2f elapsed_ms=%.0f",
+                choice,
+                confidence,
+                elapsed_ms,
+            )
+            return CommandDecision(action="show_languages", instruction_language="", ack_text="")
         if reason in {"unknown", "low_confidence"}:
             logger.info(
                 "Jev unknown | reason=%s action=%s confidence=%.2f elapsed_ms=%.0f",

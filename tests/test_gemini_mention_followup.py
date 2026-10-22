@@ -75,6 +75,111 @@ def test_language_settings_follow_up_extracts_languages_only():
     assert "language_settings" in session.calls[0]["json"]["systemInstruction"]["parts"][0]["text"]
 
 
+def test_language_settings_prompt_does_not_reset_when_languages_are_unnamed():
+    from src.infra.gemini_mention_followup import LANGUAGE_SYSTEM_PROMPT
+
+    prompt = LANGUAGE_SYSTEM_PROMPT
+    assert 'does not name languages, use operation "reset_all"' not in prompt
+    assert "without naming them" not in prompt
+    assert "言語を追加したい" in prompt
+    assert 'Use operation "reset_all" only together with explicit_reset true.' in prompt
+    from src.infra.gemini_mention_followup import _LANGUAGE_SCHEMA
+
+    assert _LANGUAGE_SCHEMA["properties"]["explicit_reset"]["type"] == "boolean"
+    assert "explicit_reset" in _LANGUAGE_SCHEMA["required"]
+
+
+def test_add_language_without_a_name_is_not_reset_even_if_model_says_so():
+    payload = {
+        "operation": "reset_all",
+        "languages_to_add": [],
+        "languages_to_remove": [],
+        "instruction_language": "ja",
+        "ack_text": "リセットしました",
+    }
+    session = _Session(_Response(text=json.dumps(payload)))
+    decision = _follow_up(session).complete(
+        "language_settings",
+        json.dumps({"user_message": "言語を追加したい"}, ensure_ascii=False),
+    )
+
+    assert decision.operation == "show"
+    assert decision.action == "language_settings"
+
+
+def test_explicit_reset_request_keeps_reset_all():
+    payload = {
+        "operation": "reset_all",
+        "languages_to_add": [],
+        "languages_to_remove": [],
+        "instruction_language": "ja",
+        "ack_text": "リセットします",
+    }
+    session = _Session(_Response(text=json.dumps(payload)))
+    decision = _follow_up(session).complete(
+        "language_settings",
+        json.dumps({"user_message": "言語設定をリセットして"}, ensure_ascii=False),
+    )
+
+    assert decision.operation == "reset_all"
+    assert decision.explicit_reset is True
+
+
+def test_explicit_reset_flag_keeps_reset_for_spanish_and_persian():
+    """英語・日本語の語彙が無くても、モデルの explicit_reset があればリセットを残す。"""
+
+    for message in ("borra todos los idiomas", "همه زبان‌ها را پاک کن"):
+        payload = {
+            "operation": "reset_all",
+            "languages_to_add": [],
+            "languages_to_remove": [],
+            "instruction_language": "es",
+            "ack_text": "ok",
+            "explicit_reset": True,
+        }
+        session = _Session(_Response(text=json.dumps(payload)))
+        decision = _follow_up(session).complete(
+            "language_settings",
+            json.dumps({"user_message": message}, ensure_ascii=False),
+        )
+        assert decision.operation == "reset_all", message
+        assert decision.explicit_reset is True
+
+
+def test_current_languages_question_is_not_reset_without_explicit_flag():
+    payload = {
+        "operation": "reset_all",
+        "explicit_reset": False,
+        "instruction_language": "ja",
+        "ack_text": "",
+    }
+    session = _Session(_Response(text=json.dumps(payload)))
+    decision = _follow_up(session).complete(
+        "language_settings",
+        json.dumps({"user_message": "今の翻訳言語は何?"}, ensure_ascii=False),
+    )
+    assert decision.operation == "show"
+    assert decision.explicit_reset is False
+
+
+def test_language_settings_show_operation_is_preserved():
+    payload = {
+        "operation": "show",
+        "languages_to_add": [],
+        "languages_to_remove": [],
+        "instruction_language": "ja",
+        "ack_text": "",
+    }
+    session = _Session(_Response(text=json.dumps(payload)))
+    decision = _follow_up(session).complete("language_settings", '{"user_message":"今の翻訳言語は何?"}')
+
+    assert decision.action == "language_settings"
+    assert decision.operation == "show"
+    assert decision.instruction_language == "ja"
+    assert decision.languages_to_add == []
+    assert decision.languages_to_remove == []
+
+
 def test_howto_follow_up_returns_answer_text():
     payload = {"instruction_language": "en", "ack_text": "Mention the bot and say how to use."}
     session = _Session(_Response(text=json.dumps(payload)))

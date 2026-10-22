@@ -25,6 +25,11 @@ from ...domain.ports import (
 from ...domain.services.translation_service import TranslationService
 from ...domain.services.interface_translation_service import InterfaceTranslationService
 from ...domain.services.language_detection_service import LanguageDetectionService
+from ...domain.services.current_languages_question import (
+    current_languages_base_text,
+    current_languages_localized_text,
+    is_current_languages_question,
+)
 from ...infra.gemini_translation import GeminiRateLimitError
 from ...presentation.list_layout import normalize_inline_lists
 from ...presentation.reply_formatter import (
@@ -44,6 +49,7 @@ from ..subscription_templates import (
 from ...domain.services.subscription_service import SubscriptionService
 from ...domain.services.quota_service import QuotaService
 from ...domain.services.translation_flow_service import TranslationFlowService
+from ...domain.services.explicit_language_reset import allows_language_reset
 from ...domain.services.language_settings_service import LanguageSettingsService
 from ...domain.services.private_chat_support_service import PrivateChatSupportService
 from ...domain.services.plan_policy import (
@@ -652,12 +658,6 @@ class MessageHandler:
     def _handle_command(self, event: models.MessageEvent, command_text: str) -> bool:
         trace = _CommandTrace(group_id=event.group_id or "")
         try:
-            instr_future: Future[str] | None = None
-            try:
-                instr_future = self._executor.submit(self._lang_detector.detect, command_text)
-            except Exception:
-                logger.debug("Executor submission failed; fallback to sync", exc_info=True)
-
             runtime_started = time.perf_counter()
             try:
                 runtime = self._fetch_command_runtime_state(event.group_id)
@@ -673,18 +673,17 @@ class MessageHandler:
                 trace.log_stage("router_decision", router_started)
 
             language_started = time.perf_counter()
-            instruction_lang = decision.instruction_language
-            if not instruction_lang and instr_future:
-                try:
-                    instruction_lang = instr_future.result()
-                except Exception:
-                    logger.debug("Instruction language detect failed", exc_info=True)
-                    instruction_lang = decision.instruction_language
-            if not instruction_lang and command_text:
-                try:
-                    instruction_lang = self._lang_detector.detect(command_text)
-                except Exception:
-                    logger.debug("Instruction language detect failed (sync)", exc_info=True)
+            # 低確信度で unknown になっても、現在の言語を聞く質問には一覧を返す
+            if (decision.action or "unknown") == "unknown" and is_current_languages_question(command_text):
+                logger.info("Current languages question | routed=show_languages")
+                decision = replace(decision, action="show_languages")
+            instruction_lang = self._resolve_command_instruction_language(
+                command_text,
+                preferred=decision.instruction_language,
+                group_languages=runtime.group_languages,
+            )
+            if instruction_lang != (decision.instruction_language or ""):
+                decision = replace(decision, instruction_language=instruction_lang)
             trace.log_stage("instruction_language_resolution", language_started)
 
             trace.set_decision(decision, instruction_lang)
@@ -699,6 +698,12 @@ class MessageHandler:
                     handled = self._reply_text(event, message, command_trace=trace)
                 elif action == "language_settings":
                     handled = self._handle_language_settings(event, decision, command_text, command_trace=trace)
+                elif action == "show_languages":
+                    handled = self._handle_show_languages(
+                        event,
+                        instruction_lang,
+                        command_trace=trace,
+                    )
                 elif action == "howto":
                     message = (decision.ack_text or "").strip()
                     if not message:
@@ -889,6 +894,18 @@ class MessageHandler:
         command_trace: _CommandTrace | None = None,
     ) -> bool:
         op = decision.operation or "reset_all"
+        # モデルの explicit_reset か、英語・日本語の明示表現があるときだけ全消去する
+        if op == "reset_all" and not allows_language_reset(
+            explicit_reset=decision.explicit_reset,
+            text=command_text or "",
+        ):
+            op = "show"
+        if op == "show":
+            return self._handle_show_languages(
+                event,
+                decision.instruction_language,
+                command_trace=command_trace,
+            )
         valid_ops = {"reset_all", "add_and_remove", "add", "remove"}
         if op not in valid_ops:
             logger.info("Unsupported language operation", extra={"op": op})
@@ -968,6 +985,88 @@ class MessageHandler:
         self._reply_text(event, ack, command_trace=command_trace)
         return True
 
+    def _handle_show_languages(
+        self,
+        event: models.MessageEvent,
+        instruction_lang: str,
+        *,
+        command_trace: _CommandTrace | None = None,
+    ) -> bool:
+        """現在の翻訳言語を、設定を変えずに返す。"""
+
+        records = self._group_language_records(event.group_id)
+        # ja / en は言語名を確定して返す。それ以外は英語名を翻訳する
+        localized = current_languages_localized_text(records, instruction_lang)
+        if localized is not None:
+            message = localized
+        else:
+            message = self._safe_translate_for_instruction(
+                current_languages_base_text(records),
+                instruction_lang,
+                command_trace=command_trace,
+            )
+        self._reply_text(event, message, command_trace=command_trace)
+        return True
+
+    def _resolve_command_instruction_language(
+        self,
+        command_text: str,
+        *,
+        preferred: str,
+        group_languages: Sequence[str],
+    ) -> str:
+        """本文の文字種に合う言語を選ぶ。合わないコードはグループ言語へ落とす。"""
+
+        detector = self._lang_detector
+        resolver = getattr(detector, "resolve_instruction_language", None)
+        if resolver:
+            try:
+                resolved = resolver(
+                    command_text or "",
+                    preferred=preferred or "",
+                    group_languages=list(group_languages or []),
+                )
+                return resolved or ""
+            except Exception:
+                logger.debug("Instruction language resolve failed", exc_info=True)
+        if preferred:
+            return preferred
+        if not command_text or detector is None or not hasattr(detector, "detect"):
+            return ""
+        try:
+            return detector.detect(command_text) or ""
+        except Exception:
+            logger.debug("Instruction language detect failed", exc_info=True)
+            return ""
+
+    def _group_language_records(self, group_id: str) -> List[Tuple[str, str]]:
+        """保存済みの (言語コード, 表示名)。名前が取れないときはコードだけ。"""
+
+        fetcher = getattr(self._repo, "fetch_group_language_records", None)
+        if fetcher:
+            try:
+                rows = fetcher(group_id) or []
+                records: List[Tuple[str, str]] = []
+                for row in rows:
+                    if isinstance(row, str):
+                        records.append((row, ""))
+                        continue
+                    code = row[0] if row else ""
+                    name = row[1] if row and len(row) > 1 and isinstance(row[1], str) else ""
+                    records.append((code or "", name or ""))
+                return records
+            except Exception:
+                logger.debug("Failed to fetch group language names", exc_info=True)
+        return [(code, "") for code in self._group_languages_for_reply(group_id)]
+
+    def _group_languages_for_reply(self, group_id: str) -> List[str]:
+        try:
+            languages = getattr(self._repo, "fetch_group_languages", lambda *_: [])(group_id)
+            return list(languages or [])
+        except Exception:
+            logger.debug("Failed to fetch group languages for reply language", exc_info=True)
+            return []
+
     def _respond_unknown_instruction(
         self,
         event: models.MessageEvent,
@@ -976,7 +1075,11 @@ class MessageHandler:
         *,
         command_trace: _CommandTrace | None = None,
     ) -> bool:
-        detected = instruction_lang or (self._lang_detector.detect(original_text) if original_text else "")
+        detected = instruction_lang or self._resolve_command_instruction_language(
+            original_text or "",
+            preferred="",
+            group_languages=self._group_languages_for_reply(event.group_id),
+        )
         fallback = self._build_unknown_response(detected, command_trace=command_trace)
         self._repo.set_translation_enabled(event.group_id, True)
         self._reply_text(event, fallback, command_trace=command_trace)
