@@ -32,7 +32,6 @@ from ...domain.services.current_languages_question import (
 )
 from ...infra.gemini_translation import GeminiRateLimitError
 from ...presentation.list_layout import normalize_inline_lists
-from ...infra.jev_language_reader import LANGUAGE_SETTINGS_ACK_BASE
 from ...presentation.reply_formatter import (
     MAX_REPLY_LENGTH,
     _wrap_bidi_isolate,
@@ -51,6 +50,23 @@ from ...domain.services.subscription_service import SubscriptionService
 from ...domain.services.quota_service import QuotaService
 from ...domain.services.translation_flow_service import TranslationFlowService
 from ...domain.services.explicit_language_reset import allows_language_reset
+from ...domain.services.language_mention import (
+    MentionRead,
+    catalog_labels,
+    catalog_prompt,
+    completion_prompt,
+    family_for,
+    howto_prompt,
+    is_howto_loop,
+    is_nonlinguistic,
+    language_label,
+    read_mention,
+    selection_prompt,
+    settings_help_prompt,
+    swap_prompt,
+    unrecognized_prompt,
+    unsupported_prompt,
+)
 from ...domain.services.language_settings_service import LanguageSettingsService
 from ...domain.services.private_chat_support_service import PrivateChatSupportService
 from ...domain.services.plan_policy import (
@@ -665,6 +681,25 @@ class MessageHandler:
             finally:
                 trace.log_stage("runtime_fetch", runtime_started)
 
+            local = read_mention(command_text)
+            if local.kind != "none":
+                language_started = time.perf_counter()
+                instruction_lang = self._resolve_command_instruction_language(
+                    command_text,
+                    preferred="",
+                    group_languages=runtime.group_languages,
+                )
+                trace.log_stage("instruction_language_resolution", language_started)
+                handled = self._handle_local_mention(
+                    event,
+                    command_text,
+                    local,
+                    instruction_lang,
+                    command_trace=trace,
+                )
+                if handled:
+                    return True
+
             router_input = self._build_command_router_input(command_text, runtime)
             router_started = time.perf_counter()
             try:
@@ -707,11 +742,10 @@ class MessageHandler:
                     )
                 elif action == "howto":
                     message = (decision.ack_text or "").strip()
-                    if not message:
-                        message = self._build_usage_response(
-                            instruction_lang or decision.instruction_language,
-                            event.group_id,
-                            command_trace=trace,
+                    # 「使い方を教えてと送って」でループさせず、その場で答える
+                    if not message or is_howto_loop(message):
+                        message = howto_prompt(
+                            family=family_for(instruction_lang or decision.instruction_language, command_text)
                         )
                     handled = self._reply_text(event, message, command_trace=trace)
                 elif action == "pause":
@@ -886,6 +920,95 @@ class MessageHandler:
             logger.debug("Failed to translate command reply", exc_info=True)
         return base_text
 
+    def _handle_local_mention(
+        self,
+        event: models.MessageEvent,
+        command_text: str,
+        parsed: MentionRead,
+        instruction_lang: str,
+        *,
+        command_trace: _CommandTrace | None = None,
+    ) -> bool:
+        """モデルが取りこぼす言語設定・使い方を、固定文で返す。"""
+
+        family = family_for(instruction_lang, command_text)
+        limit = language_limit_for(self._resolve_effective_plan_for_group(event.group_id))
+        if command_trace:
+            command_trace.set_decision(
+                models.CommandDecision(action=parsed.kind, instruction_language=instruction_lang),
+                instruction_lang,
+            )
+        if parsed.kind == "catalog":
+            self._reply_text(event, catalog_prompt(family=family, limit=limit), command_trace=command_trace)
+            return True
+        if parsed.kind == "settings_help":
+            names = [
+                language_label(code, family, stored=stored)
+                for code, stored in self._group_language_records(event.group_id)
+                if code
+            ]
+            self._reply_text(
+                event,
+                settings_help_prompt(names, family=family, limit=limit),
+                command_trace=command_trace,
+            )
+            return True
+        if parsed.kind == "howto":
+            self._reply_text(event, howto_prompt(family=family), command_trace=command_trace)
+            return True
+        if parsed.kind == "unsupported":
+            self._reply_text(
+                event,
+                self._localize_fixed_reply(
+                    unsupported_prompt(parsed.unsupported, family),
+                    family=family,
+                    instruction_lang=instruction_lang,
+                    command_trace=command_trace,
+                ),
+                command_trace=command_trace,
+            )
+            return True
+        if parsed.kind in {"translate_all", "languages"}:
+            return self._handle_language_settings(
+                event,
+                self._decision_from_mention(parsed, instruction_lang),
+                command_text,
+                command_trace=command_trace,
+            )
+        return False
+
+    @staticmethod
+    def _decision_from_mention(parsed: MentionRead, instruction_lang: str) -> models.CommandDecision:
+        choices = []
+        for code, surface in parsed.languages:
+            if re.search(r"[ぁ-んァ-ン一-龯]", surface or ""):
+                name = surface
+            else:
+                name = language_label(code, "en")
+            choices.append(models.LanguageChoice(code=code, name=name))
+        if parsed.kind == "translate_all" or parsed.mode == "set":
+            # 列挙は置き換え。全言語の依頼は言語リストを持たず、後段で選択に落とす
+            return models.CommandDecision(
+                action="language_settings",
+                operation="reset_all",
+                languages_to_add=[] if parsed.kind == "translate_all" else choices,
+                instruction_language=instruction_lang,
+                explicit_reset=False,
+            )
+        if parsed.mode == "remove":
+            return models.CommandDecision(
+                action="language_settings",
+                operation="remove",
+                languages_to_remove=choices,
+                instruction_language=instruction_lang,
+            )
+        return models.CommandDecision(
+            action="language_settings",
+            operation="add",
+            languages_to_add=choices,
+            instruction_language=instruction_lang,
+        )
+
     def _handle_language_settings(
         self,
         event: models.MessageEvent,
@@ -894,6 +1017,54 @@ class MessageHandler:
         *,
         command_trace: _CommandTrace | None = None,
     ) -> bool:
+        text = command_text or ""
+        family = family_for(decision.instruction_language, text)
+        parsed = read_mention(text)
+        # 絵文字だけ・数字だけでは、モデルが reset_all と返しても設定を消さない
+        if text and is_nonlinguistic(text):
+            self._reply_text(event, unrecognized_prompt(family), command_trace=command_trace)
+            return True
+        plan_key = self._resolve_effective_plan_for_group(event.group_id)
+        language_limit = language_limit_for(plan_key)
+        # 上限を超える依頼は、全消去にも置換にもしない
+        over_set = (
+            parsed.kind == "languages"
+            and parsed.mode != "add"
+            and len(parsed.languages) > language_limit
+        )
+        if parsed.kind == "translate_all" or over_set:
+            if parsed.kind == "translate_all":
+                labels = catalog_labels(family)
+            else:
+                labels = [language_label(code, family, surface=surface) for code, surface in parsed.languages]
+            message = selection_prompt(labels, family=family, limit=language_limit)
+            notice = unsupported_prompt(parsed.unsupported, family)
+            if notice:
+                message = f"{notice}\n{message}"
+            self._reply_text(
+                event,
+                self._localize_fixed_reply(
+                    message,
+                    family=family,
+                    instruction_lang=decision.instruction_language,
+                    command_trace=command_trace,
+                ),
+                command_trace=command_trace,
+            )
+            return True
+        if parsed.kind == "unsupported":
+            self._reply_text(
+                event,
+                self._localize_fixed_reply(
+                    unsupported_prompt(parsed.unsupported, family),
+                    family=family,
+                    instruction_lang=decision.instruction_language,
+                    command_trace=command_trace,
+                ),
+                command_trace=command_trace,
+            )
+            return True
+
         op = decision.operation or "reset_all"
         add_langs = [(lang.code, lang.name) for lang in decision.languages_to_add]
         remove_codes = [lang.code for lang in decision.languages_to_remove]
@@ -920,9 +1091,6 @@ class MessageHandler:
                 command_text,
                 command_trace=command_trace,
             )
-        plan_key = self._resolve_effective_plan_for_group(event.group_id)
-        language_limit = language_limit_for(plan_key)
-
         current_langs = self._dedup_language_codes(self._repo.fetch_group_languages(event.group_id))
         if op in {"add", "add_and_remove"} or replacing:
             # 置き換えは今の言語を残さないので、上限は追加リストだけで見る
@@ -943,9 +1111,15 @@ class MessageHandler:
                         "remove": remove_codes,
                     },
                 )
-                msg = self._build_language_limit_message(
-                    decision.instruction_language,
-                    max_languages=language_limit,
+                msg = self._localize_fixed_reply(
+                    self._language_limit_reply(
+                        family,
+                        language_limit,
+                        current=limit_current,
+                        wanted=add_langs,
+                    ),
+                    family=family,
+                    instruction_lang=decision.instruction_language,
                     command_trace=command_trace,
                 )
                 self._reply_text(event, msg, command_trace=command_trace)
@@ -985,22 +1159,63 @@ class MessageHandler:
         # 言語変更後は翻訳再開。置き換えも翻訳を止めない
         self._repo.set_translation_enabled(event.group_id, True)
 
-        if replacing:
-            # リセット案内ではなく、入った言語を並べた通常の確認文
-            ack = self._safe_translate_for_instruction(
-                LanguageSettingsService._build_completion_message(normalized_add),
-                decision.instruction_language,
+        # 結果の言語を固定文で言う。「言語設定を更新しました」だけでは何になったか分からない
+        ack = completion_prompt(self._resulting_language_pairs(event.group_id), family=family)
+        notice = unsupported_prompt(parsed.unsupported, family)
+        if notice:
+            ack = f"{ack}\n{notice}"
+        self._reply_text(
+            event,
+            self._localize_fixed_reply(
+                ack,
+                family=family,
+                instruction_lang=decision.instruction_language,
                 command_trace=command_trace,
-            )
-        else:
-            # 静的訳が無い指示言語は ack が空。英語原文を既存の翻訳経路で訳す
-            ack = (decision.ack_text or "").strip() or self._safe_translate_for_instruction(
-                LANGUAGE_SETTINGS_ACK_BASE,
-                decision.instruction_language,
-                command_trace=command_trace,
-            )
-        self._reply_text(event, ack, command_trace=command_trace)
+            ),
+            command_trace=command_trace,
+        )
         return True
+
+    def _localize_fixed_reply(
+        self,
+        text: str,
+        *,
+        family: str,
+        instruction_lang: str,
+        command_trace: _CommandTrace | None = None,
+    ) -> str:
+        """ja/zh/ko/th は固定文のまま返す。英語原文で指示言語が英語でないときだけ翻訳する。"""
+
+        if family != "en":
+            return text
+        lowered = (instruction_lang or "").strip().lower()
+        if not lowered or lowered.startswith("en"):
+            return text
+        return self._safe_translate_for_instruction(
+            text,
+            instruction_lang,
+            command_trace=command_trace,
+        )
+
+    def _language_limit_reply(
+        self,
+        family: str,
+        limit: int,
+        *,
+        current: Sequence[str],
+        wanted: Sequence[Tuple[str, str]],
+    ) -> str:
+        wanted_labels = [language_label(code, family, stored=name) for code, name in wanted if code]
+        if not current:
+            return selection_prompt(wanted_labels, family=family, limit=limit)
+        current_labels = [language_label(code, family) for code in current if code]
+        return swap_prompt(current_labels, wanted_labels, family=family, limit=limit)
+
+    def _resulting_language_pairs(self, group_id: str) -> List[Tuple[str, str]]:
+        records = self._group_language_records(group_id)
+        if records:
+            return [(code, name) for code, name in records if code]
+        return [(code, "") for code in self._dedup_language_codes(self._repo.fetch_group_languages(group_id))]
 
     def _handle_show_languages(
         self,
