@@ -245,6 +245,10 @@ def _read_language_settings(
         if add_codes or remove_codes or explicit_reset >= min_confidence:
             return None, "mixed_signals"
         return _settings_decision("show", [], [], instruction), "ok"
+    # 「設定をリセットして英語だけにして」のように、明示リセットと追加・削除が同時なら
+    # 片方だけ適用せず Gemini に戻す
+    if operation in {"add", "remove", "add_and_remove"} and explicit_reset >= min_confidence:
+        return None, "reset_conflict"
     if operation == "add" and remove_codes:
         return None, "mixed_signals"
     if operation == "remove" and add_codes:
@@ -258,6 +262,9 @@ def _read_language_settings(
         # add_and_remove は置換なので、追加と削除の両方が閾値を超えないと確定できない。
         # 「英語だけにして」で remove が空のまま add だけ成功すると、残した言語を消したと誤って報告する。
         if not add_codes or not remove_codes:
+            return None, "mixed_signals"
+        # 同じコードが両方にあると、ハンドラーは消した直後に入れ直して成功してしまう
+        if set(add_codes) & set(remove_codes):
             return None, "mixed_signals"
         chosen_add, chosen_remove = add_codes, remove_codes
     if not chosen_add and not chosen_remove:

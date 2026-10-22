@@ -38,3 +38,6 @@
 [x] add_* / remove_* / want_* のいずれかが不確実帯 [0.5, 閾値) なら、他言語が確定していても部分採用せず Gemini に戻す。0.5 未満は否定として落とす（デプロイはしない）
 [x] Jev の信頼度と Noul が有限な [0, 1] でないとき（NaN / inf / 範囲外 / 非数値）は回答全体を無効にし、言語を消さず Gemini に戻す（デプロイはしない）
 [x] add_and_remove で追加か削除のどちらかが閾値後に空なら部分適用せず mixed_signals として Gemini に戻す（デプロイはしない）
+[x] explicit_reset が閾値以上なのに operation が add / remove / add_and_remove のときは reset_conflict で Gemini に戻す（デプロイはしない）
+[x] add_and_remove で追加と削除に同じコードがあるときは mixed_signals で Gemini に戻す（デプロイはしない）
+[x] reset_all に追加言語があるときは全消去せずその言語だけに置き換え、翻訳は続ける。Gemini には「Xだけにして」を置換として書く（デプロイはしない）

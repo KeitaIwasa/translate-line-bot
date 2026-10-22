@@ -27,11 +27,12 @@ Return:
 - languages_to_add / languages_to_remove: languages named in the message. Prefer ISO 639-1 codes. Leave both empty for "show" and "reset_all".
 - instruction_language: BCP-47 or ISO 639-1 of the user message
 - ack_text: a short confirmation in the same language as the user message, without Markdown and without the bot mention. For "show", leave ack_text empty.
-- explicit_reset: true only when the user explicitly asks to clear, reset, delete, or set the translation languages again from scratch. This is language-neutral. False when they ask which languages are currently set. False when they only add or remove named languages. False for a message such as "言語を追加したい", which does not ask to reset: use operation "show" so the bot lists the current languages or asks which language to add.
+- explicit_reset: true only when the user explicitly asks to clear, reset, delete, or set the translation languages again from scratch. This is language-neutral. False when they ask which languages are currently set. False when they only add or remove named languages. False for 「Xだけにして」 or "only X", which keeps X and is not a reset. False for a message such as "言語を追加したい", which does not ask to reset: use operation "show" so the bot lists the current languages or asks which language to add.
 
 If the user is only asking which translation languages are currently set, use operation "show" and explicit_reset false.
 Use operation "reset_all" only together with explicit_reset true.
 Do not use "reset_all" for a question about the current languages.
+「Xだけにして」 and "only X" mean replace: add X and remove the other current languages. Use operation "add_and_remove", not "reset_all". Put X in languages_to_add and the other current languages in languages_to_remove. explicit_reset stays false.
 """.strip()
 
 # グループで使えなかったときの定型文。英語をベース原文にし、英語以外のときだけ翻訳させる

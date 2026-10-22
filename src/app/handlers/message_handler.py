@@ -889,8 +889,12 @@ class MessageHandler:
         command_trace: _CommandTrace | None = None,
     ) -> bool:
         op = decision.operation or "reset_all"
+        add_langs = [(lang.code, lang.name) for lang in decision.languages_to_add]
+        remove_codes = [lang.code for lang in decision.languages_to_remove]
+        # 「英語だけにして」が reset_all と追加リストで来たら、全消去ではなくその言語への置き換え
+        replacing = op == "reset_all" and any((code or "").strip() for code, _name in add_langs)
         # モデルの explicit_reset か、英語・日本語の明示表現があるときだけ全消去する
-        if op == "reset_all" and not allows_language_reset(
+        if op == "reset_all" and not replacing and not allows_language_reset(
             explicit_reset=decision.explicit_reset,
             text=command_text or "",
         ):
@@ -910,17 +914,18 @@ class MessageHandler:
                 command_text,
                 command_trace=command_trace,
             )
-        add_langs = [(lang.code, lang.name) for lang in decision.languages_to_add]
-        remove_codes = [lang.code for lang in decision.languages_to_remove]
         plan_key = self._resolve_effective_plan_for_group(event.group_id)
         language_limit = language_limit_for(plan_key)
 
         current_langs = self._dedup_language_codes(self._repo.fetch_group_languages(event.group_id))
-        if op in {"add", "add_and_remove"}:
+        if op in {"add", "add_and_remove"} or replacing:
+            # 置き換えは今の言語を残さないので、上限は追加リストだけで見る
+            limit_current = [] if replacing else current_langs
+            limit_remove = [] if replacing else remove_codes
             if self._would_exceed_language_limit(
-                current_langs,
+                limit_current,
                 add_langs,
-                remove_codes,
+                limit_remove,
                 max_languages=language_limit,
             ):
                 logger.info(
@@ -940,7 +945,7 @@ class MessageHandler:
                 self._reply_text(event, msg, command_trace=command_trace)
                 return True
 
-        if op == "reset_all":
+        if op == "reset_all" and not replacing:
             self._repo.reset_group_language_settings(event.group_id)
             # 言語設定モード中は翻訳停止
             self._repo.set_translation_enabled(event.group_id, False)
@@ -953,7 +958,14 @@ class MessageHandler:
             self._reply_text(event, ack, command_trace=command_trace)
             return True
 
-        if op == "add_and_remove":
+        normalized_add: List[Tuple[str, str]] = []
+        if replacing:
+            # いったん空にしてから、追加リストの言語だけを入れる
+            self._repo.reset_group_language_settings(event.group_id)
+            normalized_add = self._normalize_new_languages(add_langs, set())
+            if normalized_add:
+                self._repo.add_group_languages(event.group_id, normalized_add)
+        elif op == "add_and_remove":
             remove_set = {code.lower() for code in remove_codes if code}
             after_remove = [lang for lang in current_langs if lang not in remove_set]
             normalized_add = self._normalize_new_languages(add_langs, set(after_remove))
@@ -969,15 +981,23 @@ class MessageHandler:
             if remove_codes:
                 self._repo.remove_group_languages(event.group_id, remove_codes)
 
-        # 言語変更後は翻訳再開
+        # 言語変更後は翻訳再開。置き換えも翻訳を止めない
         self._repo.set_translation_enabled(event.group_id, True)
 
-        # 静的訳が無い指示言語は ack が空。英語原文を既存の翻訳経路で訳す
-        ack = (decision.ack_text or "").strip() or self._safe_translate_for_instruction(
-            LANGUAGE_SETTINGS_ACK_BASE,
-            decision.instruction_language,
-            command_trace=command_trace,
-        )
+        if replacing:
+            # リセット案内ではなく、入った言語を並べた通常の確認文
+            ack = self._safe_translate_for_instruction(
+                LanguageSettingsService._build_completion_message(normalized_add),
+                decision.instruction_language,
+                command_trace=command_trace,
+            )
+        else:
+            # 静的訳が無い指示言語は ack が空。英語原文を既存の翻訳経路で訳す
+            ack = (decision.ack_text or "").strip() or self._safe_translate_for_instruction(
+                LANGUAGE_SETTINGS_ACK_BASE,
+                decision.instruction_language,
+                command_trace=command_trace,
+            )
         self._reply_text(event, ack, command_trace=command_trace)
         return True
 

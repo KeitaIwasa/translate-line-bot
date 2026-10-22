@@ -10,7 +10,12 @@ from src.domain.services.language_detection_service import LanguageDetectionServ
 from src.infra.gemini_mention_followup import GeminiMentionFollowUp
 from src.infra.jev_command_router import JevFirstPassCommandRouter
 from src.infra.jev_language_followup import JevLanguageMentionFollowUp
-from src.infra.jev_language_reader import LANGUAGE_CATALOG, LANGUAGE_SETTINGS_ACK_BASE, confirmation_ack
+from src.infra.jev_language_reader import (
+    LANGUAGE_CATALOG,
+    LANGUAGE_SETTINGS_ACK_BASE,
+    confirmation_ack,
+    read_language_settings,
+)
 from src.infra.language_pref_client import LanguagePreferenceAdapter
 
 ROUTER_INPUT = json.dumps(
@@ -162,12 +167,12 @@ def test_language_settings_are_read_by_jev_without_gemini():
 
 
 def test_add_and_remove_keeps_both_lists_in_stable_order():
-    jev = JevSession(operation="add_and_remove", yes_codes={"en", "ja"}, remove_codes={"ja"})
+    jev = JevSession(operation="add_and_remove", yes_codes={"en", "fr"}, remove_codes={"ja"})
     follow_up, gemini = _follow_up(jev)
 
     decision = follow_up.complete("language_settings", ROUTER_INPUT)
 
-    assert [item.code for item in decision.languages_to_add] == ["ja", "en"]
+    assert [item.code for item in decision.languages_to_add] == ["en", "fr"]
     assert [item.code for item in decision.languages_to_remove] == ["ja"]
     assert decision.ack_text == "言語設定を更新しました。"
     assert gemini._session.calls == []
@@ -193,6 +198,85 @@ def test_add_and_remove_with_low_remove_scores_falls_back_to_gemini():
     assert decision.languages_to_add == [LanguageChoice(code="fr", name="French")]
     assert decision.languages_to_remove == []
     assert len(jev.calls) == 1
+    assert len(gemini._session.calls) == 1
+
+
+@pytest.mark.parametrize("operation", ["add", "remove", "add_and_remove"])
+def test_explicit_reset_conflicts_with_add_or_remove(operation):
+    """明示リセットが add / remove / add_and_remove と同時なら確定しない。"""
+
+    payload = json.dumps(
+        {"user_message": "設定をリセットして英語だけにして", "current_languages": ["ja"]},
+        ensure_ascii=False,
+    )
+    jev = JevSession(operation=operation, yes_codes={"en"}, remove_codes={"ja"}, noul_overrides={"explicit_reset": 0.99})
+    bare, reason = read_language_settings(
+        session=jev,
+        api_key_provider=lambda: "ts-key",
+        model="jev-latest",
+        timeout_seconds=1.5,
+        min_confidence=0.8,
+        router_input=payload,
+    )
+    assert bare is None
+    assert reason == "reset_conflict"
+
+
+def test_explicit_reset_on_add_falls_back_to_gemini():
+    """明示リセットと追加が同時なら、英語だけ足して成功にせず Gemini に戻す。"""
+
+    payload = json.dumps(
+        {"user_message": "設定をリセットして英語だけにして", "current_languages": ["ja"]},
+        ensure_ascii=False,
+    )
+    jev = JevSession(operation="add", yes_codes={"en"}, noul_overrides={"explicit_reset": 0.99})
+    bare, reason = read_language_settings(
+        session=jev,
+        api_key_provider=lambda: "ts-key",
+        model="jev-latest",
+        timeout_seconds=1.5,
+        min_confidence=0.8,
+        router_input=payload,
+    )
+    assert bare is None
+    assert reason == "reset_conflict"
+
+    follow_up, gemini = _follow_up(
+        JevSession(operation="add", yes_codes={"en"}, noul_overrides={"explicit_reset": 0.99})
+    )
+    decision = follow_up.complete("language_settings", payload)
+
+    assert decision.ack_text == "フランス語を追加します"
+    assert decision.languages_to_add == [LanguageChoice(code="fr", name="French")]
+    assert len(gemini._session.calls) == 1
+
+
+def test_add_and_remove_with_shared_code_falls_back_to_gemini():
+    """追加と削除に同じコードがあるときは、消して入れ直さず Gemini に戻す。"""
+
+    payload = json.dumps(
+        {"user_message": "英語を入れ直して", "current_languages": ["en", "ja"]},
+        ensure_ascii=False,
+    )
+    jev = JevSession(operation="add_and_remove", yes_codes={"en"}, remove_codes={"en", "ja"})
+    bare, reason = read_language_settings(
+        session=jev,
+        api_key_provider=lambda: "ts-key",
+        model="jev-latest",
+        timeout_seconds=1.5,
+        min_confidence=0.8,
+        router_input=payload,
+    )
+    assert bare is None
+    assert reason == "mixed_signals"
+
+    follow_up, gemini = _follow_up(
+        JevSession(operation="add_and_remove", yes_codes={"en"}, remove_codes={"en", "ja"})
+    )
+    decision = follow_up.complete("language_settings", payload)
+
+    assert decision.ack_text == "フランス語を追加します"
+    assert decision.operation == "add"
     assert len(gemini._session.calls) == 1
 
 
