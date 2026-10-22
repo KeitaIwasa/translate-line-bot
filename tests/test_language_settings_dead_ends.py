@@ -5,6 +5,7 @@ import pytest
 from src.app.handlers.message_handler import MessageHandler
 from src.domain import models
 from src.domain.services.language_detection_service import LanguageDetectionService
+from src.domain.services.explicit_language_reset import is_explicit_language_reset
 from src.domain.services.language_mention import read_mention
 from src.infra.jev_language_reader import LANGUAGE_CATALOG
 from src.domain.services.language_names import JAPANESE_LANGUAGE_NAMES
@@ -332,6 +333,54 @@ def test_catalog_names_are_read_without_separators(code, english):
     codes = [item[0] for item in glued.languages]
     assert code in codes
     assert "en" in codes
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "すべての言語を削除",
+        "全ての言語を消して",
+        "全部の言語をリセット",
+        "remove all languages",
+        "delete all the languages",
+        "clear all languages",
+    ],
+)
+def test_delete_all_languages_is_a_reset_not_the_picker(text):
+    parsed = read_mention(text)
+    assert parsed.kind != "translate_all"
+    assert is_explicit_language_reset(text)
+
+
+def test_translate_all_without_a_reset_word_still_asks_which_languages():
+    assert read_mention("すべての言語を翻訳して").kind == "translate_all"
+    assert read_mention("all languages").kind == "translate_all"
+    assert is_explicit_language_reset("すべての言語を翻訳して") is False
+
+
+def test_delete_all_languages_resets_instead_of_showing_the_picker():
+    repo = _Repo(["en", "ja", "ko"])
+    decision = models.CommandDecision(
+        action="language_settings",
+        operation="reset_all",
+        instruction_language="ja",
+        explicit_reset=False,
+    )
+    handler = _handler(repo, _Router(decision))
+
+    class _SilentTranslation:
+        def translate(self, *_args, **_kwargs):
+            return []
+
+    handler._translation = _SilentTranslation()
+    text = "すべての言語を削除"
+
+    handler._handle_language_settings(_event(text), decision, text)
+
+    assert repo.reset_called is True
+    assert repo.languages == []
+    assert "どれにする" not in (handler._line.last_text or "")
+    assert "最大3つまで" not in (handler._line.last_text or "")
 
 
 def test_odd_inputs_do_not_look_like_a_language_change():

@@ -959,7 +959,12 @@ class MessageHandler:
         if parsed.kind == "unsupported":
             self._reply_text(
                 event,
-                unsupported_prompt(parsed.unsupported, family),
+                self._localize_fixed_reply(
+                    unsupported_prompt(parsed.unsupported, family),
+                    family=family,
+                    instruction_lang=instruction_lang,
+                    command_trace=command_trace,
+                ),
                 command_trace=command_trace,
             )
             return True
@@ -1036,12 +1041,26 @@ class MessageHandler:
             notice = unsupported_prompt(parsed.unsupported, family)
             if notice:
                 message = f"{notice}\n{message}"
-            self._reply_text(event, message, command_trace=command_trace)
+            self._reply_text(
+                event,
+                self._localize_fixed_reply(
+                    message,
+                    family=family,
+                    instruction_lang=decision.instruction_language,
+                    command_trace=command_trace,
+                ),
+                command_trace=command_trace,
+            )
             return True
         if parsed.kind == "unsupported":
             self._reply_text(
                 event,
-                unsupported_prompt(parsed.unsupported, family),
+                self._localize_fixed_reply(
+                    unsupported_prompt(parsed.unsupported, family),
+                    family=family,
+                    instruction_lang=decision.instruction_language,
+                    command_trace=command_trace,
+                ),
                 command_trace=command_trace,
             )
             return True
@@ -1092,11 +1111,16 @@ class MessageHandler:
                         "remove": remove_codes,
                     },
                 )
-                msg = self._language_limit_reply(
-                    family,
-                    language_limit,
-                    current=limit_current,
-                    wanted=add_langs,
+                msg = self._localize_fixed_reply(
+                    self._language_limit_reply(
+                        family,
+                        language_limit,
+                        current=limit_current,
+                        wanted=add_langs,
+                    ),
+                    family=family,
+                    instruction_lang=decision.instruction_language,
+                    command_trace=command_trace,
                 )
                 self._reply_text(event, msg, command_trace=command_trace)
                 return True
@@ -1140,8 +1164,38 @@ class MessageHandler:
         notice = unsupported_prompt(parsed.unsupported, family)
         if notice:
             ack = f"{ack}\n{notice}"
-        self._reply_text(event, ack, command_trace=command_trace)
+        self._reply_text(
+            event,
+            self._localize_fixed_reply(
+                ack,
+                family=family,
+                instruction_lang=decision.instruction_language,
+                command_trace=command_trace,
+            ),
+            command_trace=command_trace,
+        )
         return True
+
+    def _localize_fixed_reply(
+        self,
+        text: str,
+        *,
+        family: str,
+        instruction_lang: str,
+        command_trace: _CommandTrace | None = None,
+    ) -> str:
+        """ja/zh/ko/th は固定文のまま返す。英語原文で指示言語が英語でないときだけ翻訳する。"""
+
+        if family != "en":
+            return text
+        lowered = (instruction_lang or "").strip().lower()
+        if not lowered or lowered.startswith("en"):
+            return text
+        return self._safe_translate_for_instruction(
+            text,
+            instruction_lang,
+            command_trace=command_trace,
+        )
 
     def _language_limit_reply(
         self,

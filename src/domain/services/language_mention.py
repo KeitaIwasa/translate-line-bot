@@ -234,7 +234,7 @@ def is_howto_loop(text: str) -> bool:
 
 
 def ui_family(code: str) -> str:
-    """固定文の言語。無いときは英語の原文を使う。"""
+    """固定文の言語。ja/zh/ko/th 以外は英語の原文を返し、翻訳は呼び出し側が行う。"""
 
     lowered = (code or "").strip().lower().replace("_", "-")
     for prefix in ("ja", "zh", "ko", "th"):
@@ -274,12 +274,12 @@ def read_mention(text: str) -> MentionRead:
     catalog = _CATALOG_QUESTION.search(raw) is not None
     translate_all = _TRANSLATE_ALL.search(raw) is not None
     translate_verb = _TRANSLATE_VERB.search(raw) is not None
+    # 「すべての言語を削除」は全言語パターンに当たるが、消去なので選択にはしない
+    resetting_all = translate_all and is_explicit_language_reset(raw)
     # 「知ってる言語すべて」は一覧。「全言語を翻訳して」は上限超えの選択
-    if catalog and not (translate_all and translate_verb):
+    if not resetting_all and catalog and not (translate_all and translate_verb):
         return MentionRead(kind="catalog")
-    if translate_all and translate_verb:
-        return MentionRead(kind="translate_all")
-    if translate_all and not is_explicit_language_reset(raw):
+    if translate_all and not resetting_all:
         return MentionRead(kind="translate_all")
 
     normalized = _normalize(raw)

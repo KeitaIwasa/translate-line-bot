@@ -513,9 +513,112 @@ def test_language_settings_ack_without_static_text_uses_translation_path():
     )
 
     assert handler._handle_language_settings(event, decision, event.text) is True
-    assert translation.texts == []
-    assert line.last_text == "Japanese and French have been set as the translation languages."
+    assert translation.texts
+    assert translation.texts[0][1] == ["fr"]
+    assert "Japanese and French have been set as the translation languages." in translation.texts[0][0]
+    assert line.last_text == "Paramètres de langue mis à jour."
     assert "fr" in repo.languages
+
+
+def test_spanish_instruction_translates_selection_limit_and_unsupported_replies():
+    """固定文が無い言語は、英語の原文を指示言語へ翻訳する。"""
+
+    class RecordingTranslation(DummyTranslationService):
+        def __init__(self):
+            self.texts = []
+
+        def translate(
+            self,
+            sender_name,
+            message_text,
+            timestamp,
+            context_messages,
+            candidate_languages,
+            allow_same_language=False,
+        ):
+            self.texts.append((message_text, list(candidate_languages)))
+            return [models.TranslationResult(lang=candidate_languages[0], text=f"ES:{message_text}")]
+
+    line = RecordingLineClient()
+    repo = RecordingRepo(initial=["en", "ja", "ko", "th", "fr"])
+    translation = RecordingTranslation()
+    handler = MessageHandler(
+        line_client=line,
+        translation_service=translation,
+        interface_translation=DummyInterfaceTranslation(),
+        language_detector=LanguageDetectionService(),
+        language_pref_service=DummyLangPrefService(models.LanguagePreference(supported=[])),
+        command_router=DummyCommandRouter(),
+        repo=repo,
+        max_context_messages=1,
+        max_group_languages=5,
+        translation_retry=1,
+        bot_mention_name="bot",
+    )
+
+    selection = models.CommandDecision(
+        action="language_settings",
+        operation="reset_all",
+        instruction_language="es",
+        explicit_reset=True,
+    )
+    assert handler._handle_language_settings(_settings_event("all languages"), selection, "all languages") is True
+    assert repo.reset_called is False
+    assert translation.texts[-1][1] == ["es"]
+    assert "Which ones should I use?" in translation.texts[-1][0]
+    assert line.last_text.startswith("ES:")
+
+    limit = models.CommandDecision(
+        action="language_settings",
+        operation="add",
+        languages_to_add=[models.LanguageChoice(code="vi", name="Vietnamese")],
+        instruction_language="es",
+    )
+    assert handler._handle_language_settings(_settings_event("add Vietnamese"), limit, "add Vietnamese") is True
+    assert repo.languages == ["en", "ja", "ko", "th", "fr"]
+    assert "swap out" in translation.texts[-1][0]
+    assert translation.texts[-1][1] == ["es"]
+    assert line.last_text.startswith("ES:")
+
+    unsupported = models.CommandDecision(
+        action="language_settings",
+        operation="add",
+        instruction_language="es",
+    )
+    assert handler._handle_language_settings(_settings_event("エルヴ語"), unsupported, "エルヴ語") is True
+    assert "isn't supported" in translation.texts[-1][0]
+    assert translation.texts[-1][1] == ["es"]
+    assert line.last_text.startswith("ES:")
+
+
+def test_english_instruction_keeps_the_fixed_reply_without_translation():
+    class RecordingTranslation(DummyTranslationService):
+        def translate(self, *args, **kwargs):
+            raise AssertionError("English fixed text should not be translated")
+
+    line = RecordingLineClient()
+    repo = RecordingRepo(initial=["ja"])
+    handler = MessageHandler(
+        line_client=line,
+        translation_service=RecordingTranslation(),
+        interface_translation=DummyInterfaceTranslation(),
+        language_detector=LanguageDetectionService(),
+        language_pref_service=DummyLangPrefService(models.LanguagePreference(supported=[])),
+        command_router=DummyCommandRouter(),
+        repo=repo,
+        max_context_messages=1,
+        max_group_languages=5,
+        translation_retry=1,
+        bot_mention_name="bot",
+    )
+    decision = models.CommandDecision(
+        action="language_settings",
+        operation="add",
+        languages_to_add=[models.LanguageChoice(code="fr", name="French")],
+        instruction_language="en",
+    )
+    assert handler._handle_language_settings(_settings_event("add French"), decision, "add French") is True
+    assert line.last_text == "Japanese and French have been set as the translation languages."
 
 
 def _settings_event(text: str) -> models.MessageEvent:

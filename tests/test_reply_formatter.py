@@ -38,6 +38,21 @@ def test_strip_spurious_boundary_cjk_drops_yao_line_and_keeps_translation():
     assert "语言设置" in strip_spurious_boundary_cjk("言語設定", "语言设置")
 
 
+def test_repeated_kanji_translation_is_kept_when_it_is_the_whole_reply():
+    """谢谢・哈哈・嗯嗯は訳そのものなので、空にしない。"""
+
+    assert strip_spurious_boundary_cjk("Thank you", "谢谢") == "谢谢"
+    assert strip_spurious_boundary_cjk("That is funny", "哈哈") == "哈哈"
+    assert strip_spurious_boundary_cjk("Hmm", "嗯嗯") == "嗯嗯"
+
+
+def test_repeated_kanji_is_noise_only_with_an_extra_signal():
+    """別の訳の次の行、またはラテン文字が主の訳の末尾だけを落とす。"""
+
+    assert strip_spurious_boundary_cjk("Thank you", "Thanks\n谢谢") == "Thanks"
+    assert strip_spurious_boundary_cjk("Thank you", "Thanks谢谢") == "Thanks"
+
+
 def test_build_translation_reply_drops_trailing_yao_line():
     reply = build_translation_reply(
         "言語設定",
