@@ -8,6 +8,7 @@ from ..ports import LanguagePreferencePort, MessageRepositoryPort
 from ...infra.jev_language_reader import LANGUAGE_NAMES
 from .interface_translation_service import InterfaceTranslationService
 from .language_mention import (
+    exceeds_language_limit,
     need_both_languages_prompt,
     selection_prompt,
     setup_confirmation,
@@ -530,7 +531,7 @@ def normalize_catalog_selection(
         return CatalogSelection(languages=(), error="empty", unsupported=())
     if len(selected) < 2:
         return CatalogSelection(languages=selected, error="need_pair", unsupported=())
-    if len(selected) > resolved_limit:
+    if exceeds_language_limit([code for code, _name in selected], limit=resolved_limit):
         return CatalogSelection(languages=selected, error="too_many", unsupported=())
     return CatalogSelection(languages=selected, error=None, unsupported=())
 

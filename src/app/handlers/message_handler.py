@@ -54,6 +54,7 @@ from ...domain.services.language_mention import (
     MentionRead,
     catalog_labels,
     catalog_prompt,
+    exceeds_language_limit,
     family_for,
     howto_prompt,
     is_howto_loop,
@@ -61,6 +62,8 @@ from ...domain.services.language_mention import (
     language_label,
     language_quick_replies,
     need_both_languages_prompt,
+    over_limit_notice,
+    project_language_codes,
     read_mention,
     selection_prompt,
     settings_help_prompt,
@@ -661,20 +664,27 @@ class MessageHandler:
         """はっきり読めた言語は、確認ボタンを挟まず保存して一度だけ伝える。"""
 
         limit = language_limit_for(self._resolve_effective_plan_for_group(event.group_id))
-        if parsed.kind == "translate_all" or (
-            parsed.kind == "languages" and parsed.mode != "add" and len(parsed.languages) > limit
-        ):
-            labels = (
-                catalog_labels(family)
-                if parsed.kind == "translate_all"
-                else [language_label(code, family, surface=surface) for code, surface in parsed.languages]
-            )
-            message = selection_prompt(labels, family=family, limit=limit)
+        if parsed.kind == "translate_all":
+            message = selection_prompt(catalog_labels(family), family=family, limit=limit)
             notice = unsupported_prompt(parsed.unsupported, family)
             if notice:
                 message = f"{notice}\n{message}"
             self._reply_with_language_menu(event, message, family)
             return True
+        if parsed.kind == "languages":
+            # 追加も置き換えも同じ上限。初回の add で4言語を保存して、あとから黙って落とさない
+            message = over_limit_notice(
+                family=family,
+                limit=limit,
+                requested=parsed.languages,
+                mode="add" if parsed.mode == "add" else "replace",
+            )
+            if message:
+                notice = unsupported_prompt(parsed.unsupported, family)
+                if notice:
+                    message = f"{notice}\n{message}"
+                self._reply_with_language_menu(event, message, family)
+                return True
         if parsed.kind == "unsupported" or (parsed.kind == "languages" and not parsed.languages):
             self._reply_text(event, unsupported_prompt(parsed.unsupported, family))
             return True
@@ -781,30 +791,16 @@ class MessageHandler:
         *,
         replacing: bool,
     ) -> List[str]:
-        def _norm(codes: Sequence[str]) -> List[str]:
-            seen: set[str] = set()
-            ordered: List[str] = []
-            for code in codes:
-                lowered = (code or "").lower()
-                if not lowered or lowered in seen:
-                    continue
-                seen.add(lowered)
-                ordered.append(lowered)
-            return ordered
-
-        current_codes = _norm(current)
-        add_codes = _norm([code for code, _name in add_langs])
-        remove_set = {(code or "").lower() for code in remove_codes if code}
+        add_codes = [code for code, _name in add_langs]
         if replacing:
-            return add_codes
+            return project_language_codes([], add_codes, mode="replace")
         if op == "add":
-            return _norm(current_codes + add_codes)
+            return project_language_codes(current, add_codes, mode="add")
         if op == "remove":
-            return [code for code in current_codes if code not in remove_set]
+            return project_language_codes(current, [], mode="add", remove=remove_codes)
         if op == "add_and_remove":
-            base = [code for code in current_codes if code not in remove_set]
-            return _norm(base + add_codes)
-        return current_codes
+            return project_language_codes(current, add_codes, mode="add", remove=remove_codes)
+        return project_language_codes(current, current, mode="replace")
 
     # --- command mode helpers ---
     def _extract_command_text(self, event: models.MessageEvent) -> Optional[str]:
@@ -1231,18 +1227,23 @@ class MessageHandler:
             return True
         plan_key = self._resolve_effective_plan_for_group(event.group_id)
         language_limit = language_limit_for(plan_key)
-        # 上限を超える依頼は、全消去にも置換にもしない
-        over_set = (
-            parsed.kind == "languages"
-            and parsed.mode != "add"
-            and len(parsed.languages) > language_limit
-        )
-        if parsed.kind == "translate_all" or over_set:
-            if parsed.kind == "translate_all":
-                labels = catalog_labels(family)
-            else:
-                labels = [language_label(code, family, surface=surface) for code, surface in parsed.languages]
-            message = selection_prompt(labels, family=family, limit=language_limit)
+        # 上限を超える依頼は、全消去にも置換にも追加にもしない
+        if parsed.kind == "translate_all":
+            message = selection_prompt(catalog_labels(family), family=family, limit=language_limit)
+        elif parsed.kind == "languages" and parsed.mode != "remove" and parsed.languages:
+            current_codes = []
+            if parsed.mode == "add":
+                current_codes = self._dedup_language_codes(self._repo.fetch_group_languages(event.group_id))
+            message = over_limit_notice(
+                family=family,
+                limit=language_limit,
+                current=current_codes,
+                requested=parsed.languages,
+                mode="add" if parsed.mode == "add" else "replace",
+            )
+        else:
+            message = None
+        if message:
             notice = unsupported_prompt(parsed.unsupported, family)
             if notice:
                 message = f"{notice}\n{message}"
@@ -1461,6 +1462,15 @@ class MessageHandler:
         current: Sequence[str],
         wanted: Sequence[Tuple[str, str]],
     ) -> str:
+        notice = over_limit_notice(
+            family=family,
+            limit=limit,
+            current=current,
+            requested=wanted,
+            mode="add" if current else "replace",
+        )
+        if notice:
+            return notice
         wanted_labels = [language_label(code, family, stored=name) for code, name in wanted if code]
         if not current:
             return selection_prompt(wanted_labels, family=family, limit=limit)
@@ -2731,22 +2741,13 @@ class MessageHandler:
         max_languages: Optional[int] = None,
     ) -> bool:
         limit = max_languages if max_languages is not None else self._max_group_languages
-        remove_set = {code.lower() for code in remove_codes if code}
-        remaining = [code.lower() for code in current_langs if code and code.lower() not in remove_set]
-
-        to_add: list[str] = []
-        seen = set(remaining)
-        for code, _name in add_langs:
-            if not code:
-                continue
-            lowered = code.lower()
-            if lowered in seen:
-                continue
-            seen.add(lowered)
-            to_add.append(lowered)
-
-        final_count = len(remaining) + len(to_add)
-        return final_count > limit
+        projected = project_language_codes(
+            current_langs,
+            [code for code, _name in add_langs],
+            mode="add",
+            remove=remove_codes,
+        )
+        return exceeds_language_limit(projected, limit=limit)
 
     def _limit_language_choices(self, languages: Sequence[models.LanguageChoice]) -> Tuple[List[models.LanguageChoice], List[models.LanguageChoice]]:
         limited: List[models.LanguageChoice] = []

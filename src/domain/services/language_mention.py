@@ -585,6 +585,43 @@ def catalog_labels(family: str) -> list[str]:
     return [language_label(code, family) for code, _name in LANGUAGE_CATALOG]
 
 
+def unique_language_codes(codes: Sequence[str]) -> list[str]:
+    """空と重複を除いた言語コード。順序は最初に出た順。"""
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for code in codes:
+        lowered = (code or "").strip().lower()
+        if not lowered or lowered in seen:
+            continue
+        seen.add(lowered)
+        ordered.append(lowered)
+    return ordered
+
+
+def project_language_codes(
+    current: Sequence[str],
+    incoming: Sequence[str],
+    *,
+    mode: str,
+    remove: Sequence[str] = (),
+) -> list[str]:
+    """保存後の言語コード。replace は incoming だけ、add は現在から remove を引いて足す。"""
+
+    if mode in {"set", "replace"}:
+        return unique_language_codes(incoming)
+    removed = set(unique_language_codes(remove))
+    kept = [code for code in unique_language_codes(current) if code not in removed]
+    return unique_language_codes([*kept, *incoming])
+
+
+def exceeds_language_limit(codes: Sequence[str], *, limit: int) -> bool:
+    """プラン上限を超えるか。1未満の上限は1として数える。"""
+
+    resolved = limit if isinstance(limit, int) and limit >= 1 else 1
+    return len(unique_language_codes(codes)) > resolved
+
+
 def selection_prompt(labels: Sequence[str], *, family: str, limit: int) -> str:
     """上限を超えたとき。設定は変えず、どれにするか聞く。"""
 
@@ -652,6 +689,35 @@ def swap_prompt(
     if wanted_labels:
         lines.append(f"You asked to add: {_english_join(wanted_labels)}.")
     return "\n".join(lines)
+
+
+def over_limit_notice(
+    *,
+    family: str,
+    limit: int,
+    requested: Sequence[tuple[str, str]],
+    current: Sequence[str] = (),
+    mode: str = "replace",
+    remove: Sequence[str] = (),
+) -> str | None:
+    """上限を超える書き込みなら案内を返す。超えなければ None。保存はしない。
+
+    初回の列挙も追加も同じ関数で見る。今の言語がある追加だけ、外す言語を聞く。
+    """
+
+    incoming = [(code or "").strip().lower() for code, _name in requested if (code or "").strip()]
+    projected = project_language_codes(current, incoming, mode=mode, remove=remove)
+    if not exceeds_language_limit(projected, limit=limit):
+        return None
+    wanted = [
+        language_label(code, family, surface=surface)
+        for code, surface in requested
+        if (code or "").strip()
+    ]
+    if mode == "add" and unique_language_codes(current):
+        current_labels = [language_label(code, family) for code in unique_language_codes(current)]
+        return swap_prompt(current_labels, wanted, family=family, limit=limit)
+    return selection_prompt(wanted, family=family, limit=limit)
 
 
 def unsupported_prompt(names: Sequence[str], family: str) -> str:

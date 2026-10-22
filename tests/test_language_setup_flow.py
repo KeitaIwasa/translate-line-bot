@@ -260,6 +260,35 @@ def test_quick_reply_items_fit_line_limits():
     assert language_quick_replies("en", "https://example.com/" + ("a" * 1200))[0]["action"]["type"] == "postback"
 
 
+def test_plan_limit_rejects_add_on_first_setup_existing_group_and_web():
+    repo = _Repo()
+    line = _Line()
+    handler = _handler(repo, line)
+
+    assert handler._attempt_language_enrollment(_event("add English Japanese Chinese Korean")) is True
+
+    reply = line.last_text or ""
+    assert "up to 3" in reply
+    assert "English" in reply
+    assert "Korean" in reply
+    assert repo.languages == []
+    assert repo.completed is None
+
+    repo.languages = ["en", "ja", "zh"]
+    assert handler._handle_command(_event("add Korean"), "add Korean") is True
+    assert repo.languages == ["en", "ja", "zh"]
+    again = line.last_text or ""
+    assert "up to 3" in again
+    assert "swap out" in again
+
+    page = _PageRepo([("en", "English")])
+    response = _post(page, _token(), ["ja", "en", "zh", "ko"])
+    assert response["statusCode"] == 400
+    assert "up to 3" in response["body"]
+    assert page.replaced == []
+    assert page.records == [("en", "English")]
+
+
 def test_enrollment_saves_a_pair_once_and_includes_a_fresh_link():
     repo = _Repo()
     line = _Line()

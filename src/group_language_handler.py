@@ -120,11 +120,10 @@ def handle_group_language_request(
     )
     current_codes = {(code or "").lower() for code, _name in current if code}
     new_codes = {code for code, _name in languages}
-    if current_codes == new_codes:
-        # 言語が同じでも、開いているチャット確認は閉じる。古いボタンで上書きさせない
-        sealer = getattr(repo, "seal_language_prompt", None)
-        if sealer:
-            sealer(group_id)
+    changed = current_codes != new_codes
+    # 同じ選択でも、確認を閉じて翻訳を戻す。変更ありと同じ確定処理を使う
+    _commit_web_languages(repo, group_id, languages, replace=changed)
+    if not changed:
         return _html_response(
             200,
             render_group_language_page(
@@ -138,7 +137,6 @@ def handle_group_language_request(
             ),
         )
 
-    repo.replace_group_languages(group_id, languages)
     saved = _current_records(repo, group_id) or list(languages)
     _push_update(line, group_id, saved, translate=translator)
     # ui を指定していないときは、保存後のグループ言語で表示を決める
@@ -236,6 +234,21 @@ def _options(current: Sequence[tuple[str, str]], family: str) -> list[tuple[str,
         search = " ".join((code, label, en, ja)).casefold()
         options.append((code, label, search))
     return options
+
+
+def _commit_web_languages(repo, group_id: str, languages, *, replace: bool) -> None:
+    """ウェブ保存の確定。変更の有無で翻訳オンと確認のクローズが分かれないようにする。"""
+
+    finalizer = getattr(repo, "finalize_web_language_save", None)
+    if finalizer:
+        finalizer(group_id, languages if replace else None)
+        return
+    if replace:
+        repo.replace_group_languages(group_id, languages)
+        return
+    sealer = getattr(repo, "seal_language_prompt", None)
+    if sealer:
+        sealer(group_id)
 
 
 def _push_update(line, group_id: str, languages: Sequence[tuple[str, str]], translate=None) -> None:

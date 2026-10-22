@@ -369,3 +369,23 @@ def test_page_save_and_unchanged_post_make_old_ok_button_stale():
     _confirm(repo, line, reopened, [("ko", "Korean"), ("zh", "Chinese")])
     assert repo.fetch_group_languages("g1") == ["en", "th"]
     assert len(line.replies) == replies
+
+
+def test_unchanged_web_save_reenables_translation_and_rejects_the_old_ok():
+    store = _LanguageStore({("g1", "ja"): "Japanese", ("g1", "en"): "English"}, translation_enabled=True)
+    repo = _repo(store)
+    line = _ReplyLine()
+    issued = repo.record_language_prompt("g1")
+    # 確認を出しているあいだ、チャットは翻訳を止めている
+    repo.set_translation_enabled("g1", False)
+
+    response = _page_post(repo, ["ja", "en"])
+
+    assert response["statusCode"] == 200
+    assert "まま" in response["body"] or "already" in response["body"].lower()
+    assert repo.fetch_group_languages("g1") == ["en", "ja"]
+    assert store.translation_enabled["g1"] is True
+    _confirm(repo, line, issued, [("fr", "French"), ("de", "German")])
+    assert repo.fetch_group_languages("g1") == ["en", "ja"]
+    assert store.translation_enabled["g1"] is True
+    assert "その確認は古いよ" in line.replies[-1]

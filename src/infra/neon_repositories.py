@@ -745,11 +745,33 @@ class NeonMessageRepository(MessageRepositoryPort):
         return None
 
     def seal_language_prompt(self, group_id: str) -> None:
-        """選択が同じ保存でも、発行済みの確認ボタンを無効にする。"""
+        """選択が同じ保存でも、確認を閉じて翻訳をオンに戻す。"""
 
+        self.finalize_web_language_save(group_id)
+
+    def finalize_web_language_save(
+        self,
+        group_id: str,
+        languages: Optional[Sequence[Tuple[str, str]]] = None,
+    ) -> None:
+        """ウェブ保存の確定。言語の入れ替え、翻訳オン、確認のクローズを一つにする。
+
+        languages が None のときは言語行を書き換えない。変更があっても無くても、
+        開いているチャット確認を閉じ、propose が止めた翻訳を同じトランザクションで戻す。
+        """
+
+        normalized = None if languages is None else self._normalize_languages(languages)
         with self._client.connection() as conn:
             with conn.transaction():
                 with conn.cursor() as cur:
+                    if normalized is not None:
+                        cur.execute("DELETE FROM group_languages WHERE group_id = %s", (group_id,))
+                        if normalized:
+                            cur.executemany(
+                                _UPSERT_GROUP_LANGUAGE_SQL,
+                                [(group_id, code, name) for code, name in normalized],
+                            )
+                    cur.execute(_TRANSLATION_ENABLED_SQL, (group_id, True))
                     cur.execute(
                         _SEAL_LANGUAGE_PROMPT_SQL,
                         (group_id, GROUP_LANG_MARKER, GROUP_LANG_MARKER),
@@ -783,23 +805,8 @@ class NeonMessageRepository(MessageRepositoryPort):
         削除と挿入を別々に確定すると、挿入の一時失敗で言語が空になる。
         翻訳オンの更新も同じトランザクションに含め、失敗時は言語も翻訳状態も戻す。
         """
-        normalized = self._normalize_languages(languages)
-        with self._client.connection() as conn:
-            with conn.transaction():
-                with conn.cursor() as cur:
-                    cur.execute("DELETE FROM group_languages WHERE group_id = %s", (group_id,))
-                    if normalized:
-                        cur.executemany(
-                            _UPSERT_GROUP_LANGUAGE_SQL,
-                            [(group_id, code, name) for code, name in normalized],
-                        )
-                    cur.execute(_TRANSLATION_ENABLED_SQL, (group_id, True))
-                    # 言語の挿入が成功したときだけ確認を閉じる。失敗なら世代も戻る
-                    cur.execute(
-                        _SEAL_LANGUAGE_PROMPT_SQL,
-                        (group_id, GROUP_LANG_MARKER, GROUP_LANG_MARKER),
-                    )
-        self._invalidate_group_runtime(group_id)
+        # 言語の挿入に失敗したときは、翻訳オンも確認のクローズも戻る
+        self.finalize_web_language_save(group_id, languages)
 
     def apply_language_changes(
         self,
