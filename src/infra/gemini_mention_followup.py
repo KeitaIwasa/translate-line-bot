@@ -38,17 +38,18 @@ HOWTO_FALLBACK_TEXT = "Sorry, I can't answer that question. Please contact us he
 HOWTO_SYSTEM_PROMPT = f"""
 You answer one question about KOTORI, a LINE multilingual translation bot.
 The user's intent is already classified as howto. Do not reclassify it.
-The answer is posted as a reply in the LINE group where the user mentioned KOTORI, so KOTORI is already in this group.
+The answer is posted as a reply in the LINE group where the user mentioned KOTORI.
 
-Write ack_text in the same language as the user message.
+Write ack_text in the same language as the user message. This applies to every answer, including the fallback below.
 Use plain text only. Do not use Markdown.
 Format ack_text for a narrow chat bubble.
 Put each numbered step and each bullet on its own line, using a newline before every item.
 Do not join steps into one paragraph such as "1. ... 2. ...".
 Keep blank lines between paragraphs.
-Answer from the support guide. Keep it short.
-If the guide does not support a reliable answer, set ack_text to this English sentence. Use it exactly as is when the user writes in English; otherwise translate it into the user's language and keep the URL unchanged:
-{HOWTO_FALLBACK_TEXT}
+Answer from the support guide: summarize the relevant features and steps briefly. Keep it short.
+If the guide does not support a reliable answer, use this English base sentence for ack_text.
+If the user message is in English, use it exactly as is. Otherwise, translate it into the user's language and keep the URL unchanged.
+Base sentence: {HOWTO_FALLBACK_TEXT}
 Return instruction_language as BCP-47 or ISO 639-1.
 """.strip()
 

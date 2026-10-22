@@ -113,7 +113,19 @@ def test_howto_prompt_fallback_base_is_english():
     assert HOWTO_FALLBACK_TEXT.isascii()
     assert HOWTO_FALLBACK_TEXT in HOWTO_SYSTEM_PROMPT
     assert "申し訳" not in HOWTO_SYSTEM_PROMPT
-    assert "own line" in HOWTO_SYSTEM_PROMPT
+    assert "as is" in HOWTO_SYSTEM_PROMPT
+
+
+def test_real_support_guide_drops_private_chat_assumption():
+    from pathlib import Path
+
+    from src.infra.gemini_mention_followup import HOWTO_SYSTEM_PROMPT, _guide_body
+
+    guide = Path("src/app/prompts/kotori_support_prompt.txt").read_text(encoding="utf-8")
+    body = _guide_body(guide)
+    assert "個人チャットに送信" not in body
+    assert "すでにユーザーはKOTORIを友だち追加" not in body
+    assert "LINE group" in HOWTO_SYSTEM_PROMPT
 
 
 def test_howto_follow_up_splits_inline_numbered_steps():
