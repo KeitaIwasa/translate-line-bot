@@ -5,7 +5,7 @@ set -euo pipefail
 # 1) 対象環境 DB へマイグレーション適用
 # 2) SAM build / deploy
 # 環境変数で上書き可能なパラメータ:
-# STACK_NAME, PROFILE, REGION, STAGE, GEMINI_MODEL, FUNCTION_MEMORY_SIZE, FUNCTION_TIMEOUT,
+# STACK_NAME, PROFILE, REGION, STAGE, GEMINI_MODEL（既定は scripts/gemini_model_default.sh）, FUNCTION_MEMORY_SIZE, FUNCTION_TIMEOUT,
 # MAX_CONTEXT_MESSAGES, TRANSLATION_RETRY, RUNTIME_SECRET_ARN, S3_BUCKET, PYTHON_BIN,
 # TYPESAFE_API_KEY_SSM_PARAMETER（既定は STAGE に対応する既存名。stg→/kotori/stg/...、prod→/kotori/prod/...）
 
@@ -13,7 +13,10 @@ STACK_NAME="${STACK_NAME:-translate-line-bot-stg}"
 PROFILE="${PROFILE:-line-translate-bot}"
 REGION="${REGION:-ap-northeast-1}"
 STAGE="${STAGE:-stg}"
-GEMINI_MODEL="${GEMINI_MODEL:-gemini-flash-latest}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=gemini_model_default.sh
+source "${SCRIPT_DIR}/gemini_model_default.sh"
+apply_gemini_model_default
 FUNCTION_MEMORY_SIZE="${FUNCTION_MEMORY_SIZE:-512}"
 FUNCTION_TIMEOUT="${FUNCTION_TIMEOUT:-60}"
 MAX_CONTEXT_MESSAGES="${MAX_CONTEXT_MESSAGES:-8}"
