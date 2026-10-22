@@ -49,7 +49,7 @@ def plan_catalog_text(
 
 
 def _resume_sentence(reset_date: str | None, *, free: bool) -> str:
-    """再開の起点。日付の前置詞は from だけにする。on は訳すと「その日に止まる」へ反転する。"""
+    """再開の起点。停止が続く期間は until、再開の起点は from。時点のリセット日は別文で on。"""
 
     subject = "Free translation" if free else "Translation"
     if reset_date:
@@ -127,9 +127,9 @@ def build_approaching_notice(
         pro_quota=pro_quota,
     )
     reset = (
-        f"The free quota resets from {reset_date} (UTC)."
+        f"The next reset is on {reset_date} (UTC)."
         if reset_date
-        else "The free quota resets from the start of next month (UTC)."
+        else "The next reset is at the start of next month (UTC)."
     )
     return (
         f"This group has used {usage:,} of {limit:,} free messages this month. "
@@ -147,8 +147,10 @@ def build_quota_reset_notice(*, reset_date: str | None) -> str:
     """
 
     cap = monthly_quota_for(FREE_PLAN)
-    again = f" The next reset is from {reset_date} (UTC)." if reset_date else ""
-    return f"The free monthly quota has reset. Up to {cap:,} messages per month.{again}"
+    again = f" The next reset is on {reset_date} (UTC)." if reset_date else ""
+    return (
+        f"The free monthly quota has reset. The Free plan includes {cap:,} messages per month.{again}"
+    )
 
 
 def build_resume_blocked_short(*, limit: int, reset_date: str | None) -> str:

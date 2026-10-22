@@ -125,13 +125,18 @@ def _quota_notice_samples() -> list[str]:
     ]
 
 
-def test_quota_notice_dates_use_from_or_until():
-    """日付の on は機械翻訳で「その日に止まる／始まる」へ反転する。"""
+def test_quota_notice_dates_use_until_from_or_reset_on():
+    """停止の期間は until、再開の起点は from。リセットの時点だけ on。"""
 
     for text in _quota_notice_samples():
-        assert re.search(r"\bon\b", text) is None, text
-        if "2026-11-01" in text:
-            assert "from 2026-11-01 (UTC)" in text or "until 2026-11-01 (UTC)" in text
+        assert "resets from" not in text
+        if "paused" in text and "2026-11-01" in text:
+            assert "until 2026-11-01 (UTC)" in text
+            assert " on " not in text
+        if "resumes" in text and "2026-11-01" in text:
+            assert "from 2026-11-01 (UTC)" in text
+        if "next reset" in text and "2026-11-01" in text:
+            assert "The next reset is on 2026-11-01 (UTC)." in text
 
 
 def test_resume_blocked_short_stays_paused_until_reset():
@@ -147,11 +152,11 @@ def test_quota_reset_notice_states_plan_cap_not_remaining():
     dated = build_quota_reset_notice(reset_date="2026-11-01")
     assert dated == (
         "The free monthly quota has reset. "
-        f"Up to {cap:,} messages per month. "
-        "The next reset is from 2026-11-01 (UTC)."
+        f"The Free plan includes {cap:,} messages per month. "
+        "The next reset is on 2026-11-01 (UTC)."
     )
     undated = build_quota_reset_notice(reset_date=None)
-    assert undated == f"The free monthly quota has reset. Up to {cap:,} messages per month."
+    assert undated == f"The free monthly quota has reset. The Free plan includes {cap:,} messages per month."
     assert "on again" not in dated
     assert "this month" not in dated
     assert "left" not in dated.lower()
@@ -183,7 +188,7 @@ def test_resume_sentences_start_from_the_reset():
         pro_quota=40000,
     )
     assert "Translation stops once this group reaches 50 messages." in approaching
-    assert "resets from the start of next month (UTC)." in approaching
+    assert "The next reset is at the start of next month (UTC)." in approaching
     assert "stops at" not in approaching
 
 
@@ -297,7 +302,7 @@ def test_free_notices_use_next_month_when_canceled_period_end_remains():
 
     reset = "\n".join(line.sent_texts)
     assert "has reset" in reset
-    assert f"Up to {monthly_quota_for('free'):,} messages per month" in reset
+    assert f"The Free plan includes {monthly_quota_for('free'):,} messages per month" in reset
     assert "on again" not in reset
     assert next_month in reset
     assert "2024-03-17" not in reset
@@ -343,9 +348,43 @@ def test_language_changes_during_quota_pause_keep_the_reason():
     assert repo.usage == 1
     reset = "\n".join(line.sent_texts)
     assert "has reset" in reset
-    assert f"Up to {monthly_quota_for('free'):,} messages per month" in reset
+    assert f"The Free plan includes {monthly_quota_for('free'):,} messages per month" in reset
     assert "on again" not in reset
     assert _next_month(datetime.now(timezone.utc)) in reset
+
+
+def test_language_add_in_new_month_sends_the_reset_notice_once():
+    """翌月の最初が言語追加でも、停止解除とリセット案内は通常投稿と同じ関数を通る。"""
+
+    line = RecordingLineClient()
+    repo = _MutableLanguageRepo(
+        initial_usage=0,
+        paid=False,
+        translation_enabled=False,
+        paused_reason="quota",
+        languages=["en", "ja"],
+    )
+    handler = _build_handler(repo, line, RecordingTranslationService())
+
+    handler._handle_command(_build_event("add Thai"), "add Thai")
+
+    assert "th" in {code.lower() for code in repo.languages}
+    assert repo.translation_enabled is True
+    assert repo.paused_reason is None
+    joined = "\n".join(line.sent_texts)
+    assert joined.count("has reset") == 1
+    assert f"The Free plan includes {monthly_quota_for('free'):,} messages per month" in joined
+    assert "The next reset is on" in joined
+
+    repo.translation_enabled = False
+    repo.paused_reason = "quota"
+    repo.usage = 0
+    line.sent_texts.clear()
+    handler._handle_command(_build_event("add Thai"), "add Thai")
+
+    assert repo.translation_enabled is True
+    assert repo.paused_reason is None
+    assert "has reset" not in "\n".join(line.sent_texts)
 
 
 class _FailingLine(RecordingLineClient):
@@ -521,7 +560,7 @@ def test_free_50_persists_quota_pause_before_the_next_message():
     assert repo.usage == 1
     reset = "\n".join(line.sent_texts)
     assert "has reset" in reset
-    assert f"Up to {monthly_quota_for('free'):,} messages per month" in reset
+    assert f"The Free plan includes {monthly_quota_for('free'):,} messages per month" in reset
     assert "on again" not in reset
     assert _next_month(datetime.now(timezone.utc)) in reset
 
@@ -560,10 +599,14 @@ def test_quota_reset_resumes_translation_and_says_so():
     assert repo.usage == 1
     joined = "\n".join(line.sent_texts)
     assert "has reset" in joined
-    assert f"Up to {monthly_quota_for('free'):,} messages per month" in joined
+    assert f"The Free plan includes {monthly_quota_for('free'):,} messages per month" in joined
     assert "on again" not in joined
     assert "Translation stopped" not in joined
     assert _next_month(datetime.now(timezone.utc)) in joined
+
+    line.sent_texts.clear()
+    handler._handle_translation_flow(_build_event("next"), sender_name="user", translation_enabled=True)
+    assert "has reset" not in "\n".join(line.sent_texts)
 
 
 def test_paused_mention_reminds_once_per_day_and_chat_stays_quiet():

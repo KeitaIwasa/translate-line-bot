@@ -258,6 +258,15 @@ def _already_applied_checks() -> Dict[str, str]:
                   AND column_name = 'quota_mention_reminder_on'
               )
         """,
+        "20261022_add_quota_reset_notice_claim.sql": """
+            SELECT
+              EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = 'group_usage_counters'
+                  AND column_name = 'quota_reset_notice_sent'
+              )
+        """,
     }
 
 

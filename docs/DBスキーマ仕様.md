@@ -158,12 +158,14 @@ CREATE TABLE group_subscriptions (
 | `limit_notice_plan` | TEXT |  |  | 上限到達通知を送ったプラン種別（`free` / `standard` / `pro`）。未送は `NULL` |
 | `approaching_notice_sent` | BOOLEAN | ✔ | `FALSE` | 無料枠の事前案内（上限の80%。50件なら40件）をその周期で送ったか |
 | `quota_mention_reminder_on` | DATE |  |  | 上限停止中のメンション再案内を最後に送ったUTC日。未送は `NULL` |
+| `quota_reset_notice_sent` | BOOLEAN | ✔ | `FALSE` | 無料枠の月次リセット案内をその周期で送ったか |
 | `created_at` | TIMESTAMPTZ | ✔ | `NOW()` | 作成日時 |
 | `updated_at` | TIMESTAMPTZ | ✔ | `NOW()` | 更新日時 |
 
 - 主キー: `(group_id, period_key)`
 - `limit_notice_plan` は当月の上限到達通知をプラン別に 1 回に抑制するためのフラグ。Free → Pro へのアップグレード後も再通知できる。
 - `approaching_notice_sent` と `quota_mention_reminder_on` は `sql/20261022_add_quota_notice_claims.sql` で追加する。列が無い環境ではプロセス内の抑止に落ちる。
+- `quota_reset_notice_sent` は `sql/20261022_add_quota_reset_notice_claim.sql` で追加する。列が無い環境ではプロセス内の抑止に落ちる。
 
 ```sql
 CREATE TABLE group_usage_counters (
