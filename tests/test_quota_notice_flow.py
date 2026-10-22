@@ -387,6 +387,90 @@ def test_language_add_in_new_month_sends_the_reset_notice_once():
     assert "has reset" not in "\n".join(line.sent_texts)
 
 
+class _FailOnceInterface:
+    """最初の案内翻訳だけ失敗し、次の投稿では英語のまま返す。"""
+
+    def __init__(self):
+        self.calls = 0
+
+    def translate(self, *_args, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("gemini down")
+        return []
+
+
+def _paused_new_month_repo():
+    return _MutableLanguageRepo(
+        initial_usage=0,
+        paid=False,
+        translation_enabled=False,
+        paused_reason="quota",
+        languages=["en", "ja"],
+    )
+
+
+def test_reset_notice_gemini_failure_on_a_normal_message_retries_next_message(monkeypatch):
+    """案内が作れなくても翻訳は再開し、次の投稿でリセット案内を出す。"""
+
+    monkeypatch.setattr("src.app.handlers.message_handler.time.sleep", lambda *_args, **_kwargs: None)
+    line = RecordingLineClient()
+    translation = RecordingTranslationService()
+    repo = _paused_new_month_repo()
+    handler = _build_handler(repo, line, translation)
+    handler._interface_translation = _FailOnceInterface()
+
+    handler._handle_translation_flow(_build_event("hello"), sender_name="user", translation_enabled=False)
+
+    assert translation.calls == 1
+    assert repo.usage == 1
+    assert repo.translation_enabled is True
+    assert repo.paused_reason == "quota"
+    assert repo.reset_notices == set()
+    joined = "\n".join(line.sent_texts)
+    assert "(en)" in joined
+    assert "still paused" not in joined
+    assert "has reset" not in joined
+
+    line.sent_texts.clear()
+    handler._handle_translation_flow(_build_event("again"), sender_name="user", translation_enabled=True)
+
+    assert repo.translation_enabled is True
+    assert repo.paused_reason is None
+    assert repo.reset_notices
+    reset = "\n".join(line.sent_texts)
+    assert "has reset" in reset
+    assert f"The Free plan includes {monthly_quota_for('free'):,} messages per month" in reset
+
+
+def test_reset_notice_gemini_failure_on_language_change_retries_next_message(monkeypatch):
+    """言語変更が月の最初でも、案内失敗で停止理由を消さず、次の投稿で案内する。"""
+
+    monkeypatch.setattr("src.app.handlers.message_handler.time.sleep", lambda *_args, **_kwargs: None)
+    line = RecordingLineClient()
+    translation = RecordingTranslationService()
+    repo = _paused_new_month_repo()
+    handler = _build_handler(repo, line, translation)
+    handler._interface_translation = _FailOnceInterface()
+
+    handler._handle_command(_build_event("add Thai"), "add Thai")
+
+    assert "th" in {code.lower() for code in repo.languages}
+    assert translation.calls == 0
+    assert repo.translation_enabled is True
+    assert repo.paused_reason == "quota"
+    assert repo.reset_notices == set()
+    assert "has reset" not in "\n".join(line.sent_texts)
+
+    line.sent_texts.clear()
+    handler._handle_translation_flow(_build_event("hello"), sender_name="user", translation_enabled=True)
+
+    assert translation.calls == 1
+    assert repo.paused_reason is None
+    assert repo.reset_notices
+    assert "has reset" in "\n".join(line.sent_texts)
+
+
 class _FailingLine(RecordingLineClient):
     def reply_text(self, _reply_token, _text):
         raise RuntimeError("line down")

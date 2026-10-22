@@ -182,6 +182,10 @@ class ProQuotaRepo:
         self.translation_enabled = False
         self.paused_reason = "quota"
 
+    def enable_translation_keep_quota_reason(self, _group_id):
+        self.translation_enabled = True
+        self.paused_reason = "quota"
+
     def is_translation_enabled(self, _group_id):
         return self.translation_enabled
 
