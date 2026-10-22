@@ -1577,6 +1577,8 @@ class MessageHandler:
                 }
             )
 
+        approaching_claimed = False
+        approaching_period_key = flow.decision.period_key
         if flow.decision.should_notify:
             notice_text, notice_url = self._build_limit_reached_notice_text(
                 event.group_id,
@@ -1593,21 +1595,37 @@ class MessageHandler:
             messages.append({"type": "text", "text": notice_text})
             self._append_plan_link(messages, notice_url)
         elif self._should_send_approaching_notice(plan_key, limit, flow.decision.usage):
-            if self._claim_approaching_notice(event.group_id or "", flow.decision.period_key):
-                notice_text, notice_url = self._build_approaching_notice_text(
-                    event.group_id or "",
-                    usage=flow.decision.usage,
-                    limit=limit,
-                    period_key=flow.decision.period_key,
-                    period_end=period_end,
-                )
-                messages.append({"type": "text", "text": notice_text})
-                self._append_plan_link(messages, notice_url)
+            group_id = event.group_id or ""
+            if self._claim_approaching_notice(group_id, approaching_period_key):
+                try:
+                    notice_text, notice_url = self._build_approaching_notice_text(
+                        group_id,
+                        usage=flow.decision.usage,
+                        limit=limit,
+                        period_key=approaching_period_key,
+                        period_end=period_end,
+                    )
+                except Exception:
+                    # 翻訳文は届ける。案内の claim は戻し、41〜49件目でやり直す。
+                    logger.warning(
+                        "Failed to build approaching quota notice",
+                        extra={"group_id": group_id},
+                    )
+                    self._release_approaching_notice(group_id, approaching_period_key)
+                else:
+                    messages.append({"type": "text", "text": notice_text})
+                    self._append_plan_link(messages, notice_url)
+                    approaching_claimed = True
 
-        if len(messages) == 1 and messages[0].get("type") == "text":
-            self._reply_text(event, messages[0].get("text"), normalize_lists=False)
-            return
-        self._reply_messages(event, messages)
+        try:
+            if len(messages) == 1 and messages[0].get("type") == "text":
+                self._reply_text(event, messages[0].get("text"), normalize_lists=False)
+                return
+            self._reply_messages(event, messages)
+        except Exception:
+            if approaching_claimed:
+                self._release_approaching_notice(event.group_id or "", approaching_period_key)
+            raise
 
     def _maybe_upsert_deferred_display_name(
         self,
@@ -1930,6 +1948,24 @@ class MessageHandler:
             logger.warning("Failed to claim quota mention reminder", extra={"group_id": group_id})
             return False
 
+    def _release_approaching_notice(self, group_id: str, period_key: str) -> None:
+        release = getattr(self._repo, "release_approaching_notice", None)
+        if not callable(release):
+            return
+        try:
+            release(group_id, period_key)
+        except Exception:
+            logger.warning("Failed to release approaching quota notice", extra={"group_id": group_id})
+
+    def _release_quota_mention_reminder(self, group_id: str, period_key: str, on_date: str) -> None:
+        release = getattr(self._repo, "release_quota_mention_reminder", None)
+        if not callable(release):
+            return
+        try:
+            release(group_id, period_key, on_date)
+        except Exception:
+            logger.warning("Failed to release quota mention reminder", extra={"group_id": group_id})
+
     def _build_approaching_notice_text(
         self,
         group_id: str,
@@ -2047,14 +2083,20 @@ class MessageHandler:
         plan_key, period_key, limit, _usage = self._quota_period_for_runtime(runtime, group_id)
         on_date = datetime.now(timezone.utc).date().isoformat()
         if self._claim_quota_mention_reminder(group_id, period_key, on_date):
-            self._send_limit_reached_notice(
-                event,
-                plan_key,
-                limit,
-                period_key=period_key,
-                period_end=runtime.period_end,
-                reminder=True,
-            )
+            try:
+                self._send_limit_reached_notice(
+                    event,
+                    plan_key,
+                    limit,
+                    period_key=period_key,
+                    period_end=runtime.period_end,
+                    reminder=True,
+                )
+            except Exception:
+                # 組み立てか送信に失敗した日は、同じUTC日の次のメンションでやり直す。
+                logger.warning("Failed to send quota pause reminder", extra={"group_id": group_id})
+                self._release_quota_mention_reminder(group_id, period_key, on_date)
+                raise
             setter = getattr(self._repo, "set_limit_notice_plan", None)
             if setter:
                 setter(group_id, period_key, plan_key)

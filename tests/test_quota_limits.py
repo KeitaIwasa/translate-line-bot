@@ -109,6 +109,12 @@ class ProQuotaRepo:
         self.mention_reminders.add(key)
         return True
 
+    def release_approaching_notice(self, _group_id, _period_key):
+        self.approaching_claimed = False
+
+    def release_quota_mention_reminder(self, _group_id, period_key, on_date):
+        self.mention_reminders.discard((period_key, on_date))
+
     def get_subscription_period(self, _group_id):
         if self.subscription_status is not None or self.period_end is not None:
             status = self.subscription_status

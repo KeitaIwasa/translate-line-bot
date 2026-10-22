@@ -3,6 +3,8 @@
 from dataclasses import replace
 from datetime import datetime, timezone
 
+import pytest
+
 from src.app.handlers.message_handler import MessageHandler
 from src.domain import models
 from src.domain.services.quota_notice import (
@@ -248,6 +250,65 @@ def test_language_changes_during_quota_pause_keep_the_reason():
     reset = "\n".join(line.sent_texts)
     assert "has reset" in reset
     assert _next_month(datetime.now(timezone.utc)) in reset
+
+
+class _FailingLine(RecordingLineClient):
+    def reply_text(self, _reply_token, _text):
+        raise RuntimeError("line down")
+
+    def reply_messages(self, _reply_token, _messages):
+        raise RuntimeError("line down")
+
+
+def test_approaching_notice_build_failure_keeps_translation_and_releases_claim():
+    line = RecordingLineClient()
+    translation = RecordingTranslationService()
+    repo = ProQuotaRepo(initial_usage=39, paid=False)
+    handler = _with_checkout(_build_handler(repo, line, translation))
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("gemini down")
+
+    handler._build_approaching_notice_text = boom  # type: ignore[method-assign]
+
+    handler._handle_translation_flow(_build_event("near"), sender_name="user", translation_enabled=True)
+
+    assert translation.calls == 1
+    assert repo.usage == 40
+    assert repo.approaching_claimed is False
+    joined = "\n".join(line.sent_texts)
+    assert "(en)" in joined
+    assert "40 of 50" not in joined
+    assert "has used" not in joined
+
+
+def test_approaching_notice_send_failure_releases_claim():
+    repo = ProQuotaRepo(initial_usage=39, paid=False)
+    handler = _with_checkout(_build_handler(repo, _FailingLine(), RecordingTranslationService()))
+
+    with pytest.raises(RuntimeError, match="line down"):
+        handler._handle_translation_flow(_build_event("near"), sender_name="user", translation_enabled=True)
+
+    assert repo.usage == 40
+    assert repo.approaching_claimed is False
+
+
+def test_quota_mention_reminder_send_failure_releases_claim():
+    repo = ProQuotaRepo(
+        initial_usage=50,
+        paid=False,
+        notice_plan="free",
+        translation_enabled=False,
+        paused_reason="quota",
+    )
+    handler = _with_checkout(_build_handler(repo, _FailingLine(), RecordingTranslationService()))
+    runtime = repo.fetch_translation_runtime_state("group")
+
+    with pytest.raises(RuntimeError, match="line down"):
+        handler._reply_quota_pause_reminder(_build_event("@bot"), runtime, repeat="silent")
+
+    assert repo.mention_reminders == set()
+    assert repo.paused_reason == "quota"
 
 
 def test_free_40_sends_approaching_notice_once():

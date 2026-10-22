@@ -44,6 +44,12 @@ def _claim_local(key: tuple) -> bool:
     _LOCAL_QUOTA_CLAIMS.add(key)
     return True
 
+
+def _release_local(key: tuple) -> None:
+    """送信前に失敗した案内を、同じプロセスでやり直せるようにする。"""
+
+    _LOCAL_QUOTA_CLAIMS.discard(key)
+
 # 言語行の追加。ON CONFLICT は名前の更新だけに使う
 _UPSERT_GROUP_LANGUAGE_SQL = """
 INSERT INTO group_languages (group_id, lang_code, lang_name)
@@ -1175,6 +1181,56 @@ class NeonMessageRepository(MessageRepositoryPort):
         except errors.UndefinedTable:
             logger.warning("group_usage_counters table missing; skip mention reminder", extra={"group_id": group_id})
             return False
+
+    def release_approaching_notice(self, group_id: str, period_key: str) -> None:
+        """事前案内を送れなかったとき、同じ周期でやり直せるように戻す。"""
+
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE group_usage_counters
+                    SET approaching_notice_sent = FALSE, updated_at = NOW()
+                    WHERE group_id = %s AND period_key = %s
+                    """,
+                    (group_id, period_key),
+                )
+        except errors.UndefinedColumn:
+            logger.warning("approaching_notice_sent column missing; releasing local claim", extra={"group_id": group_id})
+            _release_local(("approaching", group_id, period_key))
+        except errors.UndefinedTable:
+            logger.warning("group_usage_counters table missing; skip releasing approaching notice", extra={"group_id": group_id})
+        else:
+            _release_local(("approaching", group_id, period_key))
+
+    def release_quota_mention_reminder(self, group_id: str, period_key: str, on_date: str) -> None:
+        """その日の再案内を送れなかったとき、同じUTC日にやり直せるように戻す。"""
+
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE group_usage_counters
+                    SET quota_mention_reminder_on = NULL, updated_at = NOW()
+                    WHERE group_id = %s
+                      AND period_key = %s
+                      AND quota_mention_reminder_on = %s
+                    """,
+                    (group_id, period_key, on_date),
+                )
+        except errors.UndefinedColumn:
+            logger.warning(
+                "quota_mention_reminder_on column missing; releasing local claim",
+                extra={"group_id": group_id},
+            )
+            _release_local(("mention", group_id, period_key, on_date))
+        except errors.UndefinedTable:
+            logger.warning(
+                "group_usage_counters table missing; skip releasing mention reminder",
+                extra={"group_id": group_id},
+            )
+        else:
+            _release_local(("mention", group_id, period_key, on_date))
 
     def reset_limit_notice_plan(self, group_id: str) -> None:
         """退会時などに上限通知フラグをリセットする。"""
