@@ -14,8 +14,10 @@ class _Line:
     def reply_text(self, _token, text):
         self.last_text = text
 
-    def reply_messages(self, *_args, **_kwargs):
-        self.last_messages = _args[1] if len(_args) > 1 else _kwargs.get("messages")
+    def reply_messages(self, _token, messages=None, **_kwargs):
+        self.last_messages = messages
+        if messages and isinstance(messages[0], dict) and messages[0].get("text"):
+            self.last_text = messages[0]["text"]
 
     def get_display_name(self, *_args, **_kwargs):
         return None

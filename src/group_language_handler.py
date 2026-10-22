@@ -155,6 +155,12 @@ def handle_group_language_request(
 
 
 def _verify_group_token(token: str, secret: str) -> Dict[str, Any]:
+    """グループに紐づく署名だけを見る。メンバー個人の認証はしない。
+
+    リンクを開けたグループの誰でも言語を変えられる。トークンは推測できない HMAC で、
+    別グループの group_id には使えない。フォームの group_id や user_id は読まない。
+    """
+
     payload = verify_token(token, secret=secret)
     scope = str(payload.get("scope") or "")
     if scope not in _ACCEPTED_SCOPES:

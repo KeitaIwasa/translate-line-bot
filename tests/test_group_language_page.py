@@ -279,9 +279,12 @@ def test_settings_and_incomplete_replies_include_the_page_link():
 
         def reply_text(self, _token, text):
             self.last_text = text
+            self.last_messages = None
 
-        def reply_messages(self, *_args, **_kwargs):
-            return None
+        def reply_messages(self, _token, messages, **_kwargs):
+            self.last_messages = messages
+            if messages and isinstance(messages[0], dict):
+                self.last_text = messages[0].get("text")
 
     class _ChatRepo:
         def __init__(self, languages):

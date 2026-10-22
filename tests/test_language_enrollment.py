@@ -416,6 +416,11 @@ class RecordingLineClient(DummyLineClient):
         self.last_text = text
         super().reply_text(reply_token, text)
 
+    def reply_messages(self, reply_token, messages):
+        super().reply_messages(reply_token, messages)
+        if messages and isinstance(messages[0], dict) and messages[0].get("text"):
+            self.last_text = messages[0]["text"]
+
 
 def test_language_settings_add_rejects_when_exceeding_limit():
     line = RecordingLineClient()
@@ -513,10 +518,10 @@ def test_language_settings_ack_without_static_text_uses_translation_path():
     )
 
     assert handler._handle_language_settings(event, decision, event.text) is True
-    assert translation.texts
-    assert translation.texts[0][1] == ["fr"]
-    assert "Japanese and French have been set as the translation languages." in translation.texts[0][0]
-    assert line.last_text == "Paramètres de langue mis à jour."
+    assert translation.texts == []
+    reply = line.last_text or ""
+    assert "Japanese and French have been set as the translation languages." in reply
+    assert "日本語" in reply and "フランス語" in reply
     assert "fr" in repo.languages
 
 
@@ -618,7 +623,7 @@ def test_english_instruction_keeps_the_fixed_reply_without_translation():
         instruction_language="en",
     )
     assert handler._handle_language_settings(_settings_event("add French"), decision, "add French") is True
-    assert line.last_text == "Japanese and French have been set as the translation languages."
+    assert "Japanese and French have been set as the translation languages." in (line.last_text or "")
 
 
 def _settings_event(text: str) -> models.MessageEvent:
@@ -679,11 +684,12 @@ def test_reset_all_with_add_list_replaces_languages_and_keeps_translation():
         "英語だけにして",
     ) is True
     assert repo.reset_called is False
-    assert repo.replace_called is True
-    assert repo.languages == ["en"]
-    assert repo.translation_enabled is True
-    assert line.last_text == "English has been set as the translation language."
-    assert "reset" not in (line.last_text or "").lower()
+    assert repo.replace_called is False
+    assert repo.languages == ["ja", "th"]
+    assert repo.translation_enabled is False
+    reply = line.last_text or ""
+    assert "your language too" in reply.lower()
+    assert "reset" not in reply.lower()
 
 
 def test_reset_all_with_several_languages_sets_exactly_that_list():
@@ -707,8 +713,10 @@ def test_reset_all_with_several_languages_sets_exactly_that_list():
     assert handler._handle_language_settings(_settings_event("@bot 英語と日本語だけにして"), decision, "英語と日本語だけにして") is True
     assert repo.languages == ["en", "ja"]
     assert repo.translation_enabled is True
-    assert line.last_text == "English and Japanese have been set as the translation languages."
-    assert "reset" not in (line.last_text or "").lower()
+    reply = line.last_text or ""
+    assert "English and Japanese have been set as the translation languages." in reply
+    assert "英語・日本語になったよ" in reply
+    assert "reset" not in reply.lower()
 
 
 def test_replace_over_the_language_limit_does_not_clear_current_languages():
@@ -793,7 +801,7 @@ def test_language_settings_static_ack_is_not_translated_again():
     )
 
     assert handler._handle_language_settings(event, decision, event.text) is True
-    assert line.last_text == "英語・日本語になったよ"
+    assert "英語・日本語になったよ" in (line.last_text or "")
 
 
 def test_postback_rejects_over_limit():
@@ -904,7 +912,7 @@ def test_postback_sends_multilingual_completion():
 
     assert repo.saved is True
     assert line.last is not None
-    parts = line.last.split("\n\n")
-    assert parts[0] == "English, Japanese, and Thai have been set as the translation languages."
-    assert "(ja)" in parts[1]
-    assert "(th)" in parts[2]
+    assert "English, Japanese, and Thai have been set as the translation languages." in line.last
+    assert "英語・日本語・タイ語になったよ" in line.last
+    assert "ตั้งเป็น" in line.last
+    assert "(ja)" not in line.last

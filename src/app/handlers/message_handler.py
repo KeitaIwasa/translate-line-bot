@@ -54,16 +54,18 @@ from ...domain.services.language_mention import (
     MentionRead,
     catalog_labels,
     catalog_prompt,
-    completion_prompt,
     family_for,
     howto_prompt,
     is_howto_loop,
     is_nonlinguistic,
     language_label,
+    language_quick_replies,
+    need_both_languages_prompt,
     read_mention,
     selection_prompt,
     settings_help_prompt,
     settings_page_line,
+    setup_confirmation,
     swap_prompt,
     unrecognized_prompt,
     unsupported_prompt,
@@ -535,6 +537,7 @@ class MessageHandler:
         *,
         command_trace: _CommandTrace | None = None,
         normalize_lists: bool = True,
+        quick_reply: Sequence[dict] | None = None,
     ) -> bool:
         if not event.reply_token or not text:
             return False
@@ -542,6 +545,18 @@ class MessageHandler:
         # ユーザー翻訳は build_translation_reply 側で、原文に改行があるときだけ整える。
         reply_text = normalize_inline_lists(text) if normalize_lists else text
         reply_text = reply_text[:LINE_REPLY_TEXT_LIMIT]
+        if quick_reply:
+            return self._reply_messages(
+                event,
+                [
+                    {
+                        "type": "text",
+                        "text": reply_text,
+                        "quickReply": {"items": list(quick_reply)},
+                    }
+                ],
+                command_trace=command_trace,
+            )
         started = time.perf_counter()
         try:
             self._line.reply_text(event.reply_token, reply_text)
@@ -600,6 +615,25 @@ class MessageHandler:
         return True
 
     def _attempt_language_enrollment(self, event: models.MessageEvent) -> bool:
+        text = event.text or ""
+        family = family_for("", text)
+        if text and is_nonlinguistic(text):
+            self._reply_text(
+                event,
+                self._with_settings_link(event.group_id, unrecognized_prompt(family), family),
+            )
+            return True
+        parsed = read_mention(text)
+        if parsed.kind in {"settings_help", "howto", "catalog"}:
+            instruction = self._resolve_command_instruction_language(
+                text,
+                preferred="",
+                group_languages=[],
+            )
+            return self._handle_local_mention(event, text, parsed, instruction)
+        if parsed.kind in {"languages", "unsupported", "translate_all"}:
+            if self._enroll_from_local_parse(event, text, parsed, family):
+                return True
         plan_key = self._resolve_effective_plan_for_group(event.group_id)
         bundle = self._language_settings.propose(
             event,
@@ -616,6 +650,155 @@ class MessageHandler:
             extra={"group_id": event.group_id, "user_id": event.user_id},
         )
         return True
+
+    def _enroll_from_local_parse(
+        self,
+        event: models.MessageEvent,
+        text: str,
+        parsed: MentionRead,
+        family: str,
+    ) -> bool:
+        """はっきり読めた言語は、確認ボタンを挟まず保存して一度だけ伝える。"""
+
+        limit = language_limit_for(self._resolve_effective_plan_for_group(event.group_id))
+        if parsed.kind == "translate_all" or (
+            parsed.kind == "languages" and parsed.mode != "add" and len(parsed.languages) > limit
+        ):
+            labels = (
+                catalog_labels(family)
+                if parsed.kind == "translate_all"
+                else [language_label(code, family, surface=surface) for code, surface in parsed.languages]
+            )
+            message = selection_prompt(labels, family=family, limit=limit)
+            notice = unsupported_prompt(parsed.unsupported, family)
+            if notice:
+                message = f"{notice}\n{message}"
+            self._reply_with_language_menu(event, message, family)
+            return True
+        if parsed.kind == "unsupported" or (parsed.kind == "languages" and not parsed.languages):
+            self._reply_text(event, unsupported_prompt(parsed.unsupported, family))
+            return True
+        if parsed.kind == "languages" and len(parsed.languages) < 2:
+            self._reply_need_both(event, parsed, family, text)
+            return True
+        if parsed.kind != "languages":
+            return False
+        pairs = [
+            (code, self._mention_language_name(code, surface))
+            for code, surface in parsed.languages
+            if code
+        ]
+        if not self._persist_enrollment_languages(event.group_id, pairs):
+            return False
+        self._reply_setup_confirmation(event, pairs, family, parsed.unsupported)
+        return True
+
+    def _persist_enrollment_languages(self, group_id: str, pairs: Sequence[Tuple[str, str]]) -> bool:
+        completer = getattr(self._repo, "try_complete_group_languages", None)
+        if completer:
+            try:
+                if completer(group_id, pairs):
+                    self._repo.set_translation_enabled(group_id, True)
+                    return True
+            except Exception:
+                logger.debug("Failed to complete group languages", exc_info=True)
+        replacer = getattr(self._repo, "replace_group_languages", None)
+        if not replacer:
+            return False
+        replacer(group_id, pairs)
+        self._repo.set_translation_enabled(group_id, True)
+        return True
+
+    def _reply_setup_confirmation(
+        self,
+        event: models.MessageEvent,
+        pairs: Sequence[Tuple[str, str]],
+        family: str,
+        unsupported: Sequence[str] = (),
+    ) -> None:
+        url = self._language_settings_url(event.group_id, "")
+        ack = setup_confirmation(pairs, url=url)
+        notice = unsupported_prompt(unsupported, family)
+        if notice:
+            ack = f"{ack}\n{notice}"
+        self._reply_text(event, ack)
+
+    def _reply_need_both(
+        self,
+        event: models.MessageEvent,
+        parsed: MentionRead,
+        family: str,
+        text: str,
+    ) -> None:
+        labels = [language_label(code, family, surface=surface) for code, surface in parsed.languages if code]
+        message = need_both_languages_prompt(labels, family=family)
+        notice = unsupported_prompt(parsed.unsupported, family)
+        if notice:
+            message = f"{notice}\n{message}"
+        message = self._localize_fixed_reply(
+            message,
+            family=family,
+            instruction_lang=family_for("", text),
+        )
+        self._reply_with_language_menu(event, message, family)
+
+    def _reply_with_language_menu(
+        self,
+        event: models.MessageEvent,
+        text: str,
+        family: str,
+        *,
+        command_trace: _CommandTrace | None = None,
+    ) -> None:
+        self._reply_text(
+            event,
+            self._with_settings_link(event.group_id, text, family),
+            command_trace=command_trace,
+            quick_reply=self._language_quick_replies(event.group_id, family),
+        )
+
+    def _language_quick_replies(self, group_id: str, family: str) -> list:
+        return language_quick_replies(family, self._language_settings_url(group_id, family))
+
+    @staticmethod
+    def _mention_language_name(code: str, surface: str) -> str:
+        if re.search(r"[ぁ-んァ-ン一-龯]", surface or ""):
+            return surface
+        return language_label(code, "en")
+
+    def _projected_language_codes(
+        self,
+        current: Sequence[str],
+        op: str,
+        add_langs: Sequence[Tuple[str, str]],
+        remove_codes: Sequence[str],
+        *,
+        replacing: bool,
+    ) -> List[str]:
+        def _norm(codes: Sequence[str]) -> List[str]:
+            seen: set[str] = set()
+            ordered: List[str] = []
+            for code in codes:
+                lowered = (code or "").lower()
+                if not lowered or lowered in seen:
+                    continue
+                seen.add(lowered)
+                ordered.append(lowered)
+            return ordered
+
+        current_codes = _norm(current)
+        add_codes = _norm([code for code, _name in add_langs])
+        remove_set = {(code or "").lower() for code in remove_codes if code}
+        if replacing:
+            return add_codes
+        if op == "add":
+            return _norm(current_codes + add_codes)
+        if op == "remove":
+            return [code for code in current_codes if code not in remove_set]
+        if op == "add_and_remove":
+            base = [code for code in current_codes if code not in remove_set]
+            return _norm(base + add_codes)
+        return current_codes
 
     # --- command mode helpers ---
     def _extract_command_text(self, event: models.MessageEvent) -> Optional[str]:
@@ -748,7 +931,12 @@ class MessageHandler:
                     if not message or is_howto_loop(message):
                         message = howto_prompt(family=howto_family)
                     message = self._with_settings_link(event.group_id, message, howto_family)
-                    handled = self._reply_text(event, message, command_trace=trace)
+                    handled = self._reply_text(
+                        event,
+                        message,
+                        command_trace=trace,
+                        quick_reply=self._language_quick_replies(event.group_id, howto_family),
+                    )
                 elif action == "pause":
                     self._repo.set_translation_enabled(event.group_id, False)
                     base_ack = "I will pause translation. Please mention me again when you want to resume."
@@ -956,6 +1144,7 @@ class MessageHandler:
                     family,
                 ),
                 command_trace=command_trace,
+                quick_reply=self._language_quick_replies(event.group_id, family),
             )
             return True
         if parsed.kind == "howto":
@@ -963,6 +1152,7 @@ class MessageHandler:
                 event,
                 self._with_settings_link(event.group_id, howto_prompt(family=family), family),
                 command_trace=command_trace,
+                quick_reply=self._language_quick_replies(event.group_id, family),
             )
             return True
         if parsed.kind == "unsupported":
@@ -1156,6 +1346,30 @@ class MessageHandler:
             self._reply_text(event, ack, command_trace=command_trace)
             return True
 
+        projected = self._projected_language_codes(
+            current_langs,
+            op,
+            add_langs,
+            remove_codes,
+            replacing=replacing,
+        )
+        if len(projected) < 2:
+            labels = [language_label(code, family, stored=name) for code, name in add_langs if code]
+            if not labels:
+                labels = [language_label(code, family) for code in projected]
+            message = need_both_languages_prompt(labels, family=family)
+            notice = unsupported_prompt(parsed.unsupported, family)
+            if notice:
+                message = f"{notice}\n{message}"
+            message = self._localize_fixed_reply(
+                message,
+                family=family,
+                instruction_lang=decision.instruction_language,
+                command_trace=command_trace,
+            )
+            self._reply_with_language_menu(event, message, family, command_trace=command_trace)
+            return True
+
         normalized_add: List[Tuple[str, str]] = []
         if replacing:
             # 削除と挿入は一つのトランザクション。挿入失敗で既存言語を消さない
@@ -1177,20 +1391,18 @@ class MessageHandler:
         # 言語変更後は翻訳再開。置き換えも翻訳を止めない
         self._repo.set_translation_enabled(event.group_id, True)
 
-        # 結果の言語を固定文で言う。「言語設定を更新しました」だけでは何になったか分からない
+        # 言語の組は各言語で一度。未登録の言語は英語。リンクは今発行したトークン
         pairs = self._resulting_language_pairs(event.group_id)
-        ack = completion_prompt(pairs, family=family)
+        ack = setup_confirmation(pairs, url=self._language_settings_url(event.group_id, ""))
         notice = unsupported_prompt(parsed.unsupported, family)
         if notice:
+            notice = self._localize_fixed_reply(
+                notice,
+                family=family,
+                instruction_lang=decision.instruction_language,
+                command_trace=command_trace,
+            )
             ack = f"{ack}\n{notice}"
-        ack = self._localize_fixed_reply(
-            ack,
-            family=family,
-            instruction_lang=decision.instruction_language,
-            command_trace=command_trace,
-        )
-        if len(pairs) < 2:
-            ack = self._with_settings_link(event.group_id, ack, family)
         self._reply_text(event, ack, command_trace=command_trace)
         return True
 

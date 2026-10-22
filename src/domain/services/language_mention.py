@@ -51,6 +51,203 @@ _EXTRA_ALIASES: tuple[tuple[str, str], ...] = (
     ("フィリピン語", "tl"),
     ("タガログ語", "tl"),
     ("filipino", "tl"),
+    ("日文", "ja"),
+    ("日語", "ja"),
+    ("英文", "en"),
+    ("汉语", "zh"),
+    ("漢語", "zh"),
+    ("韩语", "ko"),
+    ("韓語", "ko"),
+    ("韩文", "ko"),
+    ("韓文", "ko"),
+)
+
+# 韓国語・簡体字・繁体字・タイ語・自称。カタログに無いコードへは寄せない。
+_CROSS_SCRIPT_ALIASES: tuple[tuple[str, str], ...] = (
+    ("일본어", "ja"),
+    ("영어", "en"),
+    ("중국어", "zh"),
+    ("한국어", "ko"),
+    ("태국어", "th"),
+    ("베트남어", "vi"),
+    ("인도네시아어", "id"),
+    ("말레이어", "ms"),
+    ("필리핀어", "tl"),
+    ("타갈로그어", "tl"),
+    ("프랑스어", "fr"),
+    ("독일어", "de"),
+    ("스페인어", "es"),
+    ("포르투갈어", "pt"),
+    ("이탈리아어", "it"),
+    ("러시아어", "ru"),
+    ("아랍어", "ar"),
+    ("힌디어", "hi"),
+    ("벵골어", "bn"),
+    ("타밀어", "ta"),
+    ("우르두어", "ur"),
+    ("페르시아어", "fa"),
+    ("터키어", "tr"),
+    ("튀르키예어", "tr"),
+    ("폴란드어", "pl"),
+    ("네덜란드어", "nl"),
+    ("스웨덴어", "sv"),
+    ("덴마크어", "da"),
+    ("핀란드어", "fi"),
+    ("노르웨이어", "no"),
+    ("우크라이나어", "uk"),
+    ("체코어", "cs"),
+    ("루마니아어", "ro"),
+    ("헝가리어", "hu"),
+    ("그리스어", "el"),
+    ("히브리어", "he"),
+    ("미얀마어", "my"),
+    ("버마어", "my"),
+    ("크메르어", "km"),
+    ("라오어", "lo"),
+    ("네팔어", "ne"),
+    ("싱할라어", "si"),
+    ("스와힐리어", "sw"),
+    ("日语", "ja"),
+    ("英语", "en"),
+    ("中文", "zh"),
+    ("韩语", "ko"),
+    ("泰语", "th"),
+    ("越南语", "vi"),
+    ("印尼语", "id"),
+    ("印度尼西亚语", "id"),
+    ("马来语", "ms"),
+    ("菲律宾语", "tl"),
+    ("他加禄语", "tl"),
+    ("法语", "fr"),
+    ("德语", "de"),
+    ("西班牙语", "es"),
+    ("葡萄牙语", "pt"),
+    ("意大利语", "it"),
+    ("俄语", "ru"),
+    ("阿拉伯语", "ar"),
+    ("印地语", "hi"),
+    ("孟加拉语", "bn"),
+    ("泰米尔语", "ta"),
+    ("乌尔都语", "ur"),
+    ("波斯语", "fa"),
+    ("土耳其语", "tr"),
+    ("波兰语", "pl"),
+    ("荷兰语", "nl"),
+    ("瑞典语", "sv"),
+    ("丹麦语", "da"),
+    ("芬兰语", "fi"),
+    ("挪威语", "no"),
+    ("乌克兰语", "uk"),
+    ("捷克语", "cs"),
+    ("罗马尼亚语", "ro"),
+    ("匈牙利语", "hu"),
+    ("希腊语", "el"),
+    ("希伯来语", "he"),
+    ("缅甸语", "my"),
+    ("高棉语", "km"),
+    ("老挝语", "lo"),
+    ("尼泊尔语", "ne"),
+    ("僧伽罗语", "si"),
+    ("斯瓦希里语", "sw"),
+    ("日語", "ja"),
+    ("英語", "en"),
+    ("韓語", "ko"),
+    ("泰語", "th"),
+    ("越南語", "vi"),
+    ("印尼語", "id"),
+    ("印度尼西亞語", "id"),
+    ("馬來語", "ms"),
+    ("菲律賓語", "tl"),
+    ("他加祿語", "tl"),
+    ("法語", "fr"),
+    ("德語", "de"),
+    ("德文", "de"),
+    ("西班牙語", "es"),
+    ("葡萄牙語", "pt"),
+    ("義大利語", "it"),
+    ("意大利語", "it"),
+    ("俄語", "ru"),
+    ("阿拉伯語", "ar"),
+    ("印地語", "hi"),
+    ("孟加拉語", "bn"),
+    ("坦米爾語", "ta"),
+    ("泰米爾語", "ta"),
+    ("烏爾都語", "ur"),
+    ("波斯語", "fa"),
+    ("土耳其語", "tr"),
+    ("波蘭語", "pl"),
+    ("荷蘭語", "nl"),
+    ("瑞典語", "sv"),
+    ("丹麥語", "da"),
+    ("芬蘭語", "fi"),
+    ("挪威語", "no"),
+    ("烏克蘭語", "uk"),
+    ("捷克語", "cs"),
+    ("羅馬尼亞語", "ro"),
+    ("匈牙利語", "hu"),
+    ("希臘語", "el"),
+    ("希伯來語", "he"),
+    ("緬甸語", "my"),
+    ("高棉語", "km"),
+    ("寮語", "lo"),
+    ("老撾語", "lo"),
+    ("尼泊爾語", "ne"),
+    ("僧伽羅語", "si"),
+    ("斯瓦希里語", "sw"),
+    ("ญี่ปุ่น", "ja"),
+    ("อังกฤษ", "en"),
+    ("จีน", "zh"),
+    ("เกาหลี", "ko"),
+    ("เวียดนาม", "vi"),
+    ("อินโดนีเซีย", "id"),
+    ("มาเลย์", "ms"),
+    ("ฟิลิปปินส์", "tl"),
+    ("ฝรั่งเศส", "fr"),
+    ("เยอรมัน", "de"),
+    ("สเปน", "es"),
+    ("โปรตุเกส", "pt"),
+    ("อิตาลี", "it"),
+    ("รัสเซีย", "ru"),
+    ("อาหรับ", "ar"),
+    ("ฮินดี", "hi"),
+    ("เบงกาลี", "bn"),
+    ("ทมิฬ", "ta"),
+    ("อูรดู", "ur"),
+    ("เปอร์เซีย", "fa"),
+    ("ตุรกี", "tr"),
+    ("โปแลนด์", "pl"),
+    ("ดัตช์", "nl"),
+    ("สวีเดน", "sv"),
+    ("เดนมาร์ก", "da"),
+    ("ฟินแลนด์", "fi"),
+    ("นอร์เวย์", "no"),
+    ("ยูเครน", "uk"),
+    ("เช็ก", "cs"),
+    ("โรมาเนีย", "ro"),
+    ("ฮังการี", "hu"),
+    ("กรีก", "el"),
+    ("ฮิบรู", "he"),
+    ("พม่า", "my"),
+    ("เขมร", "km"),
+    ("ลาว", "lo"),
+    ("เนปาล", "ne"),
+    ("สิงหล", "si"),
+    ("สวาฮีลี", "sw"),
+    ("español", "es"),
+    ("espanol", "es"),
+    ("français", "fr"),
+    ("francais", "fr"),
+    ("deutsch", "de"),
+    ("italiano", "it"),
+    ("português", "pt"),
+    ("portugues", "pt"),
+    ("русский", "ru"),
+    ("العربية", "ar"),
+    ("हिन्दी", "hi"),
+    ("tiếng việt", "vi"),
+    ("tieng viet", "vi"),
+    ("bahasa indonesia", "id"),
+    ("bahasa melayu", "ms"),
 )
 
 # 「語」で終わるが言語名ではない語
@@ -87,6 +284,20 @@ _SETTINGS_HELP = re.compile(
     r"|設定"
     r"|settings"
     r"|language settings"
+    r"|languages?"
+    r"|言語"
+    r"|语言设置|語言設定|语言|語言|设置|設置"
+    r"|언어 설정|언어설정|언어|설정"
+    r"|การตั้งค่าภาษา|ตั้งค่าภาษา|ตั้งค่า|ภาษา"
+    r"|cài đặt ngôn ngữ|cai dat ngon ngu|ngôn ngữ|ngon ngu|cài đặt|cai dat"
+    r"|configuraci[oó]n(?: de idioma)?|idioma"
+    r"|param[eè]tres(?: de langue)?|langue"
+    r"|einstellungen|sprache"
+    r"|impostazioni|lingua"
+    r"|configura[cç][oõ]es(?: de idioma)?|idioma"
+    r"|настройки|язык"
+    r"|pengaturan bahasa|pengaturan|bahasa"
+    r"|الإعدادات|اللغة"
     r")$"
 )
 _HOWTO = re.compile(
@@ -96,6 +307,18 @@ _HOWTO = re.compile(
     r"|help"
     r"|how to use"
     r"|usage"
+    r"|帮助|幫助|ヘルプ"
+    r"|도움말|도움"
+    r"|วิธีใช้|ช่วยเหลือ|ช่วย"
+    r"|trợ giúp|tro giup"
+    r"|ayuda"
+    r"|aide"
+    r"|hilfe"
+    r"|aiuto"
+    r"|ajuda"
+    r"|помощь|справка"
+    r"|bantuan|tolong"
+    r"|مساعدة"
     r")$"
 )
 _CATALOG_QUESTION = re.compile(
@@ -127,7 +350,7 @@ _ADD = re.compile(r"追加|加えて|足して|\badd\b", re.IGNORECASE)
 _REMOVE = re.compile(r"削除|外して|消して|抜いて|\b(?:remove|delete)\b", re.IGNORECASE)
 # 漢字・カタカナ・ひらがなで「語」が付く未知の言語名。既知の別名は先に消費する
 _UNKNOWN_GO = re.compile(r"(?:[一-龯々]{1,8}|[ァ-ヶー]{2,16}|[ぁ-ん]{2,12})語")
-_PUNCT = re.compile(r"[、,，。.!！?？()（）\[\]「」『』・/／\-—–:：\"'“”]+")
+_PUNCT = re.compile(r"[、,，。.!！?？()（）\[\]「」『』・/／\-—–:：\"'“”⇔↔⇄⇆↔=＝~～]+")
 _HOWTO_LOOP = re.compile(
     r"使い方を教えてと送|使い方を聞いてみて|send\s+.{0,40}how to use",
     re.IGNORECASE,
@@ -151,6 +374,9 @@ _LATIN_FILLERS = (
     "set",
     "and",
     "or",
+    "et",
+    "und",
+    "y",
     "the",
     "for",
     "to",
@@ -208,6 +434,47 @@ _KANA_FILLERS = (
     "ね",
     "よ",
     "か",
+)
+
+# 言語名を除いたあとに残る、翻訳依頼の助詞や動詞。長いものから消す。
+_REQUEST_FILLERS = (
+    "상호번역해줘",
+    "번역해주세요",
+    "번역해줘",
+    "해주세요",
+    "해 줘",
+    "해줘",
+    "양방향",
+    "서로",
+    "상호",
+    "번역",
+    "통역",
+    "이랑",
+    "으로",
+    "하고",
+    "를",
+    "을",
+    "로",
+    "와",
+    "과",
+    "랑",
+    "翻譯成",
+    "翻译成",
+    "翻譯",
+    "翻译",
+    "互相",
+    "相互",
+    "請把",
+    "请把",
+    "幫我",
+    "帮我",
+    "一下",
+    "請",
+    "请",
+    "把",
+    "ภาษา",
+    "และ",
+    "กับ",
 )
 
 
@@ -403,20 +670,132 @@ def unsupported_prompt(names: Sequence[str], family: str) -> str:
     return f"{_english_join(cleaned)} aren't supported."
 
 
+def settings_anytime_sentence(family: str) -> str:
+    """設定ページの案内。原文は英語。リンクは24時間で切れるので、「設定」で取り直すと書く。"""
+
+    if family == "ja":
+        return (
+            "このページから、いつでも言語設定を変えられるよ。"
+            "期限が切れていたら、メンションして「設定」と送ってね。新しいリンクを送るよ。"
+        )
+    if family == "zh":
+        return "你可以随时从这个页面更改语言设置。如果链接过期了，在群里提及我并发送「設定」，我会发一个新链接。"
+    if family == "ko":
+        return "이 페이지에서 언제든 언어 설정을 바꿀 수 있어. 링크가 만료되면 멘션하고 「設定」을 보내 줘. 새 링크를 보낼게."
+    if family == "th":
+        return 'เปลี่ยนการตั้งค่าภาษาได้ทุกเมื่อจากหน้านี้ ถ้าลิงก์หมดอายุ ให้กล่าวถึงฉันแล้วส่ง「設定」 แล้วฉันจะส่งลิงก์ใหม่'
+    return (
+        'You can change your language settings from this page anytime! '
+        'If this link expires, mention me and send 「設定」 for a fresh link.'
+    )
+
+
 def settings_page_line(family: str, url: str) -> str:
     """設定ページへの一行。原文は英語で、ja/zh/ko/th だけ静的に訳す。"""
 
     if not url:
         return ""
+    return f"{settings_anytime_sentence(family)}\n{url}"
+
+
+def setup_confirmation(pairs: Sequence[tuple[str, str]], *, url: str = "") -> str:
+    """設定できた言語の組を、グループの各言語で一度ずつ言う。
+
+    ja/zh/ko/th は静的訳。それ以外は英語の原文を一度だけ添える。
+    リンクがあるときだけ「いつでも変えられる」と書き、期限切れは「設定」で取り直す。
+    """
+
+    families: list[str] = []
+    for code, _name in pairs:
+        family = ui_family(code)
+        if family not in families:
+            families.append(family)
+    if not families:
+        families = ["en"]
+    blocks: list[str] = []
+    for family in families:
+        lines = [completion_prompt(pairs, family=family)]
+        if url:
+            lines.append(settings_anytime_sentence(family))
+        block = "\n".join(line for line in lines if line)
+        if block:
+            blocks.append(block)
+    text = "\n\n".join(blocks)
+    if url:
+        return f"{text}\n\n{url}"
+    return text
+
+
+def need_both_languages_prompt(names: Sequence[str], *, family: str) -> str:
+    """片側だけだと双方向に訳せない。保存せず、もう一方を聞く。"""
+
+    shown = [name for name in names if name]
+    named = shown[0] if len(shown) == 1 else ""
     if family == "ja":
-        return f"言語はこのページでも選べるよ。\n{url}"
+        head = f"{named}は受け取ったよ。" if named else ""
+        body = "双方向に訳すには、あなたの言語も必要だよ。\n例: 英語と日本語"
+        return f"{head}\n{body}" if head else body
     if family == "zh":
-        return f"也可以在这个页面选择语言。\n{url}"
+        head = f"已收到{named}。" if named else ""
+        body = "双向翻译需要你的语言。\n例如：英语和日语"
+        return f"{head}\n{body}" if head else body
     if family == "ko":
-        return f"이 페이지에서도 언어를 고를 수 있어.\n{url}"
+        head = f"{named}는 받았어." if named else ""
+        body = "양방향으로 번역하려면 네 언어도 필요해.\n예: 영어랑 일본어"
+        return f"{head}\n{body}" if head else body
     if family == "th":
-        return f"เลือกภาษาในหน้านี้ก็ได้\n{url}"
-    return f"You can also choose languages on this page.\n{url}"
+        head = f"ได้รับ {named} แล้ว" if named else ""
+        body = "การแปลสองทางต้องมีภาษาของคุณด้วย\nเช่น อังกฤษกับญี่ปุ่น"
+        return f"{head}\n{body}" if head else body
+    head = f"I got {named}." if named else ""
+    body = "Two-way translation needs your language too.\nExample: English and Japanese"
+    return f"{head}\n{body}" if head else body
+
+
+_QUICK_LABELS = {
+    "en": {"open": "Language page", "current": "Current", "help": "Help"},
+    "ja": {"open": "言語ページ", "current": "今の言語", "help": "使い方"},
+    "zh": {"open": "語言頁面", "current": "目前語言", "help": "用法"},
+    "ko": {"open": "언어 페이지", "current": "현재 언어", "help": "도움말"},
+    "th": {"open": "หน้าภาษา", "current": "ภาษาตอนนี้", "help": "วิธีใช้"},
+}
+
+
+def language_quick_replies(family: str, url: str) -> list[dict]:
+    """グループでも使える Quick Reply。言語ページ、今の言語、使い方。"""
+
+    labels = _QUICK_LABELS.get(family) or _QUICK_LABELS["en"]
+    items: list[dict] = []
+    if url and len(url) <= 1000:
+        items.append(
+            {
+                "type": "action",
+                "action": {"type": "uri", "label": labels["open"], "uri": url},
+            }
+        )
+    for key, data in (("current", "langmenu=current"), ("help", "langmenu=help")):
+        items.append(
+            {
+                "type": "action",
+                "action": {
+                    "type": "postback",
+                    "label": labels[key],
+                    "data": data,
+                    "displayText": labels[key],
+                },
+            }
+        )
+    return items
+
+
+def menu_family(codes: Sequence[str]) -> str:
+    """クイック返信の表示言語。ja/zh/ko/th がグループにあればそれを、無ければ英語。"""
+
+    present = {ui_family(code) for code in codes if code}
+    for family in ("ja", "zh", "ko", "th"):
+        if family in present:
+            return family
+    return "en"
 
 
 def join_settings_page_note(url: str) -> str:
@@ -713,6 +1092,8 @@ def _strip_filler(text: str) -> str:
     for word in _LATIN_FILLERS:
         leftover = re.sub(rf"\b{word}\b", " ", leftover, flags=re.IGNORECASE)
     leftover = re.sub(r"\s+", "", leftover)
+    for token in _REQUEST_FILLERS:
+        leftover = leftover.replace(token, "")
     for token in _KANA_FILLERS:
         leftover = leftover.replace(token, "")
     # 絵文字・数字・記号は言語名の残りではない
@@ -763,6 +1144,8 @@ def _build_alias_tables() -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]
         if "（" in japanese:
             add_supported(japanese.split("（", 1)[0], code)
     for surface, code in _EXTRA_ALIASES:
+        add_supported(surface, code)
+    for surface, code in _CROSS_SCRIPT_ALIASES:
         add_supported(surface, code)
 
     supported.sort(key=lambda item: len(item[0]), reverse=True)

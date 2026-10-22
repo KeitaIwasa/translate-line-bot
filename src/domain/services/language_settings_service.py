@@ -7,7 +7,13 @@ from .. import models
 from ..ports import LanguagePreferencePort, MessageRepositoryPort
 from ...infra.jev_language_reader import LANGUAGE_NAMES
 from .interface_translation_service import InterfaceTranslationService
-from .language_mention import selection_prompt, ui_family, unsupported_prompt
+from .language_mention import (
+    need_both_languages_prompt,
+    selection_prompt,
+    setup_confirmation,
+    ui_family,
+    unsupported_prompt,
+)
 from .plan_policy import FREE_PLAN, PRO_PLAN, language_limit_for, resolve_effective_plan
 from ...presentation.list_layout import normalize_inline_lists
 from ...presentation.reply_formatter import RTL_LANG_PREFIXES, _wrap_bidi_isolate, strip_source_echo
@@ -70,6 +76,15 @@ class LanguageSettingsService:
                 return models.ReplyBundle(messages=messages)
             return None
 
+        # 片側だけでは双方向に訳せない。確認ボタンで止まらず、もう一方を聞く
+        if len(limited_supported) == 1:
+            label = limited_supported[0].name or limited_supported[0].code
+            ask = need_both_languages_prompt([label], family=family)
+            if messages:
+                messages.append({"type": "text", "text": ask})
+                return models.ReplyBundle(messages=messages)
+            return models.ReplyBundle(texts=[ask[:5000]])
+
         prompt_texts = self._prepare_language_prompt_texts(limited_supported, result)
         confirm_payload = self._encode_postback_payload(
             {
@@ -117,6 +132,7 @@ class LanguageSettingsService:
         completion_text: str | None = None,
         limit_text: str | None = None,
         max_languages: int | None = None,
+        settings_url: str = "",
     ) -> models.ReplyBundle | None:
         limit = self._resolved_limit(max_languages)
         tuples = self._dedup_languages(languages)
@@ -131,8 +147,10 @@ class LanguageSettingsService:
             return None
         self._repo.set_translation_enabled(group_id, True)
 
-        base_text = completion_text or self._build_completion_message(tuples)
-        text = self._build_multilingual_completion_message(base_text, tuples)
+        # ボタンに入っていた completion_text は使わない。言語ごとに静的文を一度ずつ出す。
+        # 未登録の言語は英語。リンクは呼び出し側が今発行したトークン。
+        del completion_text
+        text = setup_confirmation(tuples, url=settings_url or "")
         return models.ReplyBundle(texts=[text])
 
     def cancel(self, *, group_id: str, primary_language: str, cancel_text: str | None = None) -> models.ReplyBundle | None:
@@ -470,6 +488,8 @@ def normalize_catalog_selection(
         return CatalogSelection(languages=selected, error="unsupported", unsupported=tuple(unsupported))
     if not selected:
         return CatalogSelection(languages=(), error="empty", unsupported=())
+    if len(selected) < 2:
+        return CatalogSelection(languages=selected, error="need_pair", unsupported=())
     if len(selected) > resolved_limit:
         return CatalogSelection(languages=selected, error="too_many", unsupported=())
     return CatalogSelection(languages=selected, error=None, unsupported=())
