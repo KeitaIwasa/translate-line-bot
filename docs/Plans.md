@@ -41,3 +41,4 @@
 [x] explicit_reset が閾値以上なのに operation が add / remove / add_and_remove のときは reset_conflict で Gemini に戻す（デプロイはしない）
 [x] add_and_remove で追加と削除に同じコードがあるときは mixed_signals で Gemini に戻す（デプロイはしない）
 [x] reset_all に追加言語があるときは全消去せずその言語だけに置き換え、翻訳は続ける。Gemini には「Xだけにして」を置換として書く（デプロイはしない）
+[x] 言語の置き換えと add_and_remove は削除と挿入を一つのトランザクションにし、挿入失敗では元の言語を残す（デプロイはしない）

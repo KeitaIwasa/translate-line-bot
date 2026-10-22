@@ -29,6 +29,24 @@ GROUP_LANG_MARKER = "__group_lang__"
 PRIVATE_ASSISTANT_MARKER = "__assistant__"
 logger = logging.getLogger(__name__)
 
+# 言語行の追加。ON CONFLICT は名前の更新だけに使う
+_UPSERT_GROUP_LANGUAGE_SQL = """
+INSERT INTO group_languages (group_id, lang_code, lang_name)
+VALUES (%s, %s, %s)
+ON CONFLICT (group_id, lang_code) DO UPDATE SET lang_name = EXCLUDED.lang_name
+"""
+
+# 置き換えのとき、言語の入れ替えと同じトランザクションで翻訳をオンにする
+_TRANSLATION_ENABLED_SQL = """
+INSERT INTO group_settings (group_id, translation_enabled, translation_paused_reason)
+VALUES (%s, %s, NULL)
+ON CONFLICT (group_id)
+DO UPDATE SET
+    translation_enabled = EXCLUDED.translation_enabled,
+    translation_paused_reason = NULL,
+    updated_at = NOW()
+"""
+
 # 表示名が DB に無いとき、LINE 取得に失敗し続けても毎リクエスト SQL しないための短い TTL。
 _DISPLAY_NAME_MISS_TTL_SECONDS = 60.0
 
@@ -691,13 +709,64 @@ class NeonMessageRepository(MessageRepositoryPort):
         # 複数行の INSERT を一つのトランザクションにまとめる
         with self._client.connection() as conn, conn.cursor() as cur:
             cur.executemany(
-                """
-                INSERT INTO group_languages (group_id, lang_code, lang_name)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (group_id, lang_code) DO UPDATE SET lang_name = EXCLUDED.lang_name
-                """,
+                _UPSERT_GROUP_LANGUAGE_SQL,
                 [(group_id, code, name) for code, name in limited],
             )
+        self._invalidate_group_runtime(group_id)
+
+    def replace_group_languages(self, group_id: str, languages: Sequence[Tuple[str, str]]) -> None:
+        """グループの言語を指定の集合だけにし、翻訳はオンのままにする。
+
+        削除と挿入を別々に確定すると、挿入の一時失敗で言語が空になる。
+        翻訳オンの更新も同じトランザクションに含め、失敗時は言語も翻訳状態も戻す。
+        """
+        normalized = self._normalize_languages(languages)
+        with self._client.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM group_languages WHERE group_id = %s", (group_id,))
+                    if normalized:
+                        cur.executemany(
+                            _UPSERT_GROUP_LANGUAGE_SQL,
+                            [(group_id, code, name) for code, name in normalized],
+                        )
+                    cur.execute(_TRANSLATION_ENABLED_SQL, (group_id, True))
+        self._invalidate_group_runtime(group_id)
+
+    def apply_language_changes(
+        self,
+        group_id: str,
+        add: Sequence[Tuple[str, str]],
+        remove: Sequence[str],
+    ) -> None:
+        """追加と削除を一つのトランザクションで適用する。
+
+        削除だけ確定したあとに追加が失敗すると、外した言語が戻らない。
+        """
+        remove_codes: List[str] = []
+        seen: set[str] = set()
+        for code in remove:
+            lowered = (code or "").lower()
+            if not lowered or lowered in seen:
+                continue
+            seen.add(lowered)
+            remove_codes.append(lowered)
+        normalized_add = self._normalize_languages(add)
+        if not remove_codes and not normalized_add:
+            return
+        with self._client.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    if remove_codes:
+                        cur.execute(
+                            "DELETE FROM group_languages WHERE group_id = %s AND lang_code = ANY(%s)",
+                            (group_id, remove_codes),
+                        )
+                    if normalized_add:
+                        cur.executemany(
+                            _UPSERT_GROUP_LANGUAGE_SQL,
+                            [(group_id, code, name) for code, name in normalized_add],
+                        )
         self._invalidate_group_runtime(group_id)
 
     def remove_group_languages(self, group_id: str, lang_codes: Sequence[str]) -> None:
@@ -741,18 +810,7 @@ class NeonMessageRepository(MessageRepositoryPort):
     def set_translation_enabled(self, group_id: str, enabled: bool) -> None:
         try:
             with self._client.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO group_settings (group_id, translation_enabled, translation_paused_reason)
-                    VALUES (%s, %s, NULL)
-                    ON CONFLICT (group_id)
-                    DO UPDATE SET
-                        translation_enabled = EXCLUDED.translation_enabled,
-                        translation_paused_reason = NULL,
-                        updated_at = NOW()
-                    """,
-                    (group_id, enabled),
-                )
+                cur.execute(_TRANSLATION_ENABLED_SQL, (group_id, enabled))
         except errors.UndefinedColumn:
             with self._client.cursor() as cur:
                 cur.execute(

@@ -960,19 +960,14 @@ class MessageHandler:
 
         normalized_add: List[Tuple[str, str]] = []
         if replacing:
-            # いったん空にしてから、追加リストの言語だけを入れる
-            self._repo.reset_group_language_settings(event.group_id)
+            # 削除と挿入は一つのトランザクション。挿入失敗で既存言語を消さない
             normalized_add = self._normalize_new_languages(add_langs, set())
-            if normalized_add:
-                self._repo.add_group_languages(event.group_id, normalized_add)
+            self._repo.replace_group_languages(event.group_id, normalized_add)
         elif op == "add_and_remove":
             remove_set = {code.lower() for code in remove_codes if code}
             after_remove = [lang for lang in current_langs if lang not in remove_set]
             normalized_add = self._normalize_new_languages(add_langs, set(after_remove))
-            if remove_codes:
-                self._repo.remove_group_languages(event.group_id, remove_codes)
-            if normalized_add:
-                self._repo.add_group_languages(event.group_id, normalized_add)
+            self._repo.apply_language_changes(event.group_id, normalized_add, remove_codes)
         elif op == "add":
             normalized_add = self._normalize_new_languages(add_langs, set(current_langs))
             if normalized_add:

@@ -370,6 +370,9 @@ class RecordingRepo(DummyRepo):
         super().__init__()
         self.languages = list(initial)
         self.translation_enabled = True
+        self.replace_called = False
+        self.apply_called = False
+        self.reset_called = False
 
     def fetch_group_languages(self, *_args, **_kwargs):
         return list(self.languages)
@@ -385,6 +388,19 @@ class RecordingRepo(DummyRepo):
 
     def set_translation_enabled(self, _group_id, enabled: bool):
         self.translation_enabled = enabled
+
+    def replace_group_languages(self, _group_id, languages):
+        self.replace_called = True
+        self.languages = [code for code, _name in languages if code]
+        self.translation_enabled = True
+
+    def apply_language_changes(self, _group_id, languages_to_add, languages_to_remove):
+        self.apply_called = True
+        lowered = {(code or "").lower() for code in languages_to_remove if code}
+        self.languages = [lang for lang in self.languages if lang.lower() not in lowered]
+        for code, _name in languages_to_add:
+            if code and code not in self.languages:
+                self.languages.append(code)
 
 
 class RecordingLineClient(DummyLineClient):
@@ -555,7 +571,8 @@ def test_reset_all_with_add_list_replaces_languages_and_keeps_translation():
         decision,
         "英語だけにして",
     ) is True
-    assert repo.reset_called is True
+    assert repo.reset_called is False
+    assert repo.replace_called is True
     assert repo.languages == ["en"]
     assert repo.translation_enabled is True
     assert line.last_text == "English has been set as the translation language."
