@@ -38,6 +38,14 @@ class _BoomRouter:
         raise AssertionError("quota pause should answer before the command router")
 
 
+class _ActionRouter:
+    def __init__(self, action: str):
+        self._action = action
+
+    def decide(self, _text):
+        return models.CommandDecision(action=self._action, instruction_language="en", ack_text="")
+
+
 class _ResumeRouter:
     def decide(self, _text):
         return models.CommandDecision(action="resume", instruction_language="en", ack_text="")
@@ -163,6 +171,64 @@ def test_free_50_translates_and_sends_stop_notice():
     assert "used all 50 free messages" in joined
     assert _next_month(datetime.now(timezone.utc)) in joined
     assert _uris(line.payloads) == ["https://short.example.com/cs"]
+
+
+def test_free_50_persists_quota_pause_before_the_next_message():
+    """50件目の停止案内と同時に quota 停止を残す。51件目を待たない。"""
+
+    line = _CapturingLine()
+    translation = RecordingTranslationService()
+    repo = ProQuotaRepo(initial_usage=49, paid=False)
+    handler = _with_checkout(_build_handler(repo, line, translation))
+
+    handler._handle_translation_flow(_build_event("fiftieth"), sender_name="user", translation_enabled=True)
+
+    assert repo.usage == 50
+    assert translation.calls == 1
+    assert repo.notice_plan == "free"
+    assert repo.translation_enabled is False
+    assert repo.paused_reason == "quota"
+    assert "Translation stopped" in "\n".join(line.sent_texts)
+
+    line.sent_texts.clear()
+    line.payloads.clear()
+    handler._command_router = _ActionRouter("resume")
+    handler._handle_command(_build_event("resume"), "resume")
+
+    resumed = "\n".join(line.sent_texts)
+    assert "still paused" in resumed
+    assert "I will resume" not in resumed
+    assert repo.translation_enabled is False
+    assert repo.paused_reason == "quota"
+
+    line.sent_texts.clear()
+    handler._command_router = _ActionRouter("pause")
+    handler._handle_command(_build_event("pause"), "pause")
+
+    assert repo.translation_enabled is False
+    assert repo.paused_reason == "quota"
+    assert "I will pause" not in "\n".join(line.sent_texts)
+
+    line.sent_texts.clear()
+    handler._handle_translation_flow(_build_event("fifty-first"), sender_name="user", translation_enabled=True)
+
+    assert line.sent_texts == []
+    assert translation.calls == 1
+    assert repo.usage == 50
+    assert repo.notice_plan == "free"
+    assert repo.paused_reason == "quota"
+
+    repo.usage = 0
+    line.sent_texts.clear()
+    handler._handle_translation_flow(_build_event("new month"), sender_name="user", translation_enabled=False)
+
+    assert repo.translation_enabled is True
+    assert repo.paused_reason is None
+    assert translation.calls == 2
+    assert repo.usage == 1
+    reset = "\n".join(line.sent_texts)
+    assert "has reset" in reset
+    assert _next_month(datetime.now(timezone.utc)) in reset
 
 
 def test_free_51_pauses_without_repeating_the_notice():

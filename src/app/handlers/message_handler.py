@@ -1579,6 +1579,10 @@ class MessageHandler:
                 period_end=period_end,
             )
             self._repo.set_limit_notice_plan(event.group_id, flow.decision.period_key, plan_key)
+            # 50件目は allowed のまま停止案内だけ出す。ここで理由を残さないと、
+            # 次の投稿までの再開・停止メンションが手動停止になり、翌月の自動再開が外れる。
+            if stop_translation_on_quota(plan_key):
+                self._pause_translation_for_quota(event.group_id)
             messages.append({"type": "text", "text": notice_text})
             self._append_plan_link(messages, notice_url)
         elif self._should_send_approaching_notice(plan_key, limit, flow.decision.usage):
