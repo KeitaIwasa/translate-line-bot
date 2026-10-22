@@ -173,9 +173,10 @@ LINE_CHANNEL_SECRET=xxx
 LINE_CHANNEL_ACCESS_TOKEN=xxx
 NEON_DATABASE_URL=postgres://...
 GEMINI_API_KEY=your_google_ai_key
+# グループメンションの判定（Jev）に使う TypeSafe の API キー。空だとメンションが全部判定エラーになる
+TYPESAFE_API_KEY=your_typesafe_api_key
 OPENAI_API_KEY=your_openai_key
 OPENAI_SUPPORT_MODEL=gpt-5.2
-OPENAI_GROUP_MENTION_MODEL=gpt-5.2
 OPENAI_GUARDRAIL_MODEL=gpt-4.1-mini
 PRIVATE_CHAT_HISTORY_LIMIT=5
 STRIPE_SECRET_KEY=sk_live_or_test
@@ -299,6 +300,17 @@ STACK_NAME=translate-line-bot-stg STAGE=stg PROFILE=line-translate-bot GEMINI_MO
 STACK_NAME=translate-line-bot-prod STAGE=prod PROFILE=line-translate-bot GEMINI_MODEL=gemini-2.5-flash ./scripts/deploy.sh
 ```
 
+Jev（TypeSafe）の API キーは SSM SecureString に置きます。`scripts/deploy.sh` は `STAGE` を次の既存名へ対応させ、`TypesafeApiKeySsmParameter` として SAM に渡します。`TYPESAFE_API_KEY_SSM_PARAMETER` で上書きできますが、Lambda が読めるのは `/kotori/<STAGE>/` 配下だけなので、その中で指定します。
+
+| `STAGE` | SSM パラメーター名 |
+| --- | --- |
+| `stg`（既定） | `/kotori/stg/typesafe-api-key` |
+| `prod` | `/kotori/prod/typesafe-api-key` |
+
+`stg` / `prod` 以外（例: `prd`）ではデプロイを始めません。パラメーターが無い場合も、値を表示せず（`aws ssm get-parameter` に `--with-decryption` を付けない）デプロイを止めます。
+
+Lambda `LineWebhookFunction` の実行ロールは、デプロイしたステージの `/kotori/<StageName>/*` に対する `ssm:GetParameter` と、SSM 経由の `kms:Decrypt`（暗号コンテキストがその配下のときだけ）を持ちます。テンプレートは CMK を作成しません。AWS 管理キー `alias/aws/ssm` でも、同じアカウントの顧客管理キーでも復号できます。
+
 ### 3-1. SAM 直接実行の例（必要時のみ）
 
 ```bash
@@ -316,8 +328,11 @@ sam deploy \
     MaxContextMessages=8 \
     TranslationRetry=2 \
     RuntimeSecretArn=stg/line-translate-bot-secrets \
-    EnableStripe=true
+    EnableStripe=true \
+    TypesafeApiKeySsmParameter=/kotori/stg/typesafe-api-key
 ```
+
+本番を直接デプロイする場合は `TypesafeApiKeySsmParameter=/kotori/prod/typesafe-api-key` を渡します。空のままだと Jev のキーが無く、グループメンションがすべて失敗します。通常は `scripts/deploy.sh` がステージに合わせて渡します。
 
 初回のみ `--guided` で `StageName` や `RuntimeSecretArn` を対話入力し、`samconfig.toml` に保存すると便利です。`--resolve-s3` を付けると SAM が管理 S3 バケットを自動で用意します。
 
@@ -346,7 +361,8 @@ STACK_NAME=translate-line-bot-prod STAGE=prod PROFILE=line-translate-bot ./scrip
 - `STACK_NAME` (既定: translate-line-bot-stg)
 - `PROFILE` (既定: line-translate-bot)
 - `REGION` (既定: ap-northeast-1)
-- `STAGE` (既定: stg)
+- `STAGE` (既定: stg。`stg` または `prod`。TypeSafe キーの SSM 名は上記の対応表)
+- `TYPESAFE_API_KEY_SSM_PARAMETER`（既定: `STAGE=stg` なら `/kotori/stg/typesafe-api-key`、`STAGE=prod` なら `/kotori/prod/typesafe-api-key`）
 - `S3_BUCKET`（未指定なら `--resolve-s3` で自動バケット利用）
 - `RUNTIME_SECRET_ARN` ほか Lambda パラメータ
 - `PYTHON_BIN`（既定: `python3`。`.venv/bin/python` があれば自動で優先）

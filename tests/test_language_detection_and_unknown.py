@@ -117,7 +117,8 @@ class DummyRepo:
 @pytest.fixture(scope="module")
 def gemini_adapter():
     api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
+    # 他テストが import 時に入れるダミー値ではライブ呼び出しをしない
+    if not api_key or api_key in {"dummy", "x"}:
         pytest.skip("GEMINI_API_KEY is not set; live Gemini test skipped")
     model = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
     return GeminiTranslationAdapter(api_key=api_key, model=model, timeout_seconds=20)

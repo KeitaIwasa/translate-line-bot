@@ -1,4 +1,4 @@
-import os
+import pytest
 
 from src.app.handlers.message_handler import MessageHandler
 from src.domain import models
@@ -8,10 +8,13 @@ from src.domain.services.language_detection_service import LanguageDetectionServ
 from src.app.handlers.postback_handler import PostbackHandler
 
 
-os.environ.setdefault("LINE_CHANNEL_SECRET", "dummy")
-os.environ.setdefault("LINE_CHANNEL_ACCESS_TOKEN", "dummy")
-os.environ.setdefault("GEMINI_API_KEY", "dummy")
-os.environ.setdefault("NEON_DATABASE_URL", "postgres://dummy")
+@pytest.fixture(autouse=True)
+def _isolate_required_runtime_env(monkeypatch):
+    """収集時にプロセス全体へダミーキーを残さない。ライブ Gemini テストが dummy を本物と誤認する。"""
+    monkeypatch.setenv("LINE_CHANNEL_SECRET", "dummy")
+    monkeypatch.setenv("LINE_CHANNEL_ACCESS_TOKEN", "dummy")
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy")
+    monkeypatch.setenv("NEON_DATABASE_URL", "postgres://dummy")
 
 
 class DummyLineClient:

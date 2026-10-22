@@ -58,6 +58,17 @@ Parameters:
       - false
     Description: Set to true when Stripe secrets/price IDs are provisioned
 
+  TypesafeApiKey:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: TypeSafe (Jev) API key. Leave empty to use TypesafeApiKeySsmParameter or disable Jev
+  TypesafeApiKeySsmParameter:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^/kotori/.+"
+    Description: SSM SecureString name under /kotori/<StageName>/ (e.g. /kotori/stg/typesafe-api-key). The execution role can GetParameter and kms:Decrypt only that prefix. Empty disables the SSM lookup
+
 Conditions:
   UseStripe: !Equals [!Ref EnableStripe, "true"]
 
@@ -123,8 +134,14 @@ Globals:
         MESSAGE_ENCRYPTION_KEY: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:MESSAGE_ENCRYPTION_KEY}}"
         OPENAI_API_KEY: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:OPENAI_API_KEY}}"
         OPENAI_SUPPORT_MODEL: gpt-5.2
+        # グループメンション分類は Jev + Gemini に移行済みで未使用。スタック整理時に削除する。
         OPENAI_GROUP_MENTION_MODEL: gpt-5.2
         OPENAI_GUARDRAIL_MODEL: gpt-4.1-mini
+        TYPESAFE_API_KEY: !Ref TypesafeApiKey
+        TYPESAFE_API_KEY_SSM_PARAMETER: !Ref TypesafeApiKeySsmParameter
+        JEV_MODEL: jev-latest
+        JEV_TIMEOUT_SECONDS: "1.5"
+        JEV_MIN_CONFIDENCE: "0.8"
         PRIVATE_CHAT_HISTORY_LIMIT: 5
         CONTACT_TO_EMAIL: contact@iwasadigital.com
         CONTACT_FROM_EMAIL: no-reply@iwasadigital.com
@@ -146,6 +163,23 @@ Resources:
       Description: Handles LINE webhook events and triggers translation pipeline
       Policies:
         - AWSLambdaBasicExecutionRole
+        # stg スタックは /kotori/stg/*、prod スタックは /kotori/prod/* だけを読む。
+        # 既定のキー名は typesafe-api-key。テンプレートは CMK を作らない。
+        # SecureString は AWS 管理キーでも顧客管理キーでも、SSM 経由かつその配下の暗号コンテキストに限って復号する。
+        - Statement:
+            - Sid: ReadTypesafeApiKey
+              Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/kotori/${StageName}/*"
+            - Sid: DecryptTypesafeApiKey
+              Effect: Allow
+              Action: kms:Decrypt
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  kms:ViaService: !Sub "ssm.${AWS::Region}.amazonaws.com"
+                StringLike:
+                  kms:EncryptionContext:PARAMETER_ARN: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/kotori/${StageName}/*"
       Events:
         Webhook:
           Type: HttpApi

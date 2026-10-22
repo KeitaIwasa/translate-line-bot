@@ -5,7 +5,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable, List
+from typing import Iterable, List, Sequence
 
 import requests
 
@@ -16,6 +16,32 @@ from src.infra.gemini_generation_config import build_generation_config
 from src.infra.translation_schema import TRANSLATION_SCHEMA
 
 logger = logging.getLogger(__name__)
+
+UI_BATCH_SYSTEM = """
+You translate short UI strings for a LINE bot subscription menu.
+The user message is JSON with target_language and items[{id, text}].
+Return JSON {"items":[{"id","text"}]} using the same ids, one translation each, in target_language.
+Keep the meaning. Preserve numbers, dates, the plan names Free, Standard and Pro, and URLs.
+Do not add explanations or extra items.
+""".strip()
+
+UI_BATCH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "text": {"type": "string"},
+                },
+                "required": ["id", "text"],
+            },
+        }
+    },
+    "required": ["items"],
+}
 
 SYSTEM_INSTRUCTION = """
 You are an interpreting engine for a multilingual LINE group.
@@ -136,6 +162,72 @@ class GeminiTranslationAdapter(TranslationPort):
             [item.lang for item in results],
         )
         return results
+
+    def translate_ui_strings(self, texts: Sequence[str], target_language: str) -> List[str]:
+        """複数のUI文言を1回のGemini呼び出しで翻訳する。
+
+        失敗は例外のまま呼び出し元へ返す。呼び出し元がリトライし、使い切ったあとで原文に戻す。
+        """
+
+        originals = [str(text) for text in texts]
+        if not originals:
+            return []
+        normalized = (target_language or "").strip()
+        if not normalized or normalized.lower().startswith("en"):
+            return originals
+        return self._translate_ui_strings_once(originals, normalized)
+
+    def _translate_ui_strings_once(self, originals: List[str], target_language: str) -> List[str]:
+        items = [{"id": str(index), "text": text} for index, text in enumerate(originals)]
+        payload = {
+            "systemInstruction": {"parts": [{"text": UI_BATCH_SYSTEM}]},
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "text": json.dumps(
+                                {"target_language": target_language, "items": items},
+                                ensure_ascii=False,
+                            )
+                        }
+                    ],
+                }
+            ],
+            "generationConfig": build_generation_config(self._model, UI_BATCH_SCHEMA),
+        }
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent"
+        started = time.perf_counter()
+        response = self._session.post(
+            url,
+            params={"key": self._api_key},
+            json=payload,
+            timeout=self._timeout,
+        )
+        logger.info(
+            "Gemini UI batch | model=%s elapsed_ms=%.2f count=%s",
+            self._model,
+            (time.perf_counter() - started) * 1000,
+            len(originals),
+        )
+        response.raise_for_status()
+        body = response.json()
+        part_text = body["candidates"][0]["content"]["parts"][0]["text"]
+        data = json.loads(part_text)
+        translated_items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(translated_items, list):
+            raise ValueError("UI batch response missing items")
+        by_id: dict[str, str] = {}
+        for item in translated_items:
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("id") or "")
+            text = item.get("text")
+            if item_id and isinstance(text, str) and text.strip():
+                by_id[item_id] = text.strip()
+        if not by_id:
+            raise ValueError("UI batch response had no translations")
+        return [by_id.get(str(index), originals[index]) for index in range(len(originals))]
 
     def _build_payload(
         self,
