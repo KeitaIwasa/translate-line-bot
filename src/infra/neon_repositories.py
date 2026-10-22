@@ -669,7 +669,10 @@ class NeonMessageRepository(MessageRepositoryPort):
         issued_at: Optional[str] = None,
     ) -> LanguagePromptResult:
         normalized = self._normalize_languages(languages)
-        limited = normalized[: self._max_group_languages]
+        # 上限を超えた確認は先頭だけ保存しない。ゲートの前に戻す
+        if len(normalized) > self._max_group_languages:
+            raise ValueError("language count exceeds the absolute cap")
+        limited = normalized
         with self._client.connection() as conn:
             with conn.cursor() as cur:
                 outcome = self._language_prompt_gate(cur, group_id, issued_at)
@@ -761,6 +764,8 @@ class NeonMessageRepository(MessageRepositoryPort):
         """
 
         normalized = None if languages is None else self._normalize_languages(languages)
+        if normalized is not None and len(normalized) > self._max_group_languages:
+            raise ValueError("language count exceeds the absolute cap")
         with self._client.connection() as conn:
             with conn.transaction():
                 with conn.cursor() as cur:
@@ -782,14 +787,16 @@ class NeonMessageRepository(MessageRepositoryPort):
         if not languages:
             return
         existing = self.fetch_group_languages(group_id)
-        remaining = max(self._max_group_languages - len(existing), 0)
         normalized = self._normalize_languages(languages, existing)
-        limited = normalized[:remaining]
-        if not limited:
+        # 収まりきらない追加は、一部だけ入れずに戻す
+        if len(existing) + len(normalized) > self._max_group_languages:
             logger.info(
                 "Language add skipped due to limit",
                 extra={"group_id": group_id, "requested": [code for code, _ in languages]},
             )
+            return
+        limited = normalized
+        if not limited:
             return
         # 複数行の INSERT を一つのトランザクションにまとめる
         with self._client.connection() as conn, conn.cursor() as cur:
@@ -829,6 +836,10 @@ class NeonMessageRepository(MessageRepositoryPort):
         normalized_add = self._normalize_languages(add)
         if not remove_codes and not normalized_add:
             return
+        existing = {code.lower() for code in self.fetch_group_languages(group_id)}
+        resulting = (existing - set(remove_codes)) | {code for code, _name in normalized_add}
+        if len(resulting) > self._max_group_languages:
+            raise ValueError("language count exceeds the absolute cap")
         with self._client.connection() as conn:
             with conn.transaction():
                 with conn.cursor() as cur:

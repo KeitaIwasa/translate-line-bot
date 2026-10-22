@@ -13,6 +13,7 @@ from .domain.services.language_settings_service import (
     normalize_catalog_selection,
     resolve_group_language_limit,
 )
+from .domain.services.language_update import decide_language_update
 from .infra.jev_language_reader import LANGUAGE_CATALOG, LANGUAGE_NAMES
 from .infra.signed_token import TokenError, verify_token
 from .presentation.group_language_page import (
@@ -98,7 +99,23 @@ def handle_group_language_request(
         limit=limit,
         already=[code for code, _name in current],
     )
-    if selection.error:
+    stored_names = {(code or "").lower(): name for code, name in current}
+    languages = tuple(
+        (code, LANGUAGE_NAMES.get(code) or stored_names.get(code) or name)
+        for code, name in selection.languages
+    )
+    # チャットと同じ決定。未対応や上限超えは保存しない。同じ集合は書き換えない
+    update = decide_language_update(
+        mode="replace",
+        current=current,
+        requested=languages,
+        limit=limit,
+        family=family,
+        kind="unsupported" if selection.error == "unsupported" else "languages",
+        unsupported=selection.unsupported,
+    )
+    if selection.error or update.action != "save":
+        error = selection.error or update.page_error or "empty"
         return _html_response(
             400,
             render_group_language_page(
@@ -108,22 +125,13 @@ def handle_group_language_request(
                 checked=[code for code, _name in selection.languages],
                 current_labels=current_labels,
                 limit=limit,
-                error=selection.error,
+                error=error,
                 unsupported=selection.unsupported,
             ),
         )
-
-    stored_names = {(code or "").lower(): name for code, name in current}
-    languages = tuple(
-        (code, LANGUAGE_NAMES.get(code) or stored_names.get(code) or name)
-        for code, name in selection.languages
-    )
-    current_codes = {(code or "").lower() for code, _name in current if code}
-    new_codes = {code for code, _name in languages}
-    changed = current_codes != new_codes
-    # 同じ選択でも、確認を閉じて翻訳を戻す。変更ありと同じ確定処理を使う
-    _commit_web_languages(repo, group_id, languages, replace=changed)
-    if not changed:
+    # 同じ選択でも、確認を閉じて翻訳を戻す。言語行は変えない
+    _commit_web_languages(repo, group_id, languages, replace=update.changed)
+    if not update.changed:
         return _html_response(
             200,
             render_group_language_page(

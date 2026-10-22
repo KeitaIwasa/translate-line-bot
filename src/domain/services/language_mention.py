@@ -606,13 +606,18 @@ def project_language_codes(
     mode: str,
     remove: Sequence[str] = (),
 ) -> list[str]:
-    """保存後の言語コード。replace は incoming だけ、add は現在から remove を引いて足す。"""
+    """保存後の言語コード。未知のモードは追加や置換に落とさない。"""
 
     if mode in {"set", "replace"}:
         return unique_language_codes(incoming)
-    removed = set(unique_language_codes(remove))
-    kept = [code for code in unique_language_codes(current) if code not in removed]
-    return unique_language_codes([*kept, *incoming])
+    if mode == "remove":
+        removed = set(unique_language_codes(remove or incoming))
+        return [code for code in unique_language_codes(current) if code not in removed]
+    if mode == "add":
+        removed = set(unique_language_codes(remove))
+        kept = [code for code in unique_language_codes(current) if code not in removed]
+        return unique_language_codes([*kept, *incoming])
+    raise ValueError(f"unknown language mode: {mode}")
 
 
 def exceeds_language_limit(codes: Sequence[str], *, limit: int) -> bool:
@@ -705,8 +710,13 @@ def over_limit_notice(
     初回の列挙も追加も同じ関数で見る。今の言語がある追加だけ、外す言語を聞く。
     """
 
+    if mode == "remove":
+        raise ValueError("remove is not an over-limit write")
+    if mode not in {"add", "replace", "set"}:
+        raise ValueError(f"unknown language mode: {mode}")
     incoming = [(code or "").strip().lower() for code, _name in requested if (code or "").strip()]
-    projected = project_language_codes(current, incoming, mode=mode, remove=remove)
+    project_mode = "replace" if mode in {"replace", "set"} else "add"
+    projected = project_language_codes(current, incoming, mode=project_mode, remove=remove)
     if not exceeds_language_limit(projected, limit=limit):
         return None
     wanted = [
@@ -1121,6 +1131,20 @@ def completion_prompt(pairs: Sequence[tuple[str, str]], *, family: str) -> str:
     if len(names) == 1:
         return f"{names[0]} has been set as the translation language."
     return f"{_english_join(names)} have been set as the translation languages."
+
+
+def no_languages_yet_prompt(family: str) -> str:
+    """言語が無いグループで削除だけ来たとき。保存しない。"""
+
+    if family == "ja":
+        return "翻訳言語はまだ設定されていません。"
+    if family == "zh":
+        return "还没有设置翻译语言。"
+    if family == "ko":
+        return "아직 번역 언어가 없어."
+    if family == "th":
+        return "ยังไม่ได้ตั้งภาษาแปล"
+    return "No translation languages are set yet."
 
 
 def unrecognized_prompt(family: str) -> str:

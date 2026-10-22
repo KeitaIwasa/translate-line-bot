@@ -309,6 +309,29 @@ def test_enrollment_saves_a_pair_once_and_includes_a_fresh_link():
     assert line.last_messages is None or line.last_messages[0].get("type") != "template"
 
 
+def test_remove_on_a_group_with_no_languages_saves_nothing():
+    """削除を初回設定の置換として保存しない。翻訳は止めたまま、ページのリンクを返す。"""
+
+    cases = (
+        ("英語と日本語を削除して", "翻訳言語はまだ設定されていません。"),
+        ("remove English and Japanese", "No translation languages are set yet."),
+    )
+    for text, expected in cases:
+        repo = _Repo()
+        line = _Line()
+        handler = _handler(repo, line)
+
+        assert handler._attempt_language_enrollment(_event(text)) is True
+
+        assert repo.languages == []
+        assert repo.completed is None
+        assert repo.enabled == [False]
+        reply = line.last_text or ""
+        assert expected in reply
+        assert "group-languages" in reply
+        assert "設定" in reply
+
+
 def test_enrollment_asks_for_the_other_language_and_ignores_noise():
     repo = _Repo()
     line = _Line()
