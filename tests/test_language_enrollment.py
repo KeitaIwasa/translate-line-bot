@@ -308,7 +308,8 @@ def test_language_enrollment_rejects_over_five():
     messages = line.sent["messages"]
     assert len(messages) == 1
     assert messages[0]["type"] == "text"
-    assert "You can set up to 5 translation languages" in messages[0]["text"]
+    assert "最大5つまでだよ" in messages[0]["text"]
+    assert "English" in messages[0]["text"]
 
 
 def test_language_enrollment_rejects_when_total_detected_exceeds_even_with_unsupported():
@@ -360,9 +361,12 @@ def test_language_enrollment_rejects_when_total_detected_exceeds_even_with_unsup
     handler._attempt_language_enrollment(event)
 
     messages = line.sent["messages"]
-    assert len(messages) == 1
     assert messages[0]["type"] == "text"
-    assert "You can set up to 5 translation languages" in messages[0]["text"]
+    assert "Traditional Chinese" in messages[0]["text"]
+    template = messages[-1]["template"]
+    assert template["type"] == "confirm"
+    langs = [item["code"] for item in _decode_payload(template["actions"][0]["data"])["languages"]]
+    assert langs == ["ja", "ru", "zh-hans", "th"]
 
 
 class RecordingRepo(DummyRepo):
@@ -453,7 +457,9 @@ def test_language_settings_add_rejects_when_exceeding_limit():
     handler._handle_language_settings(event, decision, event.text)
 
     assert repo.languages == ["en", "ja", "fr", "de", "th"]
-    assert "You can set up to 5 translation languages" in (line.last_text or "")
+    assert "最大5つまで" in (line.last_text or "")
+    assert "どれを外す" in (line.last_text or "")
+    assert "英語" in (line.last_text or "")
 
 
 def test_language_settings_ack_without_static_text_uses_translation_path():
@@ -507,10 +513,8 @@ def test_language_settings_ack_without_static_text_uses_translation_path():
     )
 
     assert handler._handle_language_settings(event, decision, event.text) is True
-    assert translation.texts
-    assert translation.texts[0][0] == "Language settings have been updated."
-    assert translation.texts[0][1] == ["fr"]
-    assert line.last_text == "Paramètres de langue mis à jour."
+    assert translation.texts == []
+    assert line.last_text == "Japanese and French have been set as the translation languages."
     assert "fr" in repo.languages
 
 
@@ -686,7 +690,7 @@ def test_language_settings_static_ack_is_not_translated_again():
     )
 
     assert handler._handle_language_settings(event, decision, event.text) is True
-    assert line.last_text == "言語設定を更新しました。"
+    assert line.last_text == "英語・日本語になったよ"
 
 
 def test_postback_rejects_over_limit():
@@ -734,7 +738,7 @@ def test_postback_rejects_over_limit():
     handler.handle(event)
 
     assert repo.saved is False
-    assert line.last and "You can set up to 5 translation languages" in line.last
+    assert line.last and "最大5つまでだよ" in line.last
 
 
 def test_postback_sends_multilingual_completion():

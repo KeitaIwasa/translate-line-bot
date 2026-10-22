@@ -5,6 +5,7 @@ from typing import Dict, List, Sequence, Tuple
 from .. import models
 from ..ports import LanguagePreferencePort, MessageRepositoryPort
 from .interface_translation_service import InterfaceTranslationService
+from .language_mention import selection_prompt, ui_family, unsupported_prompt
 from ...presentation.list_layout import normalize_inline_lists
 from ...presentation.reply_formatter import RTL_LANG_PREFIXES, _wrap_bidi_isolate, strip_source_echo
 
@@ -36,10 +37,15 @@ class LanguageSettingsService:
 
         supported = result.supported
         unsupported = result.unsupported
+        family = ui_family(result.primary_language)
 
-        detected_total = len(supported) + len(unsupported)
-        if detected_total > limit:
-            message = self._build_language_limit_message(result.primary_language, max_languages=limit)
+        # 未対応言語は上限に数えない。対応言語が上限を超えたら選ばせて、設定は消さない
+        if len(supported) > limit:
+            labels = [lang.name or lang.code for lang in supported if lang.code]
+            message = selection_prompt(labels, family=family, limit=limit)
+            if unsupported:
+                notice = self._format_unsupported_message(unsupported, result.primary_language)
+                message = f"{notice}\n{message}"
             self._repo.set_translation_enabled(event.group_id, False)
             return models.ReplyBundle(texts=[message[:5000]])
 
@@ -48,7 +54,8 @@ class LanguageSettingsService:
         if unsupported:
             messages.append({"type": "text", "text": self._format_unsupported_message(unsupported, result.primary_language)})
         if dropped:
-            notice = self._build_language_limit_message(result.primary_language, max_languages=limit)
+            labels = [lang.name or lang.code for lang in supported if lang.code]
+            notice = selection_prompt(labels, family=family, limit=limit)
             messages.append({"type": "text", "text": notice})
             self._repo.set_translation_enabled(event.group_id, False)
             if messages:
@@ -111,7 +118,9 @@ class LanguageSettingsService:
         limit = self._resolved_limit(max_languages)
         tuples = self._dedup_languages(languages)
         if len(tuples) > limit:
-            warning = limit_text or self._build_language_limit_message(primary_language, max_languages=limit)
+            family = ui_family(primary_language)
+            labels = [name or code for code, name in tuples if code]
+            warning = limit_text or selection_prompt(labels, family=family, limit=limit)
             return models.ReplyBundle(texts=[warning])
 
         completed = self._repo.try_complete_group_languages(group_id, tuples)
@@ -158,9 +167,7 @@ class LanguageSettingsService:
     ) -> str:
         names = [lang.name or lang.code for lang in unsupported if lang.code]
         filtered = [name for name in names if name]
-        base = "The following languages are not supported: " + ", ".join(filtered)
-        translated = self._translate_template(base, instruction_lang, force=True)
-        return translated or base
+        return unsupported_prompt(filtered, ui_family(instruction_lang))
 
     def _build_language_limit_message(self, instruction_lang: str, *, max_languages: int | None = None) -> str:
         limit = self._resolved_limit(max_languages)

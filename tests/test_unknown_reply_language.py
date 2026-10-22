@@ -159,7 +159,8 @@ def test_unknown_mentions_reply_in_the_message_language():
         ("言語設定", "ja"),
         ("how do I use this bot?", "en"),
         ("Please confirm 明日の予定", "en"),
-        ("Add English と 日本語", "en"),
+        # 「Add English と 日本語」は言語の追加として扱う。未知の混在文は別の文で見る
+        ("Add the notes と 予定", "en"),
         ("👍😂🎉", "ja"),
         ("12345 678", "ja"),
         (f"\uFFFD\u0296\uFFFDAI 開始時間は何?", "ja"),

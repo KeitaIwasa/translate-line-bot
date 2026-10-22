@@ -189,3 +189,39 @@ def test_translate_http_error_does_not_include_api_key_in_exception(monkeypatch,
 
     assert "api-key" not in str(exc_info.value)
     assert "generativelanguage.googleapis.com" not in str(exc_info.value)
+
+
+def test_translate_skips_thought_part_and_trailing_yao(monkeypatch, fixed_datetime):
+    """思考パートと、訳の次の行に付いた「耀耀」は本文に出さない。"""
+
+    payload = {
+        "translations": [{"lang": "en", "text": "Language settings\n耀耀"}],
+    }
+    session = DummySession(
+        response_data={
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {"thought": True, "text": "耀耀"},
+                            {"text": json.dumps(payload)},
+                        ]
+                    }
+                }
+            ]
+        }
+    )
+    monkeypatch.setattr("infra.gemini_translation.requests.Session", lambda: session)
+    client = GeminiTranslationAdapter(api_key="api-key", model="gemini-3.5-flash-lite")
+    request = TranslationRequest(
+        sender_name="Bob",
+        message_text="言語設定",
+        timestamp=fixed_datetime,
+        candidate_languages=["en"],
+        context_messages=[],
+    )
+
+    translations = client.translate(request)
+
+    assert translations[0].text == "Language settings"
+    assert "耀" not in translations[0].text

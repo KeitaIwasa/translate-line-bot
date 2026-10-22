@@ -22,6 +22,40 @@ RTL_LANG_PREFIXES: Sequence[str] = (
 )
 
 
+# 思考の切れ端が、原文に無い同じ漢字の繰り返しになって訳の末尾や次の行に出ることがある
+_REPEAT_CJK_LINE = re.compile(r"^([\u4e00-\u9fff])\1{1,7}$")
+_TRAILING_CJK = re.compile(r"([\u4e00-\u9fff]{1,4})\s*$")
+_LATIN_LETTERS = re.compile(r"[A-Za-z]")
+_CJK_LETTERS = re.compile(r"[\u4e00-\u9fff]")
+
+
+def strip_spurious_boundary_cjk(source_text: str, translated_text: str) -> str:
+    """原文に無い、文末や独立行の漢字断片を落とす。
+
+    Gemini が生成を途中で切ると、訳の境界に「耀」のような漢字が付くことがある。
+    中国語訳そのものは残し、同じ漢字だけの行と、ラテン文字が主の訳の末尾だけを除く。
+    """
+
+    if not translated_text:
+        return translated_text or ""
+    source = source_text or ""
+    kept: list[str] = []
+    for line in translated_text.split("\n"):
+        stripped = line.strip()
+        match = _REPEAT_CJK_LINE.fullmatch(stripped)
+        if match and match.group(1) not in source:
+            continue
+        kept.append(line)
+    text = "\n".join(kept).strip()
+    if not text:
+        return ""
+    if len(_LATIN_LETTERS.findall(text)) > len(_CJK_LETTERS.findall(text)):
+        match = _TRAILING_CJK.search(text)
+        if match and all(char not in source for char in match.group(1)):
+            text = text[: match.start()].rstrip()
+    return text
+
+
 def strip_source_echo(source_text: str, translated_text: str) -> str:
     """Gemini が原文をエコーした部分を除去するユーティリティ。"""
 
@@ -81,7 +115,10 @@ def build_translation_reply(original_text: str, translations: List[TranslationRe
     cleaned = [
         TranslationResult(
             lang=item.lang,
-            text=normalize_translated_user_text(original_text, strip_source_echo(original_text, item.text)),
+            text=normalize_translated_user_text(
+                original_text,
+                strip_spurious_boundary_cjk(original_text, strip_source_echo(original_text, item.text)),
+            ),
         )
         for item in translations
     ]

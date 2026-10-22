@@ -93,6 +93,7 @@ class PostbackHandler:
                 extra={"group_id": event.group_id, "languages": [code for code, _ in tuples]},
             )
         elif action == "cancel":
+            # 確認のキャンセルは、このポストバックをユーザーが押したときだけ。時間切れでは送らない
             bundle = self._lang_settings.cancel(
                 group_id=event.group_id,
                 primary_language=primary_language,

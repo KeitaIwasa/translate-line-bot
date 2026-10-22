@@ -103,7 +103,8 @@ def test_howto_uses_ack_text_without_forcing_resume():
 
     handler._handle_command(event, "使い方を教えて")
 
-    assert handler._line.last_text == "使い方はこの通りです。"
+    assert "Add Thai" in (handler._line.last_text or "")
+    assert "使い方を教えてと送って" not in (handler._line.last_text or "")
     assert repo.translation_enabled_calls == []
 
 
@@ -199,7 +200,8 @@ def test_command_logs_decision_timing_and_text_reply_metadata_without_body(caplo
     caplog.set_level(logging.INFO, logger="src.app.handlers.message_handler")
     handler = _build_handler(_Router())
 
-    handler._handle_command(_event(), "使い方")
+    # 「使い方」単体はルーターより前に即答する。判定ログはルーター経路で残す
+    handler._handle_command(_event(), "このボットの詳しい説明を聞かせて")
 
     logs = "\n".join(record.getMessage() for record in caplog.records)
     assert "Command decision | action=howto instruction_lang=ja" in logs

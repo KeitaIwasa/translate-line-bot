@@ -3,6 +3,7 @@ from src.presentation.reply_formatter import (
     build_translation_reply,
     format_translations,
     strip_source_echo,
+    strip_spurious_boundary_cjk,
     _wrap_bidi_isolate,
 )
 
@@ -26,6 +27,24 @@ def test_build_translation_reply_wraps_bidi_isolates():
     # LTR 行は LRM + LRE/PDF + LRM
     assert lines[1].startswith("\u200E\u202A") and lines[1].endswith("\u200E")
     assert lines[2].startswith("\u200E\u202A") and lines[2].endswith("\u200E")
+
+
+def test_strip_spurious_boundary_cjk_drops_yao_line_and_keeps_translation():
+    """言語設定の訳に、原文に無い「耀耀」の行が付いても落とす。"""
+
+    assert strip_spurious_boundary_cjk("言語設定", "Language settings\n耀耀") == "Language settings"
+    assert strip_spurious_boundary_cjk("言語設定", "Language settings耀") == "Language settings"
+    assert strip_spurious_boundary_cjk("言語設定", "语言设置\n耀耀") == "语言设置"
+    assert "语言设置" in strip_spurious_boundary_cjk("言語設定", "语言设置")
+
+
+def test_build_translation_reply_drops_trailing_yao_line():
+    reply = build_translation_reply(
+        "言語設定",
+        [TranslationResult(lang="en", text="Language settings\n耀耀")],
+    )
+    assert "Language settings" in reply
+    assert "耀" not in reply
 
 
 def test_strip_source_echo_variations():

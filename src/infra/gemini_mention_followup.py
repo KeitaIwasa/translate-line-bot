@@ -52,6 +52,8 @@ Put each numbered step and each bullet on its own line, using a newline before e
 Do not join steps into one paragraph such as "1. ... 2. ...".
 Keep blank lines between paragraphs.
 Answer from the support guide: summarize the relevant features and steps briefly. Keep it short.
+If the user asks how to use the bot, answer immediately. Do not tell them to send another message such as "使い方を教えて".
+Include a short example of changing languages by mentioning the bot, for example "英語と日本語にして" or "Add Thai".
 If the guide does not support a reliable answer, use this English base sentence for ack_text.
 If the user message is in English, use it exactly as is. Otherwise, translate it into the user's language and keep the URL unchanged.
 Base sentence: {HOWTO_FALLBACK_TEXT}
