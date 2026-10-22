@@ -83,6 +83,9 @@ def test_language_settings_prompt_does_not_reset_when_languages_are_unnamed():
     assert "without naming them" not in prompt
     assert "言語を追加したい" in prompt
     assert 'Use operation "reset_all" only together with explicit_reset true.' in prompt
+    assert "「Xだけにして」" in prompt
+    assert '"only X"' in prompt
+    assert 'Use operation "add_and_remove", not "reset_all".' in prompt
     from src.infra.gemini_mention_followup import _LANGUAGE_SCHEMA
 
     assert _LANGUAGE_SCHEMA["properties"]["explicit_reset"]["type"] == "boolean"
@@ -105,6 +108,29 @@ def test_add_language_without_a_name_is_not_reset_even_if_model_says_so():
 
     assert decision.operation == "show"
     assert decision.action == "language_settings"
+
+
+def test_reset_all_with_add_list_is_kept_for_the_handler_to_replace():
+    """「英語だけにして」が reset_all と追加で返っても、追加リストは落とさない。"""
+
+    payload = {
+        "operation": "reset_all",
+        "languages_to_add": [{"code": "en", "name": "English"}],
+        "languages_to_remove": [],
+        "instruction_language": "ja",
+        "ack_text": "リセットしました",
+        "explicit_reset": True,
+    }
+    session = _Session(_Response(text=json.dumps(payload)))
+    decision = _follow_up(session).complete(
+        "language_settings",
+        json.dumps({"user_message": "英語だけにして"}, ensure_ascii=False),
+    )
+
+    assert decision.operation == "reset_all"
+    assert decision.explicit_reset is True
+    assert [item.code for item in decision.languages_to_add] == ["en"]
+    assert [item.name for item in decision.languages_to_add] == ["English"]
 
 
 def test_explicit_reset_request_keeps_reset_all():
@@ -178,6 +204,8 @@ def test_language_settings_show_operation_is_preserved():
     assert decision.instruction_language == "ja"
     assert decision.languages_to_add == []
     assert decision.languages_to_remove == []
+    prompt = session.calls[0]["json"]["systemInstruction"]["parts"][0]["text"]
+    assert '"show"' in prompt or 'operation: "show"' in prompt
 
 
 def test_howto_follow_up_returns_answer_text():

@@ -3,8 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import dataclass
-from typing import Dict, List
+from typing import Callable, Dict, Optional
 
 import requests
 
@@ -12,6 +11,7 @@ from ..domain.models import LanguageChoice, LanguagePreference
 from ..domain.ports import LanguagePreferencePort
 from .gemini_errors import GeminiRateLimitError, GeminiRequestError
 from .gemini_generation_config import build_generation_config
+from .jev_language_reader import read_language_preference
 
 logger = logging.getLogger(__name__)
 
@@ -60,17 +60,46 @@ LANGUAGE_PREF_SCHEMA = {
 
 
 class LanguagePreferenceAdapter(LanguagePreferencePort):
-    """Gemini を使った言語設定推定クライアント。"""
+    """希望言語を Jev で読み、失敗・低確信度・カタログ外のときだけ Gemini に戻す。"""
 
-    def __init__(self, api_key: str, model: str, timeout_seconds: int = 10) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        timeout_seconds: int = 10,
+        *,
+        jev_api_key_provider: Callable[[], str] | None = None,
+        jev_model: str = "jev-latest",
+        jev_timeout_seconds: float = 1.5,
+        jev_min_confidence: float = 0.8,
+        session: Optional[requests.Session] = None,
+    ) -> None:
         self._api_key = api_key
         self._model = model
         self._timeout = timeout_seconds
-        self._session = requests.Session()
+        self._jev_api_key_provider = jev_api_key_provider
+        self._jev_model = jev_model
+        self._jev_timeout = jev_timeout_seconds
+        self._jev_min_confidence = jev_min_confidence
+        self._session = session or requests.Session()
 
     def analyze(self, text: str) -> LanguagePreference | None:
         if not text or not text.strip():
             return None
+
+        if self._jev_api_key_provider is not None:
+            preference, reason = read_language_preference(
+                session=self._session,
+                api_key_provider=self._jev_api_key_provider,
+                model=self._jev_model,
+                timeout_seconds=self._jev_timeout,
+                min_confidence=self._jev_min_confidence,
+                text=text,
+            )
+            # 全言語がはっきり否定されたときだけそのまま返す。不確実帯は low_confidence で Gemini に戻す
+            if reason in {"ok", "no_languages"}:
+                return preference
+            logger.info("Jev language preference fallback | reason=%s", reason)
 
         max_attempts = 2
         last_error: Exception | None = None

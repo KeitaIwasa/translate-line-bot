@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import time
 from typing import Any, Callable, Dict, Optional, Protocol
@@ -9,10 +8,9 @@ import requests
 
 from ..domain.models import CommandDecision
 from ..domain.ports import CommandRouterPort
+from .jev_api import extract_user_message, post_systemone, resolve_api_key
 
 logger = logging.getLogger(__name__)
-
-JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 
 # Jev に選ばせる操作。キーは CommandDecision.action と一致させる
 ACTION_CRITERIA: Dict[str, str] = {
@@ -38,7 +36,7 @@ TEMPLATE_ACTIONS = frozenset(
         "show_languages",
     }
 )
-# Jev の判定後に Gemini へ続きの抽出・回答だけを依頼する操作
+# 分類のあと follow_up で詳細を取る操作（言語は Jev、使い方は Gemini）
 FOLLOW_UP_ACTIONS = frozenset({"language_settings", "howto"})
 
 
@@ -53,7 +51,7 @@ class JevFirstPassCommandRouter(CommandRouterPort):
     操作の扱い:
     - pause / resume、プラン操作、現在の翻訳言語の表示は確信度が十分なら即決する
     - show_languages は設定を変えないので、低確信度でも表示する
-    - language_settings と howto は Jev の分類を維持し、詳細だけ Gemini に聞く
+    - language_settings と howto は Jev の分類を維持し、詳細は follow_up に任せる
     - unknown と、それ以外の低確信度は unknown（既存の未認識応答）
     - Jev の失敗は error（既存の分類失敗応答）
     """
@@ -142,18 +140,16 @@ class JevFirstPassCommandRouter(CommandRouterPort):
 
     def _classify(self, text: str) -> tuple[str, float, str]:
         """(action, confidence, reason) を返す。失敗時は action を空にする。"""
-        try:
-            api_key = (self._api_key_provider() or "").strip()
-        except Exception:
-            logger.warning("Jev API key provider failed", exc_info=False)
-            api_key = ""
+        api_key = resolve_api_key(self._api_key_provider)
         if not api_key:
             return "", 0.0, "no_api_key"
 
-        payload = {
-            "state": {"message": _extract_user_message(text)},
-            "model": self._model,
-            "questions": {
+        body, reason = post_systemone(
+            self._session,
+            api_key=api_key,
+            model=self._model,
+            state={"message": extract_user_message(text)},
+            questions={
                 "action": {
                     "type": "choice",
                     "instructions": (
@@ -163,22 +159,12 @@ class JevFirstPassCommandRouter(CommandRouterPort):
                     "criteria": ACTION_CRITERIA,
                 }
             },
-        }
+            timeout=self._timeout,
+        )
+        if body is None:
+            return "", 0.0, reason
         try:
-            response = self._session.post(
-                JEV_ENDPOINT,
-                headers={"Authorization": f"Bearer {api_key}"},
-                json=payload,
-                timeout=self._timeout,
-            )
-        except requests.Timeout:
-            return "", 0.0, "timeout"
-        except Exception:
-            return "", 0.0, "request_error"
-        if response.status_code != 200:
-            return "", 0.0, f"http_{response.status_code}"
-        try:
-            answer = response.json()["answers"]["action"]
+            answer = body["answers"]["action"]
             choice = str(answer.get("choice") or "")
             confidence = float(answer.get("confidence") or 0.0)
         except Exception:
@@ -194,17 +180,6 @@ class JevFirstPassCommandRouter(CommandRouterPort):
         if choice in TEMPLATE_ACTIONS:
             return choice, confidence, "ok"
         return "", 0.0, "invalid_choice"
-
-
-def _extract_user_message(router_input: str) -> str:
-    """ルーター入力(JSON)から user_message を取り出す。JSONでなければそのまま使う。"""
-    try:
-        data: Any = json.loads(router_input)
-    except Exception:
-        return router_input
-    if isinstance(data, dict) and isinstance(data.get("user_message"), str):
-        return data["user_message"]
-    return router_input
 
 
 class TypesafeApiKeyProvider:
