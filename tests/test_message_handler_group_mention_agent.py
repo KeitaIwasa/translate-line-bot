@@ -107,6 +107,29 @@ def test_howto_uses_ack_text_without_forcing_resume():
     assert repo.translation_enabled_calls == []
 
 
+def test_howto_reply_puts_each_numbered_step_on_its_own_line():
+    class _Router:
+        def decide(self, _text):
+            return models.CommandDecision(
+                action="howto",
+                instruction_language="en",
+                ack_text=(
+                    "1. Add KOTORI as a friend on LINE. "
+                    "2. Invite KOTORI to the LINE group you want to use. "
+                    "3. Enter the languages you want to translate in the group."
+                ),
+            )
+
+    handler = _build_handler(_Router())
+    handler._handle_command(_event(), "how do I use this bot?")
+
+    assert handler._line.last_text == (
+        "1. Add KOTORI as a friend on LINE.\n"
+        "2. Invite KOTORI to the LINE group you want to use.\n"
+        "3. Enter the languages you want to translate in the group."
+    )
+
+
 def test_pause_uses_single_language_ack_text():
     class _Router:
         def decide(self, _text):

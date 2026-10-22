@@ -10,6 +10,7 @@ import requests
 from requests import HTTPError
 
 from ..domain.models import CommandDecision, LanguageChoice
+from ..presentation.list_layout import normalize_inline_lists
 from ..domain.services.explicit_language_reset import allows_language_reset
 from .gemini_generation_config import build_generation_config
 
@@ -28,6 +29,7 @@ Return:
 - instruction_language: BCP-47 or ISO 639-1 of the user message
 - ack_text: a short confirmation in the same language as the user message, without Markdown and without the bot mention. For "show", leave ack_text empty.
 - explicit_reset: true only when the user explicitly asks to clear, reset, delete, or set the translation languages again from scratch. This is language-neutral. False when they ask which languages are currently set. False when they only add or remove named languages. False for 「Xだけにして」 or "only X", which keeps X and is not a reset. False for a message such as "言語を追加したい", which does not ask to reset: use operation "show" so the bot lists the current languages or asks which language to add.
+- If ack_text lists more than one item, put each item on its own line. Keep those line breaks.
 
 If the user is only asking which translation languages are currently set, use operation "show" and explicit_reset false.
 Use operation "reset_all" only together with explicit_reset true.
@@ -45,6 +47,10 @@ The answer is posted as a reply in the LINE group where the user mentioned KOTOR
 
 Write ack_text in the same language as the user message. This applies to every answer, including the fallback below.
 Use plain text only. Do not use Markdown.
+Format ack_text for a narrow chat bubble.
+Put each numbered step and each bullet on its own line, using a newline before every item.
+Do not join steps into one paragraph such as "1. ... 2. ...".
+Keep blank lines between paragraphs.
 Answer from the support guide: summarize the relevant features and steps briefly. Keep it short.
 If the guide does not support a reliable answer, use this English base sentence for ack_text.
 If the user message is in English, use it exactly as is. Otherwise, translate it into the user's language and keep the URL unchanged.
@@ -154,7 +160,7 @@ class GeminiMentionFollowUp:
             languages_to_add=_parse_language_list(data.get("languages_to_add")),
             languages_to_remove=_parse_language_list(data.get("languages_to_remove")),
             instruction_language=str(data.get("instruction_language") or "").strip(),
-            ack_text=str(data.get("ack_text") or "").strip(),
+            ack_text=_readable_ack(data.get("ack_text")),
             explicit_reset=explicit_reset,
         )
 
@@ -166,7 +172,7 @@ class GeminiMentionFollowUp:
         return CommandDecision(
             action="howto",
             instruction_language=str(data.get("instruction_language") or "").strip(),
-            ack_text=str(data.get("ack_text") or "").strip(),
+            ack_text=_readable_ack(data.get("ack_text")),
         )
 
     def _generate(self, system_prompt: str, schema: dict, router_input: str) -> dict:
@@ -199,6 +205,12 @@ class GeminiMentionFollowUp:
         if not isinstance(data, dict):
             raise ValueError("gemini follow-up JSON was not an object")
         return data
+
+
+def _readable_ack(value: object) -> str:
+    """生成文のインライン箇条書きを、送信前に1項目1行へ戻す。"""
+
+    return normalize_inline_lists(str(value or "").strip())
 
 
 def _error_decision() -> CommandDecision:

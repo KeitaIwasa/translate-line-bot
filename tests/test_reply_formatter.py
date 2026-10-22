@@ -70,6 +70,22 @@ def test_format_translations_skips_empty_and_trims():
     assert formatted[1].endswith("こんにちは\u202C\u200E")
 
 
+def test_build_translation_reply_keeps_dashes_unless_source_has_line_breaks():
+    sentence = "来週は Tokyo - Osaka - Kyoto を回る。予算は 10 - 20 万円。"
+    plain = build_translation_reply(
+        "来週は東京 - 大阪 - 京都を回る。",
+        [TranslationResult(lang="en", text=sentence)],
+    )
+    assert "Tokyo - Osaka - Kyoto" in plain
+    assert "\n- Osaka" not in plain
+
+    restored = build_translation_reply(
+        "1. Add a friend.\n2. Invite the bot.",
+        [TranslationResult(lang="ja", text="1. 友だち追加 2. グループに招待")],
+    )
+    assert "1. 友だち追加\n2. グループに招待" in restored
+
+
 def test_build_translation_reply_drops_echo_and_preserves_others():
     """原文と同じ訳は落とし、残りはフォーマットする。"""
 

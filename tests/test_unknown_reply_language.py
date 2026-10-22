@@ -190,11 +190,10 @@ def test_garbled_mention_name_asks_current_languages_in_japanese():
     assert command == question
     handler._handle_command(event, command)
 
-    assert translator.calls
-    assert translator.calls[0]["candidate_languages"] == ["ja"]
-    assert "Japanese" in translator.calls[0]["message_text"]
-    assert "English" in translator.calls[0]["message_text"]
-    assert "Change language settings" not in translator.calls[0]["message_text"]
+    assert translator.calls == []
+    assert "日本語" in handler._line.last_text
+    assert "英語" in handler._line.last_text
+    assert "Change language settings" not in (handler._line.last_text or "")
     assert repo.reset_called is False
     assert repo.enabled == []
 
@@ -213,8 +212,8 @@ def test_short_mention_span_keeps_garbled_name_and_still_replies_in_japanese():
     assert "\u0296" in command
     handler._handle_command(event, command)
 
-    assert translator.calls[0]["candidate_languages"] == ["ja"]
-    assert "Japanese" in translator.calls[0]["message_text"]
+    assert translator.calls == []
+    assert "日本語" in handler._line.last_text
     assert repo.reset_called is False
 
 
@@ -241,8 +240,11 @@ def test_language_settings_show_does_not_reset_and_ignores_unrelated_language():
     handler._handle_command(_event("@bot 今の翻訳言語は何?"), "今の翻訳言語は何?")
 
     assert repo.reset_called is False
-    assert translator.calls[0]["candidate_languages"] == ["ja"]
-    assert "Korean" not in translator.calls[0]["message_text"]
+    assert translator.calls == []
+    assert "日本語" in handler._line.last_text
+    assert "英語" in handler._line.last_text
+    assert "Korean" not in handler._line.last_text
+    assert "韓国語" not in handler._line.last_text
 
 
 def test_shared_script_prefers_group_language_then_restricted_detection():
@@ -319,9 +321,9 @@ def test_unnamed_language_request_does_not_reset_settings():
 
     assert repo.reset_called is False
     assert repo.enabled == []
-    assert translator.calls
-    assert "Japanese" in translator.calls[0]["message_text"]
-    assert "English" in translator.calls[0]["message_text"]
+    assert translator.calls == []
+    assert "日本語" in handler._line.last_text
+    assert "英語" in handler._line.last_text
 
 
 def test_spanish_and_persian_reset_requests_clear_languages():

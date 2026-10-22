@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Sequence
 
+from .language_names import english_language_name, japanese_language_name
+
 # 言語の追加・削除ではなく、「今どの言語か」を聞いているときの定型応答。
 # current / set / now / 今 / 現在 / 設定 が無い「どの言語」「which languages」は対応言語の質問なので含めない
 _JA_QUESTION = re.compile(
@@ -37,26 +39,6 @@ _EN_SET_STATUS = re.compile(
     re.IGNORECASE,
 )
 
-# ベース原文は英語。呼び出し側がグループの返信言語へ翻訳する
-_LANGUAGE_NAMES = {
-    "ja": "Japanese",
-    "en": "English",
-    "ko": "Korean",
-    "zh": "Chinese",
-    "zh-cn": "Chinese",
-    "zh-tw": "Traditional Chinese",
-    "th": "Thai",
-    "vi": "Vietnamese",
-    "id": "Indonesian",
-    "fr": "French",
-    "de": "German",
-    "es": "Spanish",
-    "pt": "Portuguese",
-    "it": "Italian",
-    "ru": "Russian",
-    "ar": "Arabic",
-    "hi": "Hindi",
-}
 
 
 def is_current_languages_question(text: str) -> bool:
@@ -90,19 +72,76 @@ def _english_requests_change(text: str) -> bool:
     return _EN_SET.search(without_status) is not None
 
 
-def current_languages_base_text(language_codes: Sequence[str]) -> str:
-    """設定中の言語を英語の1文で返す。未設定ならその旨。"""
+def current_languages_base_text(languages: Sequence) -> str:
+    """設定中の言語を英語の1文で返す。未設定ならその旨。コードは出さない。"""
 
-    names: list[str] = []
-    seen: set[str] = set()
-    for code in language_codes:
-        lowered = (code or "").strip().lower()
-        if not lowered or lowered in seen:
-            continue
-        seen.add(lowered)
-        names.append(_LANGUAGE_NAMES.get(lowered, lowered))
+    return _current_languages_text(languages, "en")
+
+
+def current_languages_localized_text(languages: Sequence, reply_language: str) -> str | None:
+    """ja / en は翻訳せずに一覧を返す。それ以外は None。"""
+
+    family = _deterministic_family(reply_language)
+    if family is None:
+        return None
+    return _current_languages_text(languages, family)
+
+
+def _deterministic_family(reply_language: str) -> str | None:
+    lowered = (reply_language or "").strip().lower().replace("_", "-")
+    if not lowered or lowered.startswith("en"):
+        return "en"
+    if lowered.startswith("ja"):
+        return "ja"
+    return None
+
+
+def _current_languages_text(languages: Sequence, family: str) -> str:
+    names = _language_names(languages, family)
     if not names:
+        if family == "ja":
+            return "翻訳言語はまだ設定されていません。"
         return "No translation languages are set yet."
+    if family == "ja":
+        return "現在の翻訳言語は" + "、".join(names) + "です。"
     if len(names) == 1:
         return f"The current translation language is {names[0]}."
     return "The current translation languages are " + ", ".join(names) + "."
+
+
+def _language_names(languages: Sequence, family: str) -> list[str]:
+    """コード、または (コード, 保存名) から表示名を作る。"""
+
+    names: list[str] = []
+    seen: set[str] = set()
+    namer = japanese_language_name if family == "ja" else english_language_name
+    for code, stored_name in _language_records(languages):
+        if code in seen:
+            continue
+        seen.add(code)
+        names.append(namer(code, stored_name))
+    return names
+
+
+def _language_records(languages: Sequence) -> list[tuple[str, str]]:
+    records: list[tuple[str, str]] = []
+    for item in languages or []:
+        code, stored_name = _record_parts(item)
+        normalized = (code or "").strip().lower().replace("_", "-")
+        if not normalized:
+            continue
+        records.append((normalized, stored_name))
+    return records
+
+
+def _record_parts(item) -> tuple[str, str]:
+    if isinstance(item, str):
+        return item, ""
+    code = getattr(item, "code", None)
+    name = getattr(item, "name", None)
+    if isinstance(code, str):
+        return code, name if isinstance(name, str) else ""
+    if isinstance(item, Sequence) and not isinstance(item, (str, bytes)):
+        stored = item[1] if len(item) > 1 and isinstance(item[1], str) else ""
+        return str(item[0] or ""), stored
+    return "", ""
