@@ -169,7 +169,50 @@ def test_add_and_remove_keeps_both_lists_in_stable_order():
 
     assert [item.code for item in decision.languages_to_add] == ["ja", "en"]
     assert [item.code for item in decision.languages_to_remove] == ["ja"]
+    assert decision.ack_text == "言語設定を更新しました。"
     assert gemini._session.calls == []
+
+
+def test_add_and_remove_with_low_remove_scores_falls_back_to_gemini():
+    """「英語だけにして」で削除が閾値未満なら、追加だけ適用せず Gemini に戻す。"""
+
+    payload = json.dumps(
+        {"user_message": "英語だけにして", "current_languages": ["ja"]},
+        ensure_ascii=False,
+    )
+    jev = JevSession(
+        operation="add_and_remove",
+        yes_codes={"en"},
+        noul_overrides={"explicit_reset": 0.99, "remove_ja": 0.01},
+    )
+    follow_up, gemini = _follow_up(jev)
+
+    decision = follow_up.complete("language_settings", payload)
+
+    assert decision.ack_text == "フランス語を追加します"
+    assert decision.languages_to_add == [LanguageChoice(code="fr", name="French")]
+    assert decision.languages_to_remove == []
+    assert len(jev.calls) == 1
+    assert len(gemini._session.calls) == 1
+
+
+def test_add_and_remove_with_empty_add_list_falls_back_to_gemini():
+    """add_and_remove で追加が閾値未満なら、削除だけ適用せず Gemini に戻す。"""
+
+    payload = json.dumps(
+        {"user_message": "日本語を外して英語だけにして", "current_languages": ["ja", "en"]},
+        ensure_ascii=False,
+    )
+    jev = JevSession(operation="add_and_remove", remove_codes={"ja"})
+    follow_up, gemini = _follow_up(jev)
+
+    decision = follow_up.complete("language_settings", payload)
+
+    assert decision.ack_text == "フランス語を追加します"
+    assert decision.languages_to_add == [LanguageChoice(code="fr", name="French")]
+    assert decision.languages_to_remove == []
+    assert len(jev.calls) == 1
+    assert len(gemini._session.calls) == 1
 
 
 def test_reset_all_clears_language_lists_only_when_explicit():

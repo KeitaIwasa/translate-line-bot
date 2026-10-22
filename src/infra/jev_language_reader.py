@@ -255,6 +255,10 @@ def _read_language_settings(
     elif operation == "remove":
         chosen_add, chosen_remove = [], remove_codes
     else:
+        # add_and_remove は置換なので、追加と削除の両方が閾値を超えないと確定できない。
+        # 「英語だけにして」で remove が空のまま add だけ成功すると、残した言語を消したと誤って報告する。
+        if not add_codes or not remove_codes:
+            return None, "mixed_signals"
         chosen_add, chosen_remove = add_codes, remove_codes
     if not chosen_add and not chosen_remove:
         return None, "no_languages"
