@@ -1,23 +1,88 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Sequence, Tuple
 
 from psycopg import errors, sql
 
-from ..domain.models import ContextMessage, ConversationMessage, StoredMessage, TranslationRuntimeState
+from ..domain.models import (
+    ContextMessage,
+    ConversationMessage,
+    GroupMessagePrefetch,
+    StoredMessage,
+    TranslationRuntimeState,
+)
 from ..domain.ports import MessageRepositoryPort
 from ..domain.services.plan_policy import FREE_PLAN, PRO_PLAN, resolve_effective_plan
 from ..domain.services.quota_service import QuotaDecision
 from .message_crypto import decrypt_text, encrypt_text
 from .neon_client import NeonClient
+from .runtime_cache import MISS, TtlCache
 
 BOT_JOIN_MARKER = "__bot_join__"
 GROUP_LANG_MARKER = "__group_lang__"
 PRIVATE_ASSISTANT_MARKER = "__assistant__"
 logger = logging.getLogger(__name__)
+
+# 表示名が DB に無いとき、LINE 取得に失敗し続けても毎リクエスト SQL しないための短い TTL。
+_DISPLAY_NAME_MISS_TTL_SECONDS = 60.0
+
+# 設定・言語・購読・直近の利用量・送信者名を1往復で読む。
+_PREFETCH_SQL = """
+SELECT
+    gs.translation_enabled,
+    gs.translation_paused_reason,
+    langs.languages,
+    sub.status,
+    COALESCE(sub.entitlement_plan, 'free'),
+    COALESCE(sub.billing_interval, 'month'),
+    COALESCE(sub.is_grandfathered, FALSE),
+    sub.stripe_price_id,
+    sub.current_period_start,
+    sub.current_period_end,
+    sub.quota_anchor_day,
+    sub.scheduled_target_price_id,
+    sub.scheduled_effective_at,
+    usage.usage_rows,
+    gm.display_name
+FROM (SELECT %s::text AS group_id, %s::text AS user_id) AS req
+LEFT JOIN group_settings AS gs ON gs.group_id = req.group_id
+LEFT JOIN LATERAL (
+    SELECT COALESCE(
+        array_agg(gl.lang_code ORDER BY gl.created_at ASC, gl.lang_code ASC),
+        ARRAY[]::text[]
+    ) AS languages
+    FROM group_languages AS gl
+    WHERE gl.group_id = req.group_id
+) AS langs ON TRUE
+LEFT JOIN group_subscriptions AS sub ON sub.group_id = req.group_id
+LEFT JOIN LATERAL (
+    SELECT COALESCE(
+        jsonb_agg(
+            jsonb_build_object(
+                'period_key', recent.period_key,
+                'translation_count', recent.translation_count,
+                'limit_notice_plan', recent.limit_notice_plan
+            )
+        ),
+        '[]'::jsonb
+    ) AS usage_rows
+    FROM (
+        SELECT period_key, translation_count, limit_notice_plan
+        FROM group_usage_counters
+        WHERE group_id = req.group_id
+        ORDER BY period_key DESC
+        LIMIT 36
+    ) AS recent
+) AS usage ON TRUE
+LEFT JOIN group_members AS gm
+    ON gm.group_id = req.group_id AND gm.user_id = req.user_id
+"""
 
 
 @dataclass(frozen=True)
@@ -35,13 +100,181 @@ class NeonMessageRepository(MessageRepositoryPort):
         client: NeonClient,
         max_group_languages: int = 5,
         message_encryption_key: str = "",
+        *,
+        runtime_cache_ttl_seconds: float | None = None,
+        display_name_cache_ttl_seconds: float | None = None,
+        clock=None,
     ) -> None:
         self._client = client
         self._max_group_languages = max_group_languages
         self._message_encryption_key = (message_encryption_key or "").strip()
         self._message_encryption_version = "v1"
+        self._clock = clock or time.monotonic
+        runtime_ttl = (
+            runtime_cache_ttl_seconds
+            if runtime_cache_ttl_seconds is not None
+            else float(os.environ.get("RUNTIME_STATE_CACHE_TTL_SECONDS", "15"))
+        )
+        name_ttl = (
+            display_name_cache_ttl_seconds
+            if display_name_cache_ttl_seconds is not None
+            else float(os.environ.get("DISPLAY_NAME_CACHE_TTL_SECONDS", "300"))
+        )
+        self._display_name_ttl = name_ttl
+        # プラン・言語・停止状態は短く、表示名は長く持つ。利用回数の増減そのものはキャッシュしない。
+        self._runtime_cache: TtlCache[TranslationRuntimeState] = TtlCache(runtime_ttl, self._clock)
+        self._display_name_cache: TtlCache[Optional[str]] = TtlCache(name_ttl, self._clock)
+
+    def _log_db_step(self, step: str, started: float, group_id: str, **fields) -> None:
+        extra = "".join(f" {key}={value}" for key, value in fields.items())
+        logger.info(
+            "DB step | step=%s elapsed_ms=%.2f group=%s%s",
+            step,
+            (time.perf_counter() - started) * 1000,
+            group_id,
+            extra,
+        )
+
+    def _invalidate_group_runtime(self, group_id: str) -> None:
+        if group_id:
+            self._runtime_cache.invalidate(group_id)
+
+    def _remember_display_name(self, group_id: str, user_id: str, display_name: Optional[str]) -> None:
+        if not group_id or not user_id:
+            return
+        ttl = self._display_name_ttl if display_name else min(self._display_name_ttl, _DISPLAY_NAME_MISS_TTL_SECONDS)
+        self._display_name_cache.put((group_id, user_id), display_name, ttl=ttl)
+
+    def fetch_group_message_prefetch(self, group_id: str, user_id: str) -> GroupMessagePrefetch:
+        return self._load_group_snapshot(group_id, user_id=user_id)
+
+    def _load_group_snapshot(self, group_id: str, user_id: Optional[str]) -> GroupMessagePrefetch:
+        started = time.perf_counter()
+        cached_runtime = self._runtime_cache.get(group_id)
+        cached_name = self._display_name_cache.get((group_id, user_id)) if user_id else MISS
+        if cached_runtime is not MISS and (not user_id or cached_name is not MISS):
+            self._log_db_step("prefetch", started, group_id, cache_hit="true")
+            return GroupMessagePrefetch(
+                runtime=cached_runtime,
+                display_name=None if not user_id or cached_name is MISS else cached_name,
+                cache_hit=True,
+            )
+
+        try:
+            row = self._fetch_prefetch_row(group_id, user_id or "")
+            runtime, display_name = self._runtime_from_prefetch_row(group_id, row)
+        except (errors.UndefinedColumn, errors.UndefinedTable):
+            logger.warning(
+                "Combined prefetch unavailable; using sequential reads",
+                extra={"group_id": group_id},
+            )
+            runtime = self._fetch_translation_runtime_state_sequential(group_id)
+            display_name = self.get_group_member_display_name(group_id, user_id) if user_id else None
+
+        self._runtime_cache.put(group_id, runtime)
+        if user_id:
+            self._remember_display_name(group_id, user_id, display_name)
+        self._log_db_step("prefetch", started, group_id, cache_hit="false")
+        return GroupMessagePrefetch(runtime=runtime, display_name=display_name, cache_hit=False)
+
+    def _fetch_prefetch_row(self, group_id: str, user_id: str):
+        last_error: Optional[Exception] = None
+        for attempt in (1, 2):
+            try:
+                with self._client.cursor() as cur:
+                    cur.execute(_PREFETCH_SQL, (group_id, user_id))
+                    return cur.fetchone()
+            except errors.OperationalError as exc:
+                last_error = exc
+                logger.warning(
+                    "DB step failed | step=prefetch attempt=%s group=%s",
+                    attempt,
+                    group_id,
+                )
+        assert last_error is not None
+        raise last_error
+
+    def _runtime_from_prefetch_row(self, group_id: str, row) -> tuple[TranslationRuntimeState, Optional[str]]:
+        if not row:
+            row = (None,) * 15
+        (
+            translation_enabled,
+            translation_paused_reason,
+            languages,
+            status,
+            entitlement_plan,
+            billing_interval,
+            is_grandfathered,
+            _stripe_price_id,
+            period_start,
+            period_end,
+            quota_anchor_day,
+            scheduled_target_price_id,
+            scheduled_effective_at,
+            usage_rows,
+            display_name,
+        ) = row
+        effective_plan = resolve_effective_plan(status, entitlement_plan or FREE_PLAN)
+        anchor_day = int(quota_anchor_day) if quota_anchor_day is not None else None
+        period_key = self._compute_period_key(
+            plan_key=effective_plan,
+            period_start=period_start,
+            period_end=period_end,
+            quota_anchor_day=anchor_day,
+        )
+        usage, notice_plan = self._usage_for_period(group_id, usage_rows, period_key)
+        runtime = TranslationRuntimeState(
+            translation_enabled=True if translation_enabled is None else bool(translation_enabled),
+            group_languages=[code for code in (languages or []) if code],
+            subscription_status=status,
+            period_start=period_start,
+            period_end=period_end,
+            period_key=period_key,
+            usage=usage,
+            limit_notice_plan=notice_plan,
+            entitlement_plan=effective_plan,
+            billing_interval=billing_interval or "month",
+            is_grandfathered=bool(is_grandfathered),
+            quota_anchor_day=anchor_day,
+            scheduled_target_price_id=scheduled_target_price_id,
+            scheduled_effective_at=scheduled_effective_at,
+            translation_paused_reason=translation_paused_reason,
+        )
+        normalized_name = (display_name or "").strip() or None
+        return runtime, normalized_name
+
+    def _usage_for_period(self, group_id: str, usage_rows, period_key: str) -> tuple[int, Optional[str]]:
+        parsed = self._parse_usage_rows(usage_rows)
+        for item in parsed:
+            if str(item.get("period_key") or "") == period_key:
+                notice = item.get("limit_notice_plan")
+                return int(item.get("translation_count") or 0), notice or None
+        if parsed:
+            oldest = min(str(item.get("period_key") or "") for item in parsed)
+            if period_key and period_key < oldest:
+                # 直近36周期より古いキー。上限判定を外さないためだけ追加で読む。
+                return self.get_usage(group_id, period_key), self.get_limit_notice_plan(group_id, period_key)
+        return 0, None
+
+    @staticmethod
+    def _parse_usage_rows(usage_rows) -> list:
+        if not usage_rows:
+            return []
+        if isinstance(usage_rows, str):
+            usage_rows = json.loads(usage_rows)
+        if isinstance(usage_rows, dict):
+            return [usage_rows]
+        return list(usage_rows)
 
     def ensure_group_member(self, group_id: str, user_id: str) -> None:
+        started = time.perf_counter()
+        try:
+            self._ensure_group_member(group_id, user_id)
+        finally:
+            self._log_db_step("ensure_group_member", started, group_id)
+
+    def _ensure_group_member(self, group_id: str, user_id: str) -> None:
+        # 2文目は active 列が無い環境だけの代替。失敗した文のあとへ進むため autocommit のままにする。
         with self._client.cursor() as cur:
             try:
                 cur.execute(
@@ -100,6 +333,7 @@ class NeonMessageRepository(MessageRepositoryPort):
     def is_group_member(self, group_id: str, user_id: str) -> bool:
         if not group_id or not user_id:
             return False
+        # 読み取りの代替クエリ。両方を書く処理ではないので autocommit のままにする。
         with self._client.cursor() as cur:
             try:
                 cur.execute(
@@ -125,6 +359,15 @@ class NeonMessageRepository(MessageRepositoryPort):
         normalized = (display_name or "").strip()
         if not normalized:
             return
+        started = time.perf_counter()
+        try:
+            self._upsert_group_member_display_name(group_id, user_id, normalized)
+            self._remember_display_name(group_id, user_id, normalized)
+        finally:
+            self._log_db_step("upsert_display_name", started, group_id)
+
+    def _upsert_group_member_display_name(self, group_id: str, user_id: str, normalized: str) -> None:
+        # 2文目は active 列が無い環境だけの代替。失敗した文のあとへ進むため autocommit のままにする。
         with self._client.cursor() as cur:
             try:
                 cur.execute(
@@ -170,6 +413,13 @@ class NeonMessageRepository(MessageRepositoryPort):
         return [row[0] for row in rows]
 
     def fetch_recent_messages(self, group_id: str, limit: int) -> List[ContextMessage]:
+        started = time.perf_counter()
+        try:
+            return self._fetch_recent_messages_once(group_id, limit)
+        finally:
+            self._log_db_step("fetch_recent_messages", started, group_id)
+
+    def _fetch_recent_messages_once(self, group_id: str, limit: int) -> List[ContextMessage]:
         rows = []
         try:
             query = sql.SQL(
@@ -388,6 +638,7 @@ class NeonMessageRepository(MessageRepositoryPort):
                     """,
                     (group_id, GROUP_LANG_MARKER),
                 )
+        self._invalidate_group_runtime(group_id)
         return True
 
     def try_cancel_language_prompt(self, group_id: str) -> bool:
@@ -421,6 +672,7 @@ class NeonMessageRepository(MessageRepositoryPort):
                     """,
                     (group_id, GROUP_LANG_MARKER),
                 )
+        self._invalidate_group_runtime(group_id)
         return True
 
     def add_group_languages(self, group_id: str, languages: Sequence[Tuple[str, str]]) -> None:
@@ -436,7 +688,8 @@ class NeonMessageRepository(MessageRepositoryPort):
                 extra={"group_id": group_id, "requested": [code for code, _ in languages]},
             )
             return
-        with self._client.cursor() as cur:
+        # 複数行の INSERT を一つのトランザクションにまとめる
+        with self._client.connection() as conn, conn.cursor() as cur:
             cur.executemany(
                 """
                 INSERT INTO group_languages (group_id, lang_code, lang_name)
@@ -445,6 +698,7 @@ class NeonMessageRepository(MessageRepositoryPort):
                 """,
                 [(group_id, code, name) for code, name in limited],
             )
+        self._invalidate_group_runtime(group_id)
 
     def remove_group_languages(self, group_id: str, lang_codes: Sequence[str]) -> None:
         if not lang_codes:
@@ -454,6 +708,7 @@ class NeonMessageRepository(MessageRepositoryPort):
                 "DELETE FROM group_languages WHERE group_id = %s AND lang_code = ANY(%s)",
                 (group_id, list({code.lower() for code in lang_codes})),
             )
+        self._invalidate_group_runtime(group_id)
 
     def shrink_group_languages(self, group_id: str, keep_limit: int) -> List[str]:
         """古い登録順で言語を絞り込む。削除した言語コードを返す。"""
@@ -480,6 +735,7 @@ class NeonMessageRepository(MessageRepositoryPort):
                     "DELETE FROM group_languages WHERE group_id = %s AND lang_code = ANY(%s)",
                     (group_id, remove_codes),
                 )
+                self._invalidate_group_runtime(group_id)
                 return remove_codes
 
     def set_translation_enabled(self, group_id: str, enabled: bool) -> None:
@@ -515,6 +771,7 @@ class NeonMessageRepository(MessageRepositoryPort):
                 extra={"group_id": group_id},
             )
             return
+        self._invalidate_group_runtime(group_id)
 
     def set_translation_paused_by_quota(self, group_id: str) -> None:
         try:
@@ -531,6 +788,7 @@ class NeonMessageRepository(MessageRepositoryPort):
                     """,
                     (group_id,),
                 )
+            self._invalidate_group_runtime(group_id)
         except errors.UndefinedColumn:
             self.set_translation_enabled(group_id, False)
         except errors.UndefinedTable:
@@ -656,6 +914,30 @@ class NeonMessageRepository(MessageRepositoryPort):
             return None
 
     def reserve_quota_slot(
+        self,
+        *,
+        group_id: str,
+        period_key: str,
+        plan_key: str,
+        stop_translation_on_limit: bool,
+        limit: int,
+        increment: int,
+    ) -> QuotaDecision:
+        # 上限の増減はキャッシュしない。このロック付き更新が翻訳前の正とする。
+        started = time.perf_counter()
+        try:
+            return self._reserve_quota_slot_once(
+                group_id=group_id,
+                period_key=period_key,
+                plan_key=plan_key,
+                stop_translation_on_limit=stop_translation_on_limit,
+                limit=limit,
+                increment=increment,
+            )
+        finally:
+            self._log_db_step("reserve_quota", started, group_id)
+
+    def _reserve_quota_slot_once(
         self,
         *,
         group_id: str,
@@ -1185,6 +1467,7 @@ class NeonMessageRepository(MessageRepositoryPort):
                         scheduled_effective_at,
                     ),
                 )
+            self._invalidate_group_runtime(group_id)
         except errors.UndefinedColumn:
             # 後方互換: 新カラムが無い環境では旧カラムのみ更新
             with self._client.cursor() as cur:
@@ -1211,6 +1494,7 @@ class NeonMessageRepository(MessageRepositoryPort):
                         current_period_end,
                     ),
                 )
+            self._invalidate_group_runtime(group_id)
         except errors.UndefinedTable:
             logger.warning("group_subscriptions table missing; cannot upsert", extra={"group_id": group_id})
 
@@ -1227,6 +1511,7 @@ class NeonMessageRepository(MessageRepositoryPort):
                     """,
                     (status, current_period_end, group_id),
                 )
+            self._invalidate_group_runtime(group_id)
         except errors.UndefinedTable:
             logger.warning("group_subscriptions table missing; cannot update status", extra={"group_id": group_id})
         except Exception:
@@ -1363,6 +1648,9 @@ class NeonMessageRepository(MessageRepositoryPort):
             raise
 
     def fetch_translation_runtime_state(self, group_id: str) -> TranslationRuntimeState:
+        return self._load_group_snapshot(group_id, user_id=None).runtime
+
+    def _fetch_translation_runtime_state_sequential(self, group_id: str) -> TranslationRuntimeState:
         translation_enabled = True
         translation_paused_reason = None
         try:
@@ -1462,12 +1750,14 @@ class NeonMessageRepository(MessageRepositoryPort):
         )
 
     def reset_group_language_settings(self, group_id: str) -> None:
-        with self._client.cursor() as cur:
+        # DELETE と UPDATE を一つのトランザクションにまとめる（autocommit だと片方だけ確定しうる）
+        with self._client.connection() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM group_languages WHERE group_id = %s", (group_id,))
             cur.execute(
                 "UPDATE group_members SET last_prompted_at = NULL, last_completed_at = NULL WHERE group_id = %s",
                 (group_id,),
             )
+        self._invalidate_group_runtime(group_id)
 
     def _normalize_languages(
         self, languages: Sequence[Tuple[str, str]], existing: Optional[Sequence[str]] = None
