@@ -11,6 +11,7 @@ from .language_mention import (
     need_both_languages_prompt,
     selection_prompt,
     setup_confirmation,
+    stale_confirmation_notice,
     ui_family,
     unsupported_prompt,
 )
@@ -86,24 +87,28 @@ class LanguageSettingsService:
             return models.ReplyBundle(texts=[ask[:5000]])
 
         prompt_texts = self._prepare_language_prompt_texts(limited_supported, result)
-        confirm_payload = self._encode_postback_payload(
-            {
-                "kind": "language_confirm",
-                "action": "confirm",
-                "languages": [{"code": lang.code, "name": lang.name} for lang in limited_supported],
-                "primary_language": prompt_texts["primary_language"],
-                "completion_text": prompt_texts["completion_text"],
-                "limit_text": self._build_language_limit_message(result.primary_language, max_languages=limit),
-            }
-        )
-        cancel_payload = self._encode_postback_payload(
-            {
-                "kind": "language_confirm",
-                "action": "cancel",
-                "primary_language": prompt_texts["primary_language"],
-                "cancel_text": prompt_texts["cancel_text"],
-            }
-        )
+        # ボタンには、この確認を開いたときの世代を載せる。保存のあとでは一致しない
+        stamp = self._repo.record_language_prompt(event.group_id)
+        confirm_body = {
+            "kind": "language_confirm",
+            "action": "confirm",
+            "languages": [{"code": lang.code, "name": lang.name} for lang in limited_supported],
+            "primary_language": prompt_texts["primary_language"],
+            "completion_text": prompt_texts["completion_text"],
+            "limit_text": self._build_language_limit_message(result.primary_language, max_languages=limit),
+        }
+        if isinstance(stamp, str) and stamp:
+            confirm_body["issued_at"] = stamp
+        confirm_payload = self._encode_postback_payload(confirm_body)
+        cancel_body = {
+            "kind": "language_confirm",
+            "action": "cancel",
+            "primary_language": prompt_texts["primary_language"],
+            "cancel_text": prompt_texts["cancel_text"],
+        }
+        if isinstance(stamp, str) and stamp:
+            cancel_body["issued_at"] = stamp
+        cancel_payload = self._encode_postback_payload(cancel_body)
 
         template_message = {
             "type": "template",
@@ -119,7 +124,6 @@ class LanguageSettingsService:
         }
 
         messages.append(template_message)
-        self._repo.record_language_prompt(event.group_id)
         self._repo.set_translation_enabled(event.group_id, False)
         return models.ReplyBundle(messages=messages)
 
@@ -133,6 +137,7 @@ class LanguageSettingsService:
         limit_text: str | None = None,
         max_languages: int | None = None,
         settings_url: str = "",
+        issued_at: str | None = None,
     ) -> models.ReplyBundle | None:
         limit = self._resolved_limit(max_languages)
         tuples = self._dedup_languages(languages)
@@ -142,19 +147,39 @@ class LanguageSettingsService:
             warning = limit_text or selection_prompt(labels, family=family, limit=limit)
             return models.ReplyBundle(texts=[warning])
 
-        completed = self._repo.try_complete_group_languages(group_id, tuples)
+        complete_kwargs = {}
+        if issued_at is not None:
+            complete_kwargs["issued_at"] = issued_at
+        completed = self._repo.try_complete_group_languages(group_id, tuples, **complete_kwargs)
+        status = getattr(completed, "status", "applied" if completed else "duplicate")
+        if status == "stale":
+            notice = stale_confirmation_notice(
+                self._saved_language_codes(group_id, primary_language),
+                translate=self._interface_translate(),
+            )
+            return models.ReplyBundle(texts=[notice], notice_kind="stale")
         if not completed:
             return None
         self._repo.set_translation_enabled(group_id, True)
 
-        # ボタンに入っていた completion_text は使わない。言語ごとに静的文を一度ずつ出す。
-        # 未登録の言語は英語。リンクは呼び出し側が今発行したトークン。
+        # ボタンに入っていた completion_text は使わない。言語ごとに一度ずつ出す。
+        # リンクは呼び出し側が今発行したトークン。
         del completion_text
-        text = setup_confirmation(tuples, url=settings_url or "")
+        text = setup_confirmation(tuples, url=settings_url or "", translate=self._interface_translate())
         return models.ReplyBundle(texts=[text])
 
-    def cancel(self, *, group_id: str, primary_language: str, cancel_text: str | None = None) -> models.ReplyBundle | None:
-        cancelled = self._repo.try_cancel_language_prompt(group_id)
+    def cancel(
+        self,
+        *,
+        group_id: str,
+        primary_language: str,
+        cancel_text: str | None = None,
+        issued_at: str | None = None,
+    ) -> models.ReplyBundle | None:
+        cancel_kwargs = {}
+        if issued_at is not None:
+            cancel_kwargs["issued_at"] = issued_at
+        cancelled = self._repo.try_cancel_language_prompt(group_id, **cancel_kwargs)
         if not cancelled:
             return None
         self._repo.set_translation_enabled(group_id, False)
@@ -197,6 +222,21 @@ class LanguageSettingsService:
             return base
         translated = self._translate_template(base, instruction_lang, force=True)
         return translated or base
+
+    def _interface_translate(self):
+        translate = getattr(self._interface_translation, "translate", None)
+        return translate if callable(translate) else None
+
+    def _saved_language_codes(self, group_id: str, primary_language: str) -> list[str]:
+        try:
+            rows = self._repo.fetch_group_languages(group_id) or []
+        except Exception:
+            rows = []
+        codes = [(code or "").strip().lower() for code in rows if code]
+        if codes:
+            return codes
+        primary = (primary_language or "").strip().lower()
+        return [primary] if primary else []
 
     def _resolved_limit(self, max_languages: int | None) -> int:
         if max_languages is None:

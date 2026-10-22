@@ -912,7 +912,8 @@ def test_postback_sends_multilingual_completion():
 
     assert repo.saved is True
     assert line.last is not None
+    # 翻訳できるときは固定文より翻訳を使う。ja/zh/ko/th の固定文は翻訳失敗のときだけ
     assert "English, Japanese, and Thai have been set as the translation languages." in line.last
-    assert "英語・日本語・タイ語になったよ" in line.last
-    assert "ตั้งเป็น" in line.last
-    assert "(ja)" not in line.last
+    assert "(ja)" in line.last
+    assert "(th)" in line.last
+    assert "英語・日本語・タイ語になったよ" not in line.last

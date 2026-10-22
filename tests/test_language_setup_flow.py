@@ -4,7 +4,12 @@ from src.app.handlers.message_handler import MessageHandler
 from src.app.handlers.postback_handler import PostbackHandler
 from src.domain import models
 from src.domain.services.language_detection_service import LanguageDetectionService
-from src.domain.services.language_mention import language_quick_replies, read_mention, setup_confirmation
+from src.domain.services.language_mention import (
+    language_quick_replies,
+    read_mention,
+    setup_confirmation,
+    web_settings_notice,
+)
 from src.group_language_handler import handle_group_language_request
 from tests.test_group_language_page import _Line as _PageLine
 from tests.test_group_language_page import _Repo as _PageRepo
@@ -176,6 +181,72 @@ def test_setup_confirmation_translates_known_families_and_falls_back_to_english(
     assert "anytime" in text.lower()
     # イタリア語の静的訳は無いので、英語は一度だけ
     assert text.lower().count("have been set") == 1
+
+
+class _Translated:
+    def __init__(self, lang, text):
+        self.lang = lang
+        self.text = text
+
+
+def _per_language(base, targets):
+    return [_Translated(code, f"{code}: {base.splitlines()[0]}") for code in targets]
+
+
+def test_web_notice_and_setup_copy_translate_every_group_language():
+    pairs = [("fr", "French"), ("es", "Spanish"), ("de", "German")]
+    notice = web_settings_notice(pairs, translate=_per_language)
+    assert "fr: Updated from the settings page" in notice
+    assert "es: Updated from the settings page" in notice
+    assert "de: Updated from the settings page" in notice
+    assert notice.count("Updated from the settings page") == 3
+
+    url = "https://kotori-ai.com/api/group-languages?st=fresh"
+    confirmation = setup_confirmation(pairs, url=url, translate=_per_language)
+    assert "fr: French, Spanish, and German have been set" in confirmation
+    assert "es: French, Spanish, and German have been set" in confirmation
+    assert "de: French, Spanish, and German have been set" in confirmation
+    assert confirmation.count(url) == 1
+    assert confirmation.lower().count("have been set") == 3
+
+
+def test_translation_failure_uses_static_text_then_english_once():
+    def broken(_base, _targets):
+        raise RuntimeError("translator down")
+
+    french = web_settings_notice(
+        [("fr", "French"), ("es", "Spanish"), ("de", "German")],
+        translate=broken,
+    )
+    assert french == "Updated from the settings page: French, Spanish, and German."
+
+    # 翻訳結果が原文と同じときも失敗として、固定文へ戻す
+    def echo(base, targets):
+        return [_Translated(code, base) for code in targets]
+
+    japanese = web_settings_notice([("ja", "Japanese"), ("fr", "French")], translate=echo)
+    assert "設定ページから更新したよ" in japanese
+    assert "Updated from the settings page" in japanese
+    assert japanese.count("Updated from the settings page") == 1
+
+    url = "https://kotori-ai.com/api/group-languages?st=fallback"
+    confirmation = setup_confirmation(
+        [("ja", "Japanese"), ("fr", "French")],
+        url=url,
+        translate=lambda *_args, **_kwargs: [],
+    )
+    assert "日本語・フランス語になったよ" in confirmation
+    assert "Japanese and French have been set as the translation languages." in confirmation
+    assert confirmation.lower().count("have been set") == 1
+    assert confirmation.count(url) == 1
+
+    # 翻訳できた言語名（fr-FR）は、グループの fr に割り当てる
+    def regional(base, _targets):
+        return [_Translated("fr-FR", f"REGIONAL {base.splitlines()[0]}")]
+
+    regional_notice = web_settings_notice([("fr", "French")], translate=regional)
+    assert regional_notice.startswith("REGIONAL Updated from the settings page")
+    assert regional_notice.count("Updated from the settings page") == 1
 
 
 def test_quick_reply_items_fit_line_limits():

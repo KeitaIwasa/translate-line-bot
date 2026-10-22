@@ -1,7 +1,8 @@
 """メンション文から言語設定の意図を、モデルに頼らず読む。
 
 区切りのない言語名、上限を超える「全言語」、案内文そのもの、未対応言語は
-ここで確定させる。UI文は言語ごとの固定文で、その場の翻訳はしない。
+ここで確定させる。UI文の原文は英語で、ja/zh/ko/th は固定訳を持つ。
+翻訳関数が渡されたときは各グループ言語へ訳し、失敗したら固定訳か英語に戻す。
 """
 
 from __future__ import annotations
@@ -698,31 +699,33 @@ def settings_page_line(family: str, url: str) -> str:
     return f"{settings_anytime_sentence(family)}\n{url}"
 
 
-def setup_confirmation(pairs: Sequence[tuple[str, str]], *, url: str = "") -> str:
+def setup_confirmation(
+    pairs: Sequence[tuple[str, str]],
+    *,
+    url: str = "",
+    translate=None,
+) -> str:
     """設定できた言語の組を、グループの各言語で一度ずつ言う。
 
-    ja/zh/ko/th は静的訳。それ以外は英語の原文を一度だけ添える。
+    原文は英語。翻訳できればその言語、失敗したら ja/zh/ko/th の固定文、それ以外は英語。
     リンクがあるときだけ「いつでも変えられる」と書き、期限切れは「設定」で取り直す。
+    URL は翻訳文の外に一度だけ添える。
     """
 
-    families: list[str] = []
-    for code, _name in pairs:
-        family = ui_family(code)
-        if family not in families:
-            families.append(family)
-    if not families:
-        families = ["en"]
-    blocks: list[str] = []
-    for family in families:
+    codes = [code for code, _name in pairs if code]
+    english_lines = [completion_prompt(pairs, family="en")]
+    static: dict[str, str] = {}
+    for family in ("ja", "zh", "ko", "th"):
         lines = [completion_prompt(pairs, family=family)]
         if url:
             lines.append(settings_anytime_sentence(family))
-        block = "\n".join(line for line in lines if line)
-        if block:
-            blocks.append(block)
-    text = "\n\n".join(blocks)
+        static[family] = "\n".join(line for line in lines if line)
     if url:
-        return f"{text}\n\n{url}"
+        english_lines.append(settings_anytime_sentence("en"))
+    english = "\n".join(line for line in english_lines if line)
+    text = texts_for_group_languages(codes, english=english, static=static, translate=translate)
+    if url:
+        return f"{text}\n\n{url}" if text else url
     return text
 
 
@@ -812,17 +815,113 @@ def join_settings_page_note(url: str) -> str:
     )
 
 
-def web_settings_notice(pairs: Sequence[tuple[str, str]]) -> str:
+def texts_for_group_languages(
+    codes: Sequence[str],
+    *,
+    english: str,
+    static: dict[str, str],
+    translate=None,
+) -> str:
+    """グループの各言語へ同じ案内を一度ずつ出す。
+
+    英語が原文。それ以外は translate を試し、空や原文と同じ、例外なら
+    ja/zh/ko/th の固定文へ落とす。固定文も無ければ英語を一度だけ使う。
+    """
+
+    ordered: list[str] = []
+    seen_codes: set[str] = set()
+    for code in codes:
+        lowered = (code or "").strip().lower()
+        if not lowered or lowered in seen_codes:
+            continue
+        seen_codes.add(lowered)
+        ordered.append(lowered)
+    if not ordered:
+        ordered = ["en"]
+
+    found = _translations_for_codes(ordered, english, translate)
+    blocks: list[str] = []
+    seen_text: set[str] = set()
+    for code in ordered:
+        if code == "en" or code.startswith("en-"):
+            text = english.strip()
+        else:
+            text = _lookup_translation(found, code)
+            if not text:
+                family = ui_family(code)
+                text = (static.get(family) or "").strip()
+            if not text:
+                text = english.strip()
+        if not text or text in seen_text:
+            continue
+        seen_text.add(text)
+        blocks.append(text)
+    return "\n\n".join(blocks)
+
+
+def _translations_for_codes(codes: Sequence[str], english: str, translate) -> dict[str, str]:
+    if not callable(translate):
+        return {}
+    base = (english or "").strip()
+    targets = [code for code in codes if code != "en" and not code.startswith("en-")]
+    if not base or not targets:
+        return {}
+    try:
+        results = translate(base, targets) or []
+        items = list(results)
+    except Exception:
+        return {}
+    found: dict[str, str] = {}
+    for item in items:
+        lang = str(getattr(item, "lang", "") or "").strip().lower().replace("_", "-")
+        text = str(getattr(item, "text", "") or "").strip()
+        if not lang or not text or text == base:
+            continue
+        found[lang] = text
+    return found
+
+
+def _lookup_translation(found: dict[str, str], code: str) -> str:
+    if code in found:
+        return found[code]
+    prefix = code.split("-", 1)[0]
+    for lang, text in found.items():
+        if lang.split("-", 1)[0] == prefix:
+            return text
+    return ""
+
+
+_STALE_CONFIRMATION_ENGLISH = (
+    "Those language choices are out of date. "
+    "The group's languages were saved again after that confirmation."
+)
+
+_STALE_CONFIRMATION_STATIC = {
+    "ja": "その確認は古いよ。そのあとで言語が保存されている。",
+    "zh": "这个确认已经过期了。之后语言又被保存过。",
+    "ko": "그 확인은 오래됐어. 그 뒤에 언어가 다시 저장됐어.",
+    "th": "การยืนยันนั้นเก่าแล้ว หลังจากนั้นมีการบันทึกภาษาอีกครั้ง",
+}
+
+
+def stale_confirmation_notice(codes: Sequence[str], *, translate=None) -> str:
+    """保存より前に出た確認ボタンを押したときの短い断り。"""
+
+    return texts_for_group_languages(
+        codes,
+        english=_STALE_CONFIRMATION_ENGLISH,
+        static=_STALE_CONFIRMATION_STATIC,
+        translate=translate,
+    )
+
+
+def web_settings_notice(pairs: Sequence[tuple[str, str]], *, translate=None) -> str:
     """ウェブで保存したあとにグループへ送る短い確認。同じ内容の連投は呼び出し側で避ける。"""
 
-    families: list[str] = []
-    for code, _name in pairs:
-        family = ui_family(code)
-        if family not in families:
-            families.append(family)
-    if "en" not in families:
-        families.insert(0, "en")
-    return "\n\n".join(_web_settings_line(pairs, family) for family in families)
+    codes = [code for code, _name in pairs if code]
+    english = _web_settings_line(pairs, "en")
+    static = {family: _web_settings_line(pairs, family) for family in ("ja", "zh", "ko", "th")}
+    return texts_for_group_languages(codes, english=english, static=static, translate=translate)
 
 
 def _web_settings_line(pairs: Sequence[tuple[str, str]], family: str) -> str:

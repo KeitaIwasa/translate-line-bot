@@ -709,6 +709,12 @@ class MessageHandler:
         self._repo.set_translation_enabled(group_id, True)
         return True
 
+    def _group_copy_translate(self):
+        """インターフェース翻訳。translate が無いスタブでは固定文のままにする。"""
+
+        translate = getattr(self._interface_translation, "translate", None)
+        return translate if callable(translate) else None
+
     def _reply_setup_confirmation(
         self,
         event: models.MessageEvent,
@@ -717,7 +723,7 @@ class MessageHandler:
         unsupported: Sequence[str] = (),
     ) -> None:
         url = self._language_settings_url(event.group_id, "")
-        ack = setup_confirmation(pairs, url=url)
+        ack = setup_confirmation(pairs, url=url, translate=self._group_copy_translate())
         notice = unsupported_prompt(unsupported, family)
         if notice:
             ack = f"{ack}\n{notice}"
@@ -1393,7 +1399,11 @@ class MessageHandler:
 
         # 言語の組は各言語で一度。未登録の言語は英語。リンクは今発行したトークン
         pairs = self._resulting_language_pairs(event.group_id)
-        ack = setup_confirmation(pairs, url=self._language_settings_url(event.group_id, ""))
+        ack = setup_confirmation(
+            pairs,
+            url=self._language_settings_url(event.group_id, ""),
+            translate=self._group_copy_translate(),
+        )
         notice = unsupported_prompt(parsed.unsupported, family)
         if notice:
             notice = self._localize_fixed_reply(

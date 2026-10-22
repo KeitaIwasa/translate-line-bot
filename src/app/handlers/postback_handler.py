@@ -87,6 +87,10 @@ class PostbackHandler:
             tuples: List[Tuple[str, str]] = [
                 (item.get("code", ""), item.get("name", "")) for item in langs if item.get("code")
             ]
+            issued_at = payload.get("issued_at")
+            confirm_kwargs = {}
+            if isinstance(issued_at, str) and issued_at:
+                confirm_kwargs["issued_at"] = issued_at
             bundle = self._lang_settings.confirm(
                 group_id=event.group_id,
                 languages=tuples,
@@ -94,6 +98,7 @@ class PostbackHandler:
                 completion_text=payload.get("completion_text"),
                 limit_text=payload.get("limit_text"),
                 settings_url=self._language_settings_url(event.group_id, ""),
+                **confirm_kwargs,
             )
             if not bundle:
                 logger.info(
@@ -103,16 +108,27 @@ class PostbackHandler:
                 return
             if event.reply_token and bundle.texts:
                 self._line.reply_text(event.reply_token, bundle.texts[0])
+            if bundle.notice_kind == "stale":
+                logger.info(
+                    "Stale language confirmation ignored",
+                    extra={"group_id": event.group_id, "languages": [code for code, _ in tuples]},
+                )
+                return
             logger.info(
                 "Language preferences saved",
                 extra={"group_id": event.group_id, "languages": [code for code, _ in tuples]},
             )
         elif action == "cancel":
             # 確認のキャンセルは、このポストバックをユーザーが押したときだけ。時間切れでは送らない
+            issued_at = payload.get("issued_at")
+            cancel_kwargs = {}
+            if isinstance(issued_at, str) and issued_at:
+                cancel_kwargs["issued_at"] = issued_at
             bundle = self._lang_settings.cancel(
                 group_id=event.group_id,
                 primary_language=primary_language,
                 cancel_text=payload.get("cancel_text"),
+                **cancel_kwargs,
             )
             if not bundle:
                 logger.info(

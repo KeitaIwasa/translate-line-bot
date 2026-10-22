@@ -14,6 +14,7 @@ from ..domain.models import (
     ContextMessage,
     ConversationMessage,
     GroupMessagePrefetch,
+    LanguagePromptResult,
     StoredMessage,
     TranslationRuntimeState,
 )
@@ -34,6 +35,32 @@ _UPSERT_GROUP_LANGUAGE_SQL = """
 INSERT INTO group_languages (group_id, lang_code, lang_name)
 VALUES (%s, %s, %s)
 ON CONFLICT (group_id, lang_code) DO UPDATE SET lang_name = EXCLUDED.lang_name
+"""
+
+def _language_prompt_stamp(value) -> Optional[str]:
+    """確認ボタンに載せる世代。DB の時刻だけを使い、アプリ時計とは比べない。"""
+
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        else:
+            value = value.astimezone(timezone.utc)
+        millis = (value.microsecond // 1000) * 1000
+        value = value.replace(microsecond=millis)
+        return value.isoformat(timespec="milliseconds")
+    return str(value)
+
+
+# ウェブ保存で、開いているチャット確認を同じトランザクションで閉じ、世代も進める
+_SEAL_LANGUAGE_PROMPT_SQL = """
+INSERT INTO group_members (
+    group_id, user_id, display_name, display_name_updated_at, last_prompted_at, last_completed_at
+)
+VALUES (%s, %s, %s, NOW(), NOW(), NOW())
+ON CONFLICT (group_id, user_id)
+DO UPDATE SET last_prompted_at = NOW(), last_completed_at = NOW()
 """
 
 # 置き換えのとき、言語の入れ替えと同じトランザクションで翻訳をオンにする
@@ -620,47 +647,34 @@ class NeonMessageRepository(MessageRepositoryPort):
                     ),
                 )
 
-    def record_language_prompt(self, group_id: str) -> None:
+    def record_language_prompt(self, group_id: str) -> Optional[str]:
         query = sql.SQL(
             """
             INSERT INTO group_members (group_id, user_id, display_name, display_name_updated_at, last_prompted_at)
             VALUES (%s, %s, %s, NOW(), NOW())
             ON CONFLICT (group_id, user_id)
             DO UPDATE SET last_prompted_at = NOW(), last_completed_at = NULL
+            RETURNING last_prompted_at
             """
         )
         with self._client.cursor() as cur:
             cur.execute(query, (group_id, GROUP_LANG_MARKER, GROUP_LANG_MARKER))
+            row = cur.fetchone()
+        return _language_prompt_stamp(row[0]) if row else None
 
     def try_complete_group_languages(
         self,
         group_id: str,
         languages: Sequence[Tuple[str, str]],
-    ) -> bool:
+        issued_at: Optional[str] = None,
+    ) -> LanguagePromptResult:
         normalized = self._normalize_languages(languages)
         limited = normalized[: self._max_group_languages]
         with self._client.connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO group_members (group_id, user_id, display_name, display_name_updated_at)
-                    VALUES (%s, %s, %s, NOW())
-                    ON CONFLICT (group_id, user_id) DO NOTHING
-                    """,
-                    (group_id, GROUP_LANG_MARKER, GROUP_LANG_MARKER),
-                )
-                cur.execute(
-                    """
-                    SELECT last_completed_at
-                    FROM group_members
-                    WHERE group_id = %s AND user_id = %s
-                    FOR UPDATE
-                    """,
-                    (group_id, GROUP_LANG_MARKER),
-                )
-                row = cur.fetchone()
-                if row and row[0]:
-                    return False
+                outcome = self._language_prompt_gate(cur, group_id, issued_at)
+                if outcome is not None:
+                    return outcome
 
                 cur.execute("DELETE FROM group_languages WHERE group_id = %s", (group_id,))
                 if limited:
@@ -682,31 +696,14 @@ class NeonMessageRepository(MessageRepositoryPort):
                     (group_id, GROUP_LANG_MARKER),
                 )
         self._invalidate_group_runtime(group_id)
-        return True
+        return LanguagePromptResult("applied")
 
-    def try_cancel_language_prompt(self, group_id: str) -> bool:
+    def try_cancel_language_prompt(self, group_id: str, issued_at: Optional[str] = None) -> LanguagePromptResult:
         with self._client.connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO group_members (group_id, user_id, display_name, display_name_updated_at)
-                    VALUES (%s, %s, %s, NOW())
-                    ON CONFLICT (group_id, user_id) DO NOTHING
-                    """,
-                    (group_id, GROUP_LANG_MARKER, GROUP_LANG_MARKER),
-                )
-                cur.execute(
-                    """
-                    SELECT last_completed_at
-                    FROM group_members
-                    WHERE group_id = %s AND user_id = %s
-                    FOR UPDATE
-                    """,
-                    (group_id, GROUP_LANG_MARKER),
-                )
-                row = cur.fetchone()
-                if row and row[0]:
-                    return False
+                outcome = self._language_prompt_gate(cur, group_id, issued_at)
+                if outcome is not None:
+                    return outcome
                 cur.execute(
                     """
                     UPDATE group_members
@@ -716,7 +713,48 @@ class NeonMessageRepository(MessageRepositoryPort):
                     (group_id, GROUP_LANG_MARKER),
                 )
         self._invalidate_group_runtime(group_id)
-        return True
+        return LanguagePromptResult("applied")
+
+    def _language_prompt_gate(self, cur, group_id: str, issued_at: Optional[str]) -> Optional[LanguagePromptResult]:
+        """開いている確認だけを通す。世代が違うボタンは言語を書き換えない。"""
+
+        cur.execute(
+            """
+            INSERT INTO group_members (group_id, user_id, display_name, display_name_updated_at)
+            VALUES (%s, %s, %s, NOW())
+            ON CONFLICT (group_id, user_id) DO NOTHING
+            """,
+            (group_id, GROUP_LANG_MARKER, GROUP_LANG_MARKER),
+        )
+        cur.execute(
+            """
+            SELECT last_prompted_at, last_completed_at
+            FROM group_members
+            WHERE group_id = %s AND user_id = %s
+            FOR UPDATE
+            """,
+            (group_id, GROUP_LANG_MARKER),
+        )
+        row = cur.fetchone()
+        prompted = _language_prompt_stamp(row[0]) if row else None
+        completed = row[1] if row else None
+        if issued_at is not None and issued_at != prompted:
+            return LanguagePromptResult("stale")
+        if completed:
+            return LanguagePromptResult("duplicate")
+        return None
+
+    def seal_language_prompt(self, group_id: str) -> None:
+        """選択が同じ保存でも、発行済みの確認ボタンを無効にする。"""
+
+        with self._client.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        _SEAL_LANGUAGE_PROMPT_SQL,
+                        (group_id, GROUP_LANG_MARKER, GROUP_LANG_MARKER),
+                    )
+        self._invalidate_group_runtime(group_id)
 
     def add_group_languages(self, group_id: str, languages: Sequence[Tuple[str, str]]) -> None:
         if not languages:
@@ -756,6 +794,11 @@ class NeonMessageRepository(MessageRepositoryPort):
                             [(group_id, code, name) for code, name in normalized],
                         )
                     cur.execute(_TRANSLATION_ENABLED_SQL, (group_id, True))
+                    # 言語の挿入が成功したときだけ確認を閉じる。失敗なら世代も戻る
+                    cur.execute(
+                        _SEAL_LANGUAGE_PROMPT_SQL,
+                        (group_id, GROUP_LANG_MARKER, GROUP_LANG_MARKER),
+                    )
         self._invalidate_group_runtime(group_id)
 
     def apply_language_changes(

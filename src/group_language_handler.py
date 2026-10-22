@@ -39,6 +39,7 @@ def lambda_handler(event: Dict[str, Any], _context) -> Dict[str, Any]:
         repo=_get_repo(settings),
         line=_get_line(settings),
         secret=settings.subscription_token_secret,
+        translator=_get_translator(settings),
     )
 
 
@@ -48,6 +49,7 @@ def handle_group_language_request(
     repo,
     line,
     secret: str,
+    translator=None,
 ) -> Dict[str, Any]:
     method = _method(event)
     if method not in {"GET", "POST"}:
@@ -119,6 +121,10 @@ def handle_group_language_request(
     current_codes = {(code or "").lower() for code, _name in current if code}
     new_codes = {code for code, _name in languages}
     if current_codes == new_codes:
+        # 言語が同じでも、開いているチャット確認は閉じる。古いボタンで上書きさせない
+        sealer = getattr(repo, "seal_language_prompt", None)
+        if sealer:
+            sealer(group_id)
         return _html_response(
             200,
             render_group_language_page(
@@ -134,7 +140,7 @@ def handle_group_language_request(
 
     repo.replace_group_languages(group_id, languages)
     saved = _current_records(repo, group_id) or list(languages)
-    _push_update(line, group_id, saved)
+    _push_update(line, group_id, saved, translate=translator)
     # ui を指定していないときは、保存後のグループ言語で表示を決める
     if not requested_ui.strip():
         family = page_family("", [code for code, _stored in saved])
@@ -232,10 +238,10 @@ def _options(current: Sequence[tuple[str, str]], family: str) -> list[tuple[str,
     return options
 
 
-def _push_update(line, group_id: str, languages: Sequence[tuple[str, str]]) -> None:
+def _push_update(line, group_id: str, languages: Sequence[tuple[str, str]], translate=None) -> None:
     if line is None:
         return
-    notice = web_settings_notice(languages)
+    notice = web_settings_notice(languages, translate=translate)
     if not notice:
         return
     try:
@@ -293,3 +299,21 @@ def _get_line(settings):
     from .infra.line_api import LineApiAdapter
 
     return LineApiAdapter(settings.line_channel_access_token)
+
+
+def _get_translator(settings):
+    """案内文をグループの各言語へ訳す。作れないときは固定文に落とす。"""
+
+    try:
+        from .domain.services.interface_translation_service import InterfaceTranslationService
+        from .infra.gemini_translation import GeminiTranslationAdapter
+
+        adapter = GeminiTranslationAdapter(
+            api_key=settings.gemini_api_key,
+            model=settings.gemini_model,
+            timeout_seconds=settings.gemini_timeout_seconds,
+        )
+        return InterfaceTranslationService(adapter).translate
+    except Exception:
+        logger.warning("group language page translator unavailable", exc_info=True)
+        return None
