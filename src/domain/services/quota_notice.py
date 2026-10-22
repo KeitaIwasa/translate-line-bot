@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from .plan_policy import language_limit_for
+from .plan_policy import FREE_PLAN, language_limit_for, monthly_quota_for
 
 SEE_PLANS_LABEL = "See plans"
 SEE_PLANS_BUTTON_TEXT = "Plans and prices"
@@ -49,13 +49,12 @@ def plan_catalog_text(
 
 
 def _resume_sentence(reset_date: str | None, *, free: bool) -> str:
-    if free and reset_date:
-        return f"Free translation resumes on {reset_date} (UTC)."
-    if free:
-        return "Free translation resumes when the monthly quota resets."
+    """再開の起点。日付の前置詞は from だけにする。on は訳すと「その日に止まる」へ反転する。"""
+
+    subject = "Free translation" if free else "Translation"
     if reset_date:
-        return f"Translation resumes on {reset_date} (UTC)."
-    return "Translation resumes when the monthly quota resets."
+        return f"{subject} resumes from {reset_date} (UTC)."
+    return f"{subject} resumes from the monthly quota reset."
 
 
 def build_free_limit_notice(
@@ -128,31 +127,34 @@ def build_approaching_notice(
         pro_quota=pro_quota,
     )
     reset = (
-        f"The free quota resets on {reset_date} (UTC)."
+        f"The free quota resets from {reset_date} (UTC)."
         if reset_date
-        else "The free quota resets at the start of next month (UTC)."
+        else "The free quota resets from the start of next month (UTC)."
     )
     return (
         f"This group has used {usage:,} of {limit:,} free messages this month. "
-        f"Translation stops at {limit:,}.\n"
+        f"Translation stops once this group reaches {limit:,} messages.\n"
         f"{reset}\n"
         f"{catalog}"
     )
 
 
-def build_quota_reset_notice(*, limit: int, reset_date: str | None) -> str:
-    """無料枠の月次リセットで翻訳が戻ったときの一文。"""
+def build_quota_reset_notice(*, reset_date: str | None) -> str:
+    """無料枠の月次リセットで翻訳が戻ったときの一文。
 
-    again = f" It resets again on {reset_date} (UTC)." if reset_date else ""
-    return (
-        f"The free monthly quota has reset. Translation is on again for {limit:,} messages this month.{again}"
-    )
+    件数は残数ではない。最初の翻訳と同時に送るので、実行時の残り件数は書かない。
+    月間上限はプラン定義から取り、文面に 50 を直書きしない。
+    """
+
+    cap = monthly_quota_for(FREE_PLAN)
+    again = f" The next reset is from {reset_date} (UTC)." if reset_date else ""
+    return f"The free monthly quota has reset. Up to {cap:,} messages per month.{again}"
 
 
 def build_resume_blocked_short(*, limit: int, reset_date: str | None) -> str:
     """同じ日に再開を頼まれたときの短い再案内。リンクは再送しない。"""
 
-    when = f" on {reset_date} (UTC)" if reset_date else " when the monthly quota resets"
+    when = f" until {reset_date} (UTC)" if reset_date else " until the monthly quota resets"
     return (
         f"Translation stays paused{when}. "
         f"This group already used all {limit:,} free messages. "

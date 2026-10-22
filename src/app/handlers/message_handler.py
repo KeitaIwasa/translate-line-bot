@@ -1448,7 +1448,6 @@ class MessageHandler:
         elif quota_resumed:
             self._send_quota_reset_notice(
                 event,
-                limit=limit,
                 period_key=flow.decision.period_key,
                 period_end=runtime.period_end,
             )
@@ -1570,7 +1569,6 @@ class MessageHandler:
                     "type": "text",
                     "text": self._quota_reset_notice_text(
                         event.group_id or "",
-                        limit=limit,
                         period_key=flow.decision.period_key,
                         period_end=period_end,
                     ),
@@ -2004,7 +2002,6 @@ class MessageHandler:
         self,
         group_id: str,
         *,
-        limit: int,
         period_key: Optional[str],
         period_end: Optional[datetime],
     ) -> str:
@@ -2013,7 +2010,7 @@ class MessageHandler:
             period_end=period_end,
             plan_key=FREE_PLAN,
         )
-        base = build_quota_reset_notice(limit=limit, reset_date=reset_date)
+        base = build_quota_reset_notice(reset_date=reset_date)
         text, _url = self._build_multilingual_notice(base, group_id, None, add_missing_link_notice=False)
         return text
 
@@ -2021,13 +2018,11 @@ class MessageHandler:
         self,
         event: models.MessageEvent,
         *,
-        limit: int,
         period_key: Optional[str],
         period_end: Optional[datetime],
     ) -> None:
         text = self._quota_reset_notice_text(
             event.group_id or "",
-            limit=limit,
             period_key=period_key,
             period_end=period_end,
         )

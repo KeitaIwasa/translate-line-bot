@@ -1,5 +1,7 @@
 """無料枠の上限案内。49/50/51、事前案内、停止中メンション、リセット、多言語。"""
 
+import inspect
+import re
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -7,9 +9,16 @@ import pytest
 
 from src.app.handlers.message_handler import MessageHandler
 from src.domain import models
+from src.domain.services.plan_policy import monthly_quota_for
 from src.domain.services.quota_notice import (
     approaching_usage_threshold,
+    build_approaching_notice,
+    build_free_limit_notice,
     build_plan_link_message,
+    build_pro_limit_notice,
+    build_quota_reset_notice,
+    build_resume_blocked_short,
+    build_standard_limit_notice,
     plan_catalog_text,
 )
 from tests.test_quota_limits import (
@@ -94,6 +103,88 @@ def test_plan_catalog_uses_configured_quotas_without_currency():
     assert "¥" not in text
     assert "$" not in text
     assert "円" not in text
+
+
+def _quota_notice_samples() -> list[str]:
+    """日付を含む案内を、日付あり・なしの両方で集める。"""
+
+    common = dict(free_quota=50, standard_quota=4000, pro_quota=40000)
+    return [
+        build_free_limit_notice(limit=50, reset_date="2026-11-01", reminder=False, **common),
+        build_free_limit_notice(limit=50, reset_date=None, reminder=True, **common),
+        build_standard_limit_notice(limit=4000, reset_date="2026-11-01", pro_quota=40000, reminder=False),
+        build_standard_limit_notice(limit=4000, reset_date=None, pro_quota=40000, reminder=True),
+        build_pro_limit_notice(limit=40000, reset_date="2026-11-01", reminder=False),
+        build_pro_limit_notice(limit=40000, reset_date=None, reminder=True),
+        build_approaching_notice(usage=40, limit=50, reset_date="2026-11-01", **common),
+        build_approaching_notice(usage=40, limit=50, reset_date=None, **common),
+        build_quota_reset_notice(reset_date="2026-11-01"),
+        build_quota_reset_notice(reset_date=None),
+        build_resume_blocked_short(limit=50, reset_date="2026-11-01"),
+        build_resume_blocked_short(limit=50, reset_date=None),
+    ]
+
+
+def test_quota_notice_dates_use_from_or_until():
+    """日付の on は機械翻訳で「その日に止まる／始まる」へ反転する。"""
+
+    for text in _quota_notice_samples():
+        assert re.search(r"\bon\b", text) is None, text
+        if "2026-11-01" in text:
+            assert "from 2026-11-01 (UTC)" in text or "until 2026-11-01 (UTC)" in text
+
+
+def test_resume_blocked_short_stays_paused_until_reset():
+    dated = build_resume_blocked_short(limit=50, reset_date="2026-11-01")
+    assert dated.startswith("Translation stays paused until 2026-11-01 (UTC).")
+    undated = build_resume_blocked_short(limit=50, reset_date=None)
+    assert "until the monthly quota resets" in undated
+    assert "when the monthly quota resets" not in undated
+
+
+def test_quota_reset_notice_states_plan_cap_not_remaining():
+    cap = monthly_quota_for("free")
+    dated = build_quota_reset_notice(reset_date="2026-11-01")
+    assert dated == (
+        "The free monthly quota has reset. "
+        f"Up to {cap:,} messages per month. "
+        "The next reset is from 2026-11-01 (UTC)."
+    )
+    undated = build_quota_reset_notice(reset_date=None)
+    assert undated == f"The free monthly quota has reset. Up to {cap:,} messages per month."
+    assert "on again" not in dated
+    assert "this month" not in dated
+    assert "left" not in dated.lower()
+    assert "remaining" not in dated.lower()
+    # 呼び出し側の残数でも、文面に直書きした 50 でもない
+    body = inspect.getsource(build_quota_reset_notice).split('"""', 2)[-1]
+    assert "50" not in body
+    assert "monthly_quota_for" in body
+
+
+def test_resume_sentences_start_from_the_reset():
+    free = build_free_limit_notice(
+        limit=50,
+        reset_date="2026-11-01",
+        free_quota=50,
+        standard_quota=4000,
+        pro_quota=40000,
+        reminder=False,
+    )
+    assert "Free translation resumes from 2026-11-01 (UTC)." in free
+    paid = build_pro_limit_notice(limit=40000, reset_date=None, reminder=True)
+    assert "Translation resumes from the monthly quota reset." in paid
+    approaching = build_approaching_notice(
+        usage=40,
+        limit=50,
+        reset_date=None,
+        free_quota=50,
+        standard_quota=4000,
+        pro_quota=40000,
+    )
+    assert "Translation stops once this group reaches 50 messages." in approaching
+    assert "resets from the start of next month (UTC)." in approaching
+    assert "stops at" not in approaching
 
 
 def test_plan_link_is_a_button_and_long_urls_stay_text():
@@ -195,7 +286,8 @@ def test_free_notices_use_next_month_when_canceled_period_end_remains():
     line.sent_texts.clear()
     handler._handle_command(_build_event("resume"), "resume")
     short = "\n".join(line.sent_texts)
-    assert "stays paused" in short
+    assert "stays paused until" in short
+    assert "paused on" not in short
     assert next_month in short
     assert "2024-03-17" not in short
 
@@ -205,6 +297,8 @@ def test_free_notices_use_next_month_when_canceled_period_end_remains():
 
     reset = "\n".join(line.sent_texts)
     assert "has reset" in reset
+    assert f"Up to {monthly_quota_for('free'):,} messages per month" in reset
+    assert "on again" not in reset
     assert next_month in reset
     assert "2024-03-17" not in reset
     assert repo.translation_enabled is True
@@ -249,6 +343,8 @@ def test_language_changes_during_quota_pause_keep_the_reason():
     assert repo.usage == 1
     reset = "\n".join(line.sent_texts)
     assert "has reset" in reset
+    assert f"Up to {monthly_quota_for('free'):,} messages per month" in reset
+    assert "on again" not in reset
     assert _next_month(datetime.now(timezone.utc)) in reset
 
 
@@ -425,6 +521,8 @@ def test_free_50_persists_quota_pause_before_the_next_message():
     assert repo.usage == 1
     reset = "\n".join(line.sent_texts)
     assert "has reset" in reset
+    assert f"Up to {monthly_quota_for('free'):,} messages per month" in reset
+    assert "on again" not in reset
     assert _next_month(datetime.now(timezone.utc)) in reset
 
 
@@ -462,6 +560,8 @@ def test_quota_reset_resumes_translation_and_says_so():
     assert repo.usage == 1
     joined = "\n".join(line.sent_texts)
     assert "has reset" in joined
+    assert f"Up to {monthly_quota_for('free'):,} messages per month" in joined
+    assert "on again" not in joined
     assert "Translation stopped" not in joined
     assert _next_month(datetime.now(timezone.utc)) in joined
 
