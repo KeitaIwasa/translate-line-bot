@@ -105,7 +105,7 @@ def test_howto_uses_ack_text_without_forcing_resume():
 
     handler._handle_command(event, "使い方を教えて")
 
-    assert "Add Thai" in (handler._line.last_text or "")
+    assert "タイ語を追加して" in (handler._line.last_text or "")
     assert "使い方を教えてと送って" not in (handler._line.last_text or "")
     assert repo.translation_enabled_calls == []
 

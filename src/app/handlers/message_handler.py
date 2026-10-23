@@ -54,6 +54,7 @@ from ...domain.services.language_mention import (
     MentionRead,
     catalog_prompt,
     exceeds_language_limit,
+    enrollment_prompt,
     family_for,
     howto_prompt,
     is_howto_loop,
@@ -62,6 +63,7 @@ from ...domain.services.language_mention import (
     language_quick_replies,
     need_both_languages_prompt,
     read_mention,
+    reply_family,
     settings_help_prompt,
     settings_page_line,
     setup_confirmation,
@@ -615,7 +617,7 @@ class MessageHandler:
 
     def _attempt_language_enrollment(self, event: models.MessageEvent) -> bool:
         text = event.text or ""
-        family = family_for("", text)
+        family = reply_family(text, self._group_languages_for_reply(event.group_id))
         if text and is_nonlinguistic(text):
             self._reply_text(
                 event,
@@ -630,7 +632,7 @@ class MessageHandler:
                 group_languages=[],
             )
             return self._handle_local_mention(event, text, parsed, instruction)
-        if parsed.kind in {"languages", "unsupported", "translate_all"}:
+        if parsed.kind in {"languages", "unsupported", "translate_all", "swap_unclear"}:
             if self._enroll_from_local_parse(event, text, parsed, family):
                 return True
         plan_key = self._resolve_effective_plan_for_group(event.group_id)
@@ -640,6 +642,10 @@ class MessageHandler:
         )
         if not bundle:
             return False
+        if bundle.notice_kind == "read_empty":
+            body = bundle.texts[0] if bundle.texts else enrollment_prompt(family)
+            self._reply_with_language_menu(event, body, family)
+            return True
         if bundle.messages:
             self._reply_messages(event, list(bundle.messages))
         elif bundle.texts:
@@ -660,7 +666,7 @@ class MessageHandler:
         """はっきり読めた言語は、確認ボタンを挟まず保存して一度だけ伝える。"""
 
         limit = language_limit_for(self._resolve_effective_plan_for_group(event.group_id))
-        if parsed.kind not in {"translate_all", "unsupported", "languages"}:
+        if parsed.kind not in {"translate_all", "unsupported", "languages", "swap_unclear"}:
             return False
         update = decide_language_update(
             mode=parsed.mode,
@@ -670,6 +676,8 @@ class MessageHandler:
             family=family,
             kind=parsed.kind,
             unsupported=parsed.unsupported,
+            swap_from=parsed.swap_from,
+            swap_to=parsed.swap_to,
         )
         # 削除や不明を置換として保存しない。propose へ落とすと、また言語として読まれる
         return self._dispatch_language_update(
@@ -717,7 +725,7 @@ class MessageHandler:
                 command_trace=command_trace,
             )
         if update.action == "noop":
-            return True
+            raise ValueError("language update produced no reply")
         if update.action == "reply":
             if update.enable_translation is False:
                 self._repo.set_translation_enabled(event.group_id, False)
@@ -791,9 +799,9 @@ class MessageHandler:
                 command_trace=command_trace,
             )
         if not text:
-            return
-        # 未設定の削除と片側だけでは、ページへのリンク付きで返す
-        if source == "enroll" or update.page_error in {"need_pair", "none_set"}:
+            raise ValueError("language update produced no reply")
+        # 未設定の削除、片側だけ、役割が合わない置換は、ページへのリンク付きで返す
+        if source == "enroll" or update.page_error in {"need_pair", "none_set", "not_set", "clarify"}:
             self._reply_with_language_menu(event, text, family, command_trace=command_trace)
             return
         if update.page_error in {"too_many", "select"}:
@@ -1036,7 +1044,7 @@ class MessageHandler:
                     )
                 elif action == "howto":
                     message = (decision.ack_text or "").strip()
-                    howto_family = family_for(instruction_lang or decision.instruction_language, command_text)
+                    howto_family = reply_family(command_text, runtime.group_languages)
                     # 「使い方を教えてと送って」でループさせず、その場で答える
                     if not message or is_howto_loop(message):
                         message = howto_prompt(family=howto_family)
@@ -1230,7 +1238,7 @@ class MessageHandler:
     ) -> bool:
         """モデルが取りこぼす言語設定・使い方を、固定文で返す。"""
 
-        family = family_for(instruction_lang, command_text)
+        family = reply_family(command_text, self._group_languages_for_reply(event.group_id))
         limit = language_limit_for(self._resolve_effective_plan_for_group(event.group_id))
         if command_trace:
             command_trace.set_decision(
@@ -1329,7 +1337,7 @@ class MessageHandler:
         command_trace: _CommandTrace | None = None,
     ) -> bool:
         text = command_text or ""
-        family = family_for(decision.instruction_language, text)
+        family = reply_family(text, self._group_languages_for_reply(event.group_id))
         parsed = read_mention(text)
         # 絵文字だけ・数字だけでは、モデルが reset_all と返しても設定を消さない
         if text and is_nonlinguistic(text):
@@ -1337,7 +1345,7 @@ class MessageHandler:
             return True
         limit = language_limit_for(self._resolve_effective_plan_for_group(event.group_id))
         # 文面から読めた操作は、モデルの operation より先に同じ決定表へ乗せる
-        if parsed.kind in {"languages", "translate_all", "unsupported"}:
+        if parsed.kind in {"languages", "translate_all", "unsupported", "swap_unclear"}:
             update = decide_language_update(
                 mode=parsed.mode,
                 current=self._current_language_pairs(event.group_id),
@@ -1346,6 +1354,8 @@ class MessageHandler:
                 family=family,
                 kind=parsed.kind,
                 unsupported=parsed.unsupported,
+                swap_from=parsed.swap_from,
+                swap_to=parsed.swap_to,
             )
             return self._dispatch_language_update(
                 event,
@@ -1449,6 +1459,9 @@ class MessageHandler:
             return text
         lowered = (instruction_lang or "").strip().lower()
         if not lowered or lowered.startswith("en"):
+            return text
+        # 本文が英語なら、ja/zh/ko/th の指示には固定文を切り替えず英語のまま返す
+        if family_for(lowered) != "en":
             return text
         return self._safe_translate_for_instruction(
             text,

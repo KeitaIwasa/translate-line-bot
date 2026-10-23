@@ -36,11 +36,11 @@ CASES = [
     _case("replace", "at_limit", (EN, JA)),
     _case("replace", "empty", (EN, JA, ZH, KO), action="reply", enable=None, page_error="too_many"),
     _case("set", "empty", (EN, JA)),
-    _case("unknown", "empty", (EN, JA), action="noop", enable=None),
-    _case("unknown", "some", (ZH,), action="noop", enable=None),
-    _case("unknown", "at_limit", (KO,), action="noop", enable=None),
-    _case("frobnicate", "empty", (EN, JA), action="noop", enable=None),
-    _case("", "some", (EN, JA), action="noop", enable=None),
+    _case("unknown", "empty", (EN, JA), action="reply", enable=None, page_error="unrecognized"),
+    _case("unknown", "some", (ZH,), action="reply", enable=None, page_error="unrecognized"),
+    _case("unknown", "at_limit", (KO,), action="reply", enable=None, page_error="unrecognized"),
+    _case("frobnicate", "empty", (EN, JA), action="reply", enable=None, page_error="unrecognized"),
+    _case("", "some", (EN, JA), action="reply", enable=None, page_error="unrecognized"),
     _case("add", "empty", kind="nonlinguistic", action="reply", enable=None, page_error="unrecognized"),
     _case("remove", "some", kind="nonlinguistic", action="reply", enable=None, page_error="unrecognized"),
     _case("replace", "at_limit", kind="nonlinguistic", action="reply", enable=None, page_error="unrecognized"),
@@ -81,6 +81,8 @@ def test_mode_and_state_decide_without_falling_through_to_replace(
         assert update.enable_translation is True
         assert len(update.languages) >= 2
         assert len(update.languages) <= LIMIT
+    assert update.reply.strip()
+    assert update.action != "noop"
 
 
 def test_remove_on_an_empty_group_does_not_keep_the_named_languages():
@@ -118,7 +120,7 @@ def test_unknown_projection_mode_raises():
         project_language_codes(["en", "ja"], ["ko"], mode="nope")
 
 
-def test_remove_that_changes_nothing_is_a_noop():
+def test_remove_of_a_language_that_is_not_set_replies():
     update = decide_language_update(
         mode="remove",
         current=(EN, JA, ZH),
@@ -127,6 +129,58 @@ def test_remove_that_changes_nothing_is_a_noop():
         family="en",
     )
 
-    assert update.action == "noop"
+    assert update.action == "reply"
+    assert update.page_error == "not_set"
     assert update.enable_translation is None
     assert update.write == "none"
+    assert update.languages == ()
+    assert "isn't set" in update.reply
+    assert "Korean" in update.reply
+    assert "English" in update.reply
+
+
+def test_every_mode_and_state_has_a_user_facing_reply():
+    """追加・削除・置換・不明 × 未設定・設定済み・上限。どの結果も返信がある。"""
+
+    modes = ("add", "remove", "replace", "unknown")
+    kinds = ("languages", "nonlinguistic", "unsupported")
+    for mode in modes:
+        for state in STATES:
+            for kind in kinds:
+                update = decide_language_update(
+                    mode=mode,
+                    current=STATES[state],
+                    requested=(EN, JA) if mode != "remove" else (KO,),
+                    limit=LIMIT,
+                    family="en",
+                    kind=kind,
+                    unsupported=("Klingon",) if kind == "unsupported" else (),
+                )
+                assert update.reply.strip(), (mode, state, kind)
+                assert update.action != "noop"
+
+
+def test_inverted_add_and_remove_asks_instead_of_swapping_roles():
+    contradicted = decide_language_update(
+        mode="add_remove",
+        current=(EN, JA),
+        requested=(EN,),
+        remove=("zh",),
+        limit=LIMIT,
+        family="ja",
+    )
+    assert contradicted.action == "reply"
+    assert contradicted.page_error == "clarify"
+    assert contradicted.languages == ()
+    assert "どちらを外して" in contradicted.reply
+
+    valid = decide_language_update(
+        mode="add_remove",
+        current=(EN, JA),
+        requested=(ZH,),
+        remove=("en",),
+        limit=LIMIT,
+        family="en",
+    )
+    assert valid.action == "save"
+    assert {code for code, _name in valid.languages} == {"ja", "zh"}

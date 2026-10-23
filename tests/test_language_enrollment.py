@@ -462,9 +462,10 @@ def test_language_settings_add_rejects_when_exceeding_limit():
     handler._handle_language_settings(event, decision, event.text)
 
     assert repo.languages == ["en", "ja", "fr", "de", "th"]
-    assert "最大5つまで" in (line.last_text or "")
-    assert "どれを外す" in (line.last_text or "")
-    assert "英語" in (line.last_text or "")
+    reply = line.last_text or ""
+    assert "up to 5" in reply
+    assert "swap out" in reply
+    assert "English" in reply
 
 
 def test_language_settings_ack_without_static_text_uses_translation_path():
@@ -591,9 +592,9 @@ def test_spanish_instruction_translates_selection_limit_and_unsupported_replies(
         instruction_language="es",
     )
     assert handler._handle_language_settings(_settings_event("エルヴ語"), unsupported, "エルヴ語") is True
-    assert "isn't supported" in translation.texts[-1][0]
-    assert translation.texts[-1][1] == ["es"]
-    assert line.last_text.startswith("ES:")
+    # 本文が日本語なので固定文のまま。指示言語のスペイン語には訳さない
+    assert "対応していない" in (line.last_text or "")
+    assert len(translation.texts) == 2
 
 
 def test_english_instruction_keeps_the_fixed_reply_without_translation():
@@ -688,7 +689,7 @@ def test_reset_all_with_add_list_replaces_languages_and_keeps_translation():
     assert repo.languages == ["ja", "th"]
     assert repo.translation_enabled is False
     reply = line.last_text or ""
-    assert "your language too" in reply.lower()
+    assert "あなたの言語も" in reply
     assert "reset" not in reply.lower()
 
 
@@ -742,7 +743,7 @@ def test_replace_over_the_language_limit_does_not_clear_current_languages():
     ) is True
     assert repo.reset_called is False
     assert repo.languages == ["ja", "en"]
-    assert "You can set up to 5 translation languages" in (line.last_text or "")
+    assert "最大5つまで" in (line.last_text or "")
 
 
 def test_plain_reset_all_still_clears_languages_and_stops_translation():
@@ -912,8 +913,9 @@ def test_postback_sends_multilingual_completion():
 
     assert repo.saved is True
     assert line.last is not None
-    # 翻訳できるときは固定文より翻訳を使う。ja/zh/ko/th の固定文は翻訳失敗のときだけ
+    # ja/zh/ko/th は固定文。翻訳は表が無い言語だけ
     assert "English, Japanese, and Thai have been set as the translation languages." in line.last
-    assert "(ja)" in line.last
-    assert "(th)" in line.last
-    assert "英語・日本語・タイ語になったよ" not in line.last
+    assert "英語・日本語・タイ語になったよ" in line.last
+    assert "ตั้งเป็น" in line.last
+    assert "(ja)" not in line.last
+    assert "(th)" not in line.last

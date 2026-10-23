@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Sequence
 
-from .language_names import english_language_name, japanese_language_name
+from .language_names import localized_language_name
 
 # 言語の追加・削除ではなく、「今どの言語か」を聞いているときの定型応答。
 # current / set / now / 今 / 現在 / 設定 が無い「どの言語」「which languages」は対応言語の質問なので含めない
@@ -79,7 +79,7 @@ def current_languages_base_text(languages: Sequence) -> str:
 
 
 def current_languages_localized_text(languages: Sequence, reply_language: str) -> str | None:
-    """ja / en は翻訳せずに一覧を返す。それ以外は None。"""
+    """ja/en/zh/ko/th は固定の名前表で一覧を返す。それ以外は None。"""
 
     family = _deterministic_family(reply_language)
     if family is None:
@@ -91,19 +91,29 @@ def _deterministic_family(reply_language: str) -> str | None:
     lowered = (reply_language or "").strip().lower().replace("_", "-")
     if not lowered or lowered.startswith("en"):
         return "en"
-    if lowered.startswith("ja"):
-        return "ja"
+    for prefix in ("ja", "zh", "ko", "th"):
+        if lowered.startswith(prefix):
+            return prefix
     return None
 
 
 def _current_languages_text(languages: Sequence, family: str) -> str:
     names = _language_names(languages, family)
     if not names:
-        if family == "ja":
-            return "翻訳言語はまだ設定されていません。"
-        return "No translation languages are set yet."
+        return {
+            "ja": "翻訳言語はまだ設定されていません。",
+            "zh": "还没有设置翻译语言。",
+            "ko": "아직 번역 언어가 없어.",
+            "th": "ยังไม่ได้ตั้งภาษาแปล",
+        }.get(family, "No translation languages are set yet.")
     if family == "ja":
         return "現在の翻訳言語は" + "、".join(names) + "です。"
+    if family == "zh":
+        return "当前的翻译语言是" + "、".join(names) + "。"
+    if family == "ko":
+        return "현재 번역 언어는 " + ", ".join(names) + "야."
+    if family == "th":
+        return "ภาษาแปลตอนนี้คือ " + ", ".join(names)
     if len(names) == 1:
         return f"The current translation language is {names[0]}."
     return "The current translation languages are " + ", ".join(names) + "."
@@ -114,12 +124,11 @@ def _language_names(languages: Sequence, family: str) -> list[str]:
 
     names: list[str] = []
     seen: set[str] = set()
-    namer = japanese_language_name if family == "ja" else english_language_name
     for code, stored_name in _language_records(languages):
         if code in seen:
             continue
         seen.add(code)
-        names.append(namer(code, stored_name))
+        names.append(localized_language_name(code, family, stored_name))
     return names
 
 

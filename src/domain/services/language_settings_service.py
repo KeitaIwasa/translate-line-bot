@@ -8,8 +8,10 @@ from ..ports import LanguagePreferencePort, MessageRepositoryPort
 from ...infra.jev_language_reader import LANGUAGE_NAMES
 from .interface_translation_service import InterfaceTranslationService
 from .language_mention import (
+    enrollment_prompt,
     exceeds_language_limit,
     need_both_languages_prompt,
+    reply_family,
     selection_prompt,
     setup_confirmation,
     stale_confirmation_notice,
@@ -41,10 +43,18 @@ class LanguageSettingsService:
         try:
             result = self._pref.analyze(event.text)
         except Exception:  # pylint: disable=broad-except
-            return models.ReplyBundle(texts=[self._language_analysis_fallback()])
+            return models.ReplyBundle(
+                texts=[self._language_analysis_fallback()],
+                notice_kind="read_error",
+            )
 
-        if not result:
-            return models.ReplyBundle(texts=[self._language_analysis_fallback()])
+        # 読み取りが言語を返さなかったとき。通信失敗とは分け、設定の案内にする
+        if result is None:
+            family = reply_family(event.text or "", ())
+            return models.ReplyBundle(
+                texts=[enrollment_prompt(family)],
+                notice_kind="read_empty",
+            )
 
         supported = result.supported
         unsupported = result.unsupported

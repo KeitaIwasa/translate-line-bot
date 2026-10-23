@@ -14,7 +14,13 @@ from typing import Sequence
 
 from ...infra.jev_language_reader import LANGUAGE_CATALOG, LANGUAGE_NAMES
 from .explicit_language_reset import is_explicit_language_reset
-from .language_names import ENGLISH_LANGUAGE_NAMES, JAPANESE_LANGUAGE_NAMES, english_language_name, japanese_language_name
+from .language_names import (
+    ENGLISH_LANGUAGE_NAMES,
+    JAPANESE_LANGUAGE_NAMES,
+    english_language_name,
+    japanese_language_name,
+    localized_language_name,
+)
 
 # カタログへ寄せる表記ゆれ。繁体字はカタログの「中国語」とは別なので寄せない。
 _REMAP = {
@@ -483,10 +489,12 @@ _REQUEST_FILLERS = (
 class MentionRead:
     """メンション文の読み取り結果。kind が none のときはモデルの判定に任せる。"""
 
-    kind: str = "none"  # none | catalog | settings_help | howto | translate_all | languages | unsupported
+    kind: str = "none"  # none | catalog | settings_help | howto | translate_all | languages | unsupported | swap_unclear
     languages: tuple[tuple[str, str], ...] = ()  # (code, surface)
     unsupported: tuple[str, ...] = ()
-    mode: str = "set"  # set | add | remove
+    mode: str = "set"  # set | add | remove | swap
+    swap_from: str = ""
+    swap_to: str = ""
 
 
 def is_nonlinguistic(text: str) -> bool:
@@ -554,6 +562,10 @@ def read_mention(text: str) -> MentionRead:
     if translate_all and not resetting_all:
         return MentionRead(kind="translate_all")
 
+    directed = _read_directed_replace(raw)
+    if directed is not None:
+        return directed
+
     normalized = _normalize(raw)
     found, unsupported, spans = _scan(normalized)
     if _ADD.search(normalized) and _REMOVE.search(normalized):
@@ -571,14 +583,32 @@ def read_mention(text: str) -> MentionRead:
 
 
 def language_label(code: str, family: str, surface: str = "", stored: str = "") -> str:
-    """表示名。日本語の依頼表記はそのまま、英語名は各言語の定訳に戻す。"""
+    """表示名。依頼の表記が同じ文字体系ならそれを使い、英語名は各言語の定訳に戻す。"""
 
     shown = (surface or stored or "").strip()
     if family == "ja":
         if shown and re.search(r"[ぁ-んァ-ン一-龯]", shown):
             return shown
         return japanese_language_name(code, "")
-    return english_language_name(code, "")
+    if family in {"zh", "ko", "th"}:
+        return localized_language_name(code, family, "" if _is_foreign_surface(shown, family) else shown)
+    if shown and re.search(r"[ぁ-んァ-ン一-龯\uac00-\ud7af\u0e00-\u0e7f]", shown):
+        return english_language_name(code, "")
+    return english_language_name(code, shown)
+
+
+def _is_foreign_surface(shown: str, family: str) -> bool:
+    """他の文字体系の依頼表記は、その言語の固定名に戻す。"""
+
+    if not shown:
+        return False
+    if family == "zh":
+        return bool(re.search(r"[ぁ-んァ-ン\uac00-\ud7af\u0e00-\u0e7f]", shown))
+    if family == "ko":
+        return not bool(re.search(r"[\uac00-\ud7af]", shown))
+    if family == "th":
+        return not bool(re.search(r"[\u0e00-\u0e7f]", shown))
+    return False
 
 
 def catalog_labels(family: str) -> list[str]:
@@ -900,8 +930,8 @@ def texts_for_group_languages(
 ) -> str:
     """グループの各言語へ同じ案内を一度ずつ出す。
 
-    英語が原文。それ以外は translate を試し、空や原文と同じ、例外なら
-    ja/zh/ko/th の固定文へ落とす。固定文も無ければ英語を一度だけ使う。
+    英語が原文。ja/zh/ko/th は固定文を使う。それ以外だけ translate を試し、
+    空や原文と同じ、例外なら英語を一度だけ使う。
     """
 
     ordered: list[str] = []
@@ -915,19 +945,24 @@ def texts_for_group_languages(
     if not ordered:
         ordered = ["en"]
 
-    found = _translations_for_codes(ordered, english, translate)
+    # ja/zh/ko/th は固定文を先に使う。Gemini は固定文が無い言語だけ
+    translatable = [
+        code
+        for code in ordered
+        if ui_family(code) == "en" and code != "en" and not code.startswith("en-")
+    ]
+    found = _translations_for_codes(translatable, english, translate)
     blocks: list[str] = []
     seen_text: set[str] = set()
     for code in ordered:
-        if code == "en" or code.startswith("en-"):
+        family = ui_family(code)
+        static_text = "" if family == "en" else (static.get(family) or "").strip()
+        if static_text:
+            text = static_text
+        elif code == "en" or code.startswith("en-"):
             text = english.strip()
         else:
-            text = _lookup_translation(found, code)
-            if not text:
-                family = ui_family(code)
-                text = (static.get(family) or "").strip()
-            if not text:
-                text = english.strip()
+            text = _lookup_translation(found, code) or english.strip()
         if not text or text in seen_text:
             continue
         seen_text.add(text)
@@ -1111,17 +1146,17 @@ def completion_prompt(pairs: Sequence[tuple[str, str]], *, family: str) -> str:
             return "翻訳言語は未設定になったよ。"
         return "・".join(names) + "になったよ"
     if family == "zh":
-        names = [language_label(code, "en", stored=name) for code, name in pairs if code]
+        names = [language_label(code, "zh", stored=name) for code, name in pairs if code]
         if not names:
             return "还没有设置翻译语言。"
         return "已设置为" + "、".join(names) + "。"
     if family == "ko":
-        names = [language_label(code, "en", stored=name) for code, name in pairs if code]
+        names = [language_label(code, "ko", stored=name) for code, name in pairs if code]
         if not names:
             return "번역 언어가 비었어."
         return ", ".join(names) + "로 설정했어."
     if family == "th":
-        names = [language_label(code, "en", stored=name) for code, name in pairs if code]
+        names = [language_label(code, "th", stored=name) for code, name in pairs if code]
         if not names:
             return "ยังไม่ได้ตั้งภาษาแปล"
         return "ตั้งเป็น " + ", ".join(names) + " แล้ว"
@@ -1131,6 +1166,135 @@ def completion_prompt(pairs: Sequence[tuple[str, str]], *, family: str) -> str:
     if len(names) == 1:
         return f"{names[0]} has been set as the translation language."
     return f"{_english_join(names)} have been set as the translation languages."
+
+
+def reply_family(text: str, group_languages: Sequence[str] = ()) -> str:
+    """返信の言語。本文から分かる言語、無ければグループの先頭、それも無ければ日本語。"""
+
+    detected = _detect_reply_family(text)
+    if detected:
+        return detected
+    for code in group_languages:
+        family = ui_family(code)
+        if family:
+            return family
+    return "ja"
+
+
+_EXACT_REPLY_FAMILY = {
+    "設定": "ja",
+    "言語": "ja",
+    "言語設定": "ja",
+    "ヘルプ": "ja",
+    "使い方": "ja",
+    "settings": "en",
+    "setting": "en",
+    "language": "en",
+    "languages": "en",
+    "help": "en",
+    "语言": "zh",
+    "語言": "zh",
+    "设置": "zh",
+    "設置": "zh",
+    "语言设置": "zh",
+    "語言設定": "zh",
+    "帮助": "zh",
+    "幫助": "zh",
+    "언어": "ko",
+    "설정": "ko",
+    "언어설정": "ko",
+    "언어 설정": "ko",
+    "도움말": "ko",
+    "ภาษา": "th",
+    "ตั้งค่า": "th",
+    "การตั้งค่าภาษา": "th",
+}
+
+
+def _detect_reply_family(text: str) -> str:
+    squeezed = _squeeze(text or "")
+    exact = _EXACT_REPLY_FAMILY.get(squeezed)
+    if exact:
+        return exact
+    raw = text or ""
+    if re.search(r"[ぁ-んァ-ン]", raw):
+        return "ja"
+    if re.search(r"[\uac00-\ud7af]", raw):
+        return "ko"
+    if re.search(r"[\u0e00-\u0e7f]", raw):
+        return "th"
+    if re.search(r"换成|換成|翻译|翻譯|语言|語言|设置|設置|请把|請把|英语|英語|日语|日語|中文", raw):
+        return "zh"
+    if re.search(r"[A-Za-z]", raw) and not re.search(r"[\u4e00-\u9fff]", raw):
+        return "en"
+    return ""
+
+
+def enrollment_prompt(family: str) -> str:
+    """言語が読めなかったとき。失敗ではなく、設定の案内。"""
+
+    if family == "ja":
+        return "翻訳したい言語を教えてね。\n例: 英語と日本語"
+    if family == "zh":
+        return "告诉我要翻译的语言。\n例如：英语和日语"
+    if family == "ko":
+        return "번역할 언어를 알려 줘.\n예: 영어랑 일본어"
+    if family == "th":
+        return "บอกภาษาที่อยากให้แปล\nเช่น อังกฤษกับญี่ปุ่น"
+    return "Tell me the languages you want translated.\nExample: English and Japanese"
+
+
+def language_not_in_group_prompt(missing: Sequence[str], current: Sequence[str], *, family: str) -> str:
+    """外そうとした言語がグループに無いとき。保存しない。"""
+
+    missing_text = _join_labels(missing, family)
+    current_text = _join_labels(current, family)
+    if family == "ja":
+        current_line = f"今の翻訳言語は{current_text}だよ。" if current_text else "翻訳言語はまだ設定されていません。"
+        return f"{missing_text}は設定されていないよ。\n{current_line}"
+    if family == "zh":
+        current_line = f"现在的翻译语言是{current_text}。" if current_text else "还没有设置翻译语言。"
+        return f"还没有设置{missing_text}。\n{current_line}"
+    if family == "ko":
+        current_line = f"지금 번역 언어는 {current_text}야." if current_text else "아직 번역 언어가 없어."
+        return f"{missing_text}는 설정되어 있지 않아.\n{current_line}"
+    if family == "th":
+        current_line = f"ภาษาตอนนี้คือ {current_text}" if current_text else "ยังไม่ได้ตั้งภาษาแปล"
+        return f"ยังไม่ได้ตั้ง{missing_text}\n{current_line}"
+    current_line = f"Current languages: {current_text}." if current_text else "No translation languages are set yet."
+    verb = "isn't" if len([name for name in missing if name]) == 1 else "aren't"
+    return f"{missing_text} {verb} set.\n{current_line}"
+
+
+def swap_clarify_prompt(current: Sequence[str], *, family: str) -> str:
+    """置換の向きが文面か今の設定と合わないとき。推測して入れ替えない。"""
+
+    current_text = _join_labels(current, family)
+    if family == "ja":
+        current_line = f"今の翻訳言語は{current_text}だよ。\n" if current_text else ""
+        return f"どちらを外して、どちらを入れる？\n{current_line}例: 英語を中国語に変えて"
+    if family == "zh":
+        current_line = f"现在的翻译语言是{current_text}。\n" if current_text else ""
+        return f"要换掉哪一种，换成哪一种？\n{current_line}例如：把英语换成中文"
+    if family == "ko":
+        current_line = f"지금 번역 언어는 {current_text}야.\n" if current_text else ""
+        return f"어떤 언어를 빼고, 어떤 언어로 바꿀까?\n{current_line}예: 영어를 중국어로 바꿔"
+    if family == "th":
+        current_line = f"ภาษาตอนนี้คือ {current_text}\n" if current_text else ""
+        return f"จะเอาภาษาไหนออก แล้วใส่ภาษาอะไร?\n{current_line}เช่น เปลี่ยนอังกฤษเป็นจีน"
+    current_line = f"Current languages: {current_text}.\n" if current_text else ""
+    return f"Which language should I replace, and with what?\n{current_line}Example: change English to Chinese"
+
+
+def _join_labels(labels: Sequence[str], family: str) -> str:
+    items = [label for label in labels if label]
+    if family == "ja":
+        return "・".join(items)
+    if family == "zh":
+        return "、".join(items)
+    if family in {"ko", "th"}:
+        return ", ".join(items)
+    return _english_join(items)
 
 
 def no_languages_yet_prompt(family: str) -> str:
@@ -1177,6 +1341,62 @@ def _squeeze(text: str) -> str:
 
 def _normalize(text: str) -> str:
     return _squeeze(text)
+
+
+_POLITE = r"(?:ください|下さい|くれ|ね)?"
+_DIRECTED_REPLACE = (
+    # AをBに変えて。をが外す言語、にが入れる言語
+    re.compile(
+        rf"^(?P<src>.+?)を(?P<dst>.+?)に(?:変え|置き換え|変更し|入れ替え|かえ)て?{_POLITE}$"
+    ),
+    # BにAを置き換え。にが入れる言語、をが外す言語
+    re.compile(
+        rf"^(?P<dst>.+?)に(?P<src>.+?)を(?:置き換え|変え|変更し|入れ替え|かえ)て?{_POLITE}$"
+    ),
+    re.compile(r"^replace (?P<src>.+?) with (?P<dst>.+?)$"),
+    re.compile(r"^change (?P<src>.+?) (?:to|into) (?P<dst>.+?)$"),
+    re.compile(r"^(?:把|将|將)?(?P<src>.+?)(?:换成|換成|改成|替换成|替換成)(?P<dst>.+?)$"),
+    re.compile(
+        r"^(?P<src>.+?)(?:를|을)\s*(?P<dst>.+?)(?:로|으로)\s*(?:바꿔|바꿔줘|바꾸|변경|교체해|교체).*$"
+    ),
+    re.compile(
+        r"^(?P<dst>.+?)(?:로|으로)\s*(?P<src>.+?)(?:를|을)\s*(?:바꿔|바꿔줘|바꾸|교체해|교체|대체).*$"
+    ),
+)
+
+
+def _read_directed_replace(raw: str) -> MentionRead | None:
+    """AをBに変える、を向き付きで読む。曖昧なら入れ替えず聞き返す。"""
+
+    normalized = _normalize(raw)
+    for pattern in _DIRECTED_REPLACE:
+        match = pattern.match(normalized)
+        if not match:
+            continue
+        source = _one_language(match.group("src"))
+        target = _one_language(match.group("dst"))
+        if not source or not target or source[0] == target[0]:
+            return MentionRead(kind="swap_unclear", mode="swap")
+        return MentionRead(
+            kind="languages",
+            languages=(source, target),
+            mode="swap",
+            swap_from=source[0],
+            swap_to=target[0],
+        )
+    return None
+
+
+def _one_language(fragment: str) -> tuple[str, str] | None:
+    normalized = _normalize(fragment)
+    if not normalized:
+        return None
+    found, unsupported, spans = _scan(normalized)
+    if unsupported or len(found) != 1:
+        return None
+    if not _residual_empty(normalized, spans):
+        return None
+    return found[0]
 
 
 def _mode(normalized: str) -> str:
