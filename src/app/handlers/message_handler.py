@@ -7,6 +7,7 @@ import zlib
 import re
 import time
 from dataclasses import dataclass, field, replace
+from enum import Enum
 from functools import partial
 from datetime import datetime, timezone
 from calendar import monthrange
@@ -74,14 +75,54 @@ from ...domain.services.plan_policy import (
     PRO_PLAN,
     STANDARD_PLAN,
     language_limit_for,
-    monthly_quota_for,
     normalize_plan_key,
-    resolve_effective_plan,
     stop_translation_on_quota,
+)
+from ...domain.services.quota_pause import effective_plan_key, monthly_limit_for_plan, reevaluate_quota_pause
+from ...domain.services.quota_notice import (
+    approaching_usage_threshold,
+    build_approaching_notice,
+    build_free_limit_notice,
+    build_plan_link_message,
+    build_pro_limit_notice,
+    build_quota_reset_notice,
+    build_resume_blocked_short,
+    build_standard_limit_notice,
+    missing_plan_link_sentence,
+    price_page_sentence,
 )
 from .postback_handler import _build_cancel_message, _build_completion_message
 
 logger = logging.getLogger(__name__)
+
+# claim メソッドが無いリポジトリ向け。周期につき1回。
+_LOCAL_RESET_CLAIMS: set[tuple] = set()
+
+
+class QuotaResetStatus(Enum):
+    """無料枠の停止を解除しようとした結果。"""
+
+    # 上限停止ではない。または、まだ上限内に戻っていない。
+    NOT_PAUSED = "not_paused"
+    # 翻訳を再開した。notice が空なら、この周期の案内はもう送っている。
+    LIFTED_WITH_NOTICE = "lifted_with_notice"
+    # 翻訳は再開したが、案内は作れなかった。claim は空のまま次の投稿でやり直す。
+    NOTICE_FAILED = "notice_failed"
+
+
+@dataclass(frozen=True)
+class _QuotaResetLift:
+    """無料枠の停止解除。status で全呼び出し側が分岐する。"""
+
+    status: QuotaResetStatus
+    period_key: str = ""
+    notice: str = ""
+    claimed: bool = False
+
+
+def _not_paused() -> _QuotaResetLift:
+    return _QuotaResetLift(status=QuotaResetStatus.NOT_PAUSED)
+
 
 RATE_LIMIT_MESSAGE = "You have reached the rate limit. Please try again later."
 _last_rate_limit_message: Dict[str, str] = {}
@@ -681,6 +722,12 @@ class MessageHandler:
             finally:
                 trace.log_stage("runtime_fetch", runtime_started)
 
+            quota_paused = self._is_over_free_quota_pause(runtime, event.group_id or "")
+            if quota_paused and not (command_text or "").strip():
+                # 停止中の空メンションはコマンド判定に回さず、上限の再案内だけ返す
+                self._reply_quota_pause_reminder(event, runtime, repeat="silent")
+                return True
+
             local = read_mention(command_text)
             if local.kind != "none":
                 language_started = time.perf_counter()
@@ -749,23 +796,40 @@ class MessageHandler:
                         )
                     handled = self._reply_text(event, message, command_trace=trace)
                 elif action == "pause":
-                    self._repo.set_translation_enabled(event.group_id, False)
-                    base_ack = "I will pause translation. Please mention me again when you want to resume."
-                    ack = decision.ack_text or self._safe_translate_for_instruction(
-                        base_ack,
-                        instruction_lang,
-                        command_trace=trace,
-                    )
-                    handled = self._reply_text(event, ack, command_trace=trace)
+                    if quota_paused:
+                        # 上限停止を手動停止に上書きしない。理由が消えると翌月の自動再開が外れる
+                        self._reply_quota_pause_reminder(event, runtime, repeat="silent")
+                        handled = True
+                    else:
+                        self._repo.set_translation_enabled(event.group_id, False)
+                        base_ack = "I will pause translation. Please mention me again when you want to resume."
+                        ack = decision.ack_text or self._safe_translate_for_instruction(
+                            base_ack,
+                            instruction_lang,
+                            command_trace=trace,
+                        )
+                        handled = self._reply_text(event, ack, command_trace=trace)
                 elif action == "resume":
-                    self._repo.set_translation_enabled(event.group_id, True)
-                    base_ack = "I will resume the translation."
-                    ack = decision.ack_text or self._safe_translate_for_instruction(
-                        base_ack,
-                        instruction_lang,
-                        command_trace=trace,
-                    )
-                    handled = self._reply_text(event, ack, command_trace=trace)
+                    lift = self._resume_quota_pause_after_reset(event, runtime=runtime)
+                    if lift.status == QuotaResetStatus.NOT_PAUSED and quota_paused:
+                        # 「再開しました」とは返さない。無料枠が戻るまで翻訳は止まったまま
+                        self._reply_quota_pause_reminder(event, runtime, repeat="short")
+                        handled = True
+                    else:
+                        if lift.status == QuotaResetStatus.NOT_PAUSED:
+                            self._repo.set_translation_enabled(event.group_id, True)
+                        base_ack = "I will resume the translation."
+                        ack = decision.ack_text or self._safe_translate_for_instruction(
+                            base_ack,
+                            instruction_lang,
+                            command_trace=trace,
+                        )
+                        handled = self._reply_with_optional_quota_reset(
+                            event,
+                            ack,
+                            lift,
+                            command_trace=trace,
+                        )
                 elif action == "subscription_menu":
                     handled = self._handle_subscription_menu(
                         event,
@@ -785,12 +849,17 @@ class MessageHandler:
                         command_trace=trace,
                     )
                 else:
-                    handled = self._respond_unknown_instruction(
-                        event,
-                        instruction_lang or decision.instruction_language,
-                        command_text,
-                        command_trace=trace,
-                    )
+                    if quota_paused:
+                        # unknown は翻訳をオンに戻す。上限停止中は戻さず案内する
+                        self._reply_quota_pause_reminder(event, runtime, repeat="silent")
+                        handled = True
+                    else:
+                        handled = self._respond_unknown_instruction(
+                            event,
+                            instruction_lang or decision.instruction_language,
+                            command_text,
+                            command_trace=trace,
+                        )
             finally:
                 trace.log_stage("action_handler", action_started)
             return handled
@@ -876,11 +945,14 @@ class MessageHandler:
         return json.dumps(payload, ensure_ascii=False)
 
     def _resolve_next_reset_at_utc(self, runtime: models.TranslationRuntimeState) -> str:
-        if runtime.period_end:
+        plan_key = self._resolve_effective_plan_key(runtime.subscription_status, runtime.entitlement_plan)
+        # 解約後も旧 current_period_end が残る。Free は暦月の period_key から出す。
+        if runtime.period_end and normalize_plan_key(plan_key) != FREE_PLAN:
             return runtime.period_end.astimezone(timezone.utc).isoformat()
         reset_date = self._resolve_quota_reset_date(
             period_key=runtime.period_key,
             period_end=runtime.period_end,
+            plan_key=plan_key,
         )
         if not reset_date:
             return ""
@@ -1127,8 +1199,9 @@ class MessageHandler:
 
         if op == "reset_all" and not replacing:
             self._repo.reset_group_language_settings(event.group_id)
-            # 言語設定モード中は翻訳停止
-            self._repo.set_translation_enabled(event.group_id, False)
+            # 上限停止の理由を消すと翌月の自動再開が外れる。手動停止のときだけ理由を空にする。
+            if not self._translation_stays_paused_for_quota(event.group_id or ""):
+                self._repo.set_translation_enabled(event.group_id, False)
             # リセット時は必ずガイダンス文言を返す（LLM 生成のあいまいな承諾メッセージを避ける）
             ack = self._translate_template(
                 "Your language settings have been reset. Please tell us all the languages ​​you would like to translate.",
@@ -1156,15 +1229,17 @@ class MessageHandler:
             if remove_codes:
                 self._repo.remove_group_languages(event.group_id, remove_codes)
 
-        # 言語変更後は翻訳再開。置き換えも翻訳を止めない
-        self._repo.set_translation_enabled(event.group_id, True)
+        # 言語の追加・削除・置換は通す。上限停止の解除はリセット案内とセットにする。
+        lift = self._resume_quota_pause_after_reset(event)
+        if self._should_enable_after_reset_attempt(event.group_id or "", lift):
+            self._repo.set_translation_enabled(event.group_id, True)
 
         # 結果の言語を固定文で言う。「言語設定を更新しました」だけでは何になったか分からない
         ack = completion_prompt(self._resulting_language_pairs(event.group_id), family=family)
         notice = unsupported_prompt(parsed.unsupported, family)
         if notice:
             ack = f"{ack}\n{notice}"
-        self._reply_text(
+        self._reply_with_optional_quota_reset(
             event,
             self._localize_fixed_reply(
                 ack,
@@ -1172,6 +1247,7 @@ class MessageHandler:
                 instruction_lang=decision.instruction_language,
                 command_trace=command_trace,
             ),
+            lift,
             command_trace=command_trace,
         )
         return True
@@ -1313,8 +1389,11 @@ class MessageHandler:
             group_languages=self._group_languages_for_reply(event.group_id),
         )
         fallback = self._build_unknown_response(detected, command_trace=command_trace)
-        self._repo.set_translation_enabled(event.group_id, True)
-        self._reply_text(event, fallback, command_trace=command_trace)
+        # unknown は通常、翻訳をオンに戻す。上限停止の解除はリセット案内とセットにする。
+        lift = self._resume_quota_pause_after_reset(event)
+        if self._should_enable_after_reset_attempt(event.group_id or "", lift):
+            self._repo.set_translation_enabled(event.group_id, True)
+        self._reply_with_optional_quota_reset(event, fallback, lift, command_trace=command_trace)
         return True
 
     def _handle_translation_flow(
@@ -1347,19 +1426,13 @@ class MessageHandler:
             if self._attempt_language_enrollment(event):
                 return True
 
-        if not runtime.translation_enabled:
-            if self._maybe_resume_quota_paused_translation(
-                event=event,
-                runtime=runtime,
-                plan_key=plan_key,
-                candidate_languages=candidate_languages,
-            ):
-                runtime = replace(
-                    runtime,
-                    translation_enabled=True,
-                    translation_paused_reason=None,
-                )
-            else:
+        quota_reset = _not_paused()
+        # 案内の作り直しは、すでに翻訳を再開したあとの次の投稿でも行う。
+        if candidate_languages and (
+            not runtime.translation_enabled or runtime.translation_paused_reason == "quota"
+        ):
+            quota_reset = self._resume_quota_pause_after_reset(event, runtime=runtime)
+            if quota_reset.status == QuotaResetStatus.NOT_PAUSED and not runtime.translation_enabled:
                 logger.info(
                     "Translation disabled; sending pause notice",
                     extra={"group_id": event.group_id, "user_id": event.user_id},
@@ -1367,6 +1440,7 @@ class MessageHandler:
                 # 停止理由に応じた案内を返して終了
                 self._send_pause_notice(event)
                 return True
+            runtime = self._runtime_after_quota_reset(runtime, quota_reset)
 
         limit = self._quota_limit_for_plan(plan_key)
         stop_translation_on_limit = stop_translation_on_quota(plan_key)
@@ -1399,7 +1473,16 @@ class MessageHandler:
                 limit=limit,
                 plan_key=plan_key,
                 period_end=runtime.period_end,
+                quota_reset=quota_reset,
             )
+            self._maybe_upsert_deferred_display_name(event, deferred_display_name)
+            self._log_translation_stage("after_line_reply", started, event.group_id)
+        elif self._reset_notice_to_send(quota_reset):
+            try:
+                self._reply_text(event, quota_reset.notice)
+            except Exception:
+                self._rollback_quota_reset(event.group_id or "", quota_reset)
+                raise
             self._maybe_upsert_deferred_display_name(event, deferred_display_name)
             self._log_translation_stage("after_line_reply", started, event.group_id)
         else:
@@ -1413,33 +1496,183 @@ class MessageHandler:
 
         return True
 
-    def _maybe_resume_quota_paused_translation(
+    def _resume_quota_pause_after_reset(
         self,
-        *,
         event: models.MessageEvent,
-        runtime: models.TranslationRuntimeState,
-        plan_key: str,
-        candidate_languages: Sequence[str],
-    ) -> bool:
-        if normalize_plan_key(plan_key) != FREE_PLAN:
-            return False
-        if runtime.translation_paused_reason != "quota":
-            return False
-        if not candidate_languages:
-            return False
-        limit = self._quota_limit_for_plan(plan_key)
-        if int(runtime.usage or 0) >= limit:
-            return False
+        runtime: models.TranslationRuntimeState | None = None,
+    ) -> _QuotaResetLift:
+        """無料枠の quota 停止を、今周期が上限未満なら解除し、リセット案内を1回だけ返す。
 
-        self._repo.set_translation_enabled(event.group_id, True)
+        通常投稿・言語設定・再開・unknown はここだけを通す。
+        案内の組み立てに失敗したときは翻訳だけ再開し、claim は空のまま残す。
+        """
+
+        group_id = event.group_id or ""
+        if not group_id:
+            return _not_paused()
+        if runtime is None:
+            runtime = self._fetch_command_runtime_state(group_id)
+        if runtime.translation_paused_reason != "quota":
+            return _not_paused()
+        plan_key, period_key, limit, usage = self._quota_period_for_runtime(runtime, group_id)
+        if not reevaluate_quota_pause(
+            paused_reason=runtime.translation_paused_reason,
+            usage=usage,
+            limit=limit,
+        ):
+            return _not_paused()
+        if normalize_plan_key(plan_key) != FREE_PLAN:
+            # 有料化などで上限未満に戻った。無料枠のリセット案内は出さない。
+            self._repo.set_translation_enabled(group_id, True)
+            logger.info(
+                "Lifted quota pause after eligibility change | group=%s plan=%s usage=%s limit=%s",
+                group_id,
+                plan_key,
+                usage,
+                limit,
+            )
+            return _QuotaResetLift(
+                status=QuotaResetStatus.LIFTED_WITH_NOTICE,
+                period_key=period_key,
+                notice="",
+                claimed=False,
+            )
+
+        try:
+            notice = self._quota_reset_notice_text(
+                group_id,
+                period_key=period_key,
+                period_end=runtime.period_end,
+            )
+        except Exception:
+            # Gemini が落ちても翻訳は止めたままにしない。案内だけ次の投稿でやり直す。
+            logger.warning("Failed to build quota reset notice", extra={"group_id": group_id})
+            self._enable_translation_pending_reset_notice(group_id)
+            return _QuotaResetLift(status=QuotaResetStatus.NOTICE_FAILED, period_key=period_key)
+        if not self._claim_quota_reset_notice(group_id, period_key):
+            logger.info(
+                "Quota pause lifted without another reset notice | group=%s period=%s",
+                group_id,
+                period_key,
+            )
+            self._repo.set_translation_enabled(group_id, True)
+            return _QuotaResetLift(
+                status=QuotaResetStatus.LIFTED_WITH_NOTICE,
+                period_key=period_key,
+                notice="",
+                claimed=False,
+            )
+        self._repo.set_translation_enabled(group_id, True)
         logger.info(
             "Resumed translation after quota reset | group=%s period=%s usage=%s limit=%s",
-            event.group_id,
-            runtime.period_key,
-            runtime.usage,
+            group_id,
+            period_key,
+            usage,
             limit,
         )
-        return True
+        return _QuotaResetLift(
+            status=QuotaResetStatus.LIFTED_WITH_NOTICE,
+            period_key=period_key,
+            notice=notice,
+            claimed=True,
+        )
+
+    def _should_enable_after_reset_attempt(self, group_id: str, lift: _QuotaResetLift) -> bool:
+        """手動停止だけ翻訳をオンに戻す。上限停止と案内失敗では理由を消さない。"""
+
+        if lift.status != QuotaResetStatus.NOT_PAUSED:
+            return False
+        return not self._translation_stays_paused_for_quota(group_id)
+
+    def _runtime_after_quota_reset(
+        self,
+        runtime: models.TranslationRuntimeState,
+        lift: _QuotaResetLift,
+    ) -> models.TranslationRuntimeState:
+        if lift.status == QuotaResetStatus.LIFTED_WITH_NOTICE:
+            return replace(runtime, translation_enabled=True, translation_paused_reason=None)
+        if lift.status == QuotaResetStatus.NOTICE_FAILED:
+            return replace(runtime, translation_enabled=True, translation_paused_reason="quota")
+        return runtime
+
+    def _reset_notice_to_send(self, lift: _QuotaResetLift | None) -> str:
+        if lift is None or lift.status != QuotaResetStatus.LIFTED_WITH_NOTICE:
+            return ""
+        return lift.notice
+
+    def _enable_translation_pending_reset_notice(self, group_id: str) -> None:
+        """翻訳は再開し、リセット案内の未送信は quota 理由として残す。"""
+
+        keep = getattr(self._repo, "enable_translation_keep_quota_reason", None)
+        if callable(keep):
+            keep(group_id)
+            return
+        logger.warning(
+            "Repository cannot keep the quota reason after a failed reset notice",
+            extra={"group_id": group_id},
+        )
+        self._repo.set_translation_enabled(group_id, True)
+
+    def _reply_with_optional_quota_reset(
+        self,
+        event: models.MessageEvent,
+        text: str,
+        lift: _QuotaResetLift | None,
+        *,
+        command_trace: _CommandTrace | None = None,
+        normalize_lists: bool = True,
+    ) -> bool:
+        notice = self._reset_notice_to_send(lift)
+        if not notice:
+            return self._reply_text(event, text, command_trace=command_trace, normalize_lists=normalize_lists)
+        ack = normalize_inline_lists(text) if normalize_lists else text
+        try:
+            return self._reply_messages(
+                event,
+                [
+                    {"type": "text", "text": ack},
+                    {"type": "text", "text": notice},
+                ],
+                command_trace=command_trace,
+            )
+        except Exception:
+            if lift is not None:
+                self._rollback_quota_reset(event.group_id or "", lift)
+            raise
+
+    def _claim_quota_reset_notice(self, group_id: str, period_key: str) -> bool:
+        claim = getattr(self._repo, "claim_quota_reset_notice", None)
+        if not callable(claim):
+            key = ("quota_reset", group_id, period_key)
+            if key in _LOCAL_RESET_CLAIMS:
+                return False
+            _LOCAL_RESET_CLAIMS.add(key)
+            return True
+        try:
+            return bool(claim(group_id, period_key))
+        except Exception:
+            logger.warning("Failed to claim quota reset notice", extra={"group_id": group_id})
+            return False
+
+    def _release_quota_reset_notice(self, group_id: str, period_key: str) -> None:
+        release = getattr(self._repo, "release_quota_reset_notice", None)
+        if not callable(release):
+            _LOCAL_RESET_CLAIMS.discard(("quota_reset", group_id, period_key))
+            return
+        try:
+            release(group_id, period_key)
+        except Exception:
+            logger.warning("Failed to release quota reset notice", extra={"group_id": group_id})
+
+    def _rollback_quota_reset(self, group_id: str, lift: _QuotaResetLift) -> None:
+        """案内を送れなかったとき、同じ解除からやり直せるように戻す。"""
+
+        if not lift.claimed or not group_id:
+            return
+        self._release_quota_reset_notice(group_id, lift.period_key)
+        pause = getattr(self._repo, "set_translation_paused_by_quota", None)
+        if callable(pause):
+            pause(group_id)
 
     def _prepare_translation_context(
         self,
@@ -1498,6 +1731,7 @@ class MessageHandler:
         limit: int,
         plan_key: str,
         period_end: Optional[datetime],
+        quota_reset: _QuotaResetLift | None = None,
     ) -> None:
         messages: List[dict] = []
         if removed_languages:
@@ -1511,6 +1745,12 @@ class MessageHandler:
 
         messages.append({"type": "text", "text": flow.reply_text})
 
+        reset_notice = self._reset_notice_to_send(quota_reset)
+        if reset_notice and normalize_plan_key(plan_key) == FREE_PLAN:
+            messages.append({"type": "text", "text": reset_notice})
+
+        approaching_claimed = False
+        approaching_period_key = flow.decision.period_key
         if flow.decision.should_notify:
             notice_text, notice_url = self._build_limit_reached_notice_text(
                 event.group_id,
@@ -1520,14 +1760,46 @@ class MessageHandler:
                 period_end=period_end,
             )
             self._repo.set_limit_notice_plan(event.group_id, flow.decision.period_key, plan_key)
+            # 50件目は allowed のまま停止案内だけ出す。ここで理由を残さないと、
+            # 次の投稿までの再開・停止メンションが手動停止になり、翌月の自動再開が外れる。
+            if stop_translation_on_quota(plan_key):
+                self._pause_translation_for_quota(event.group_id)
             messages.append({"type": "text", "text": notice_text})
-            if notice_url:
-                messages.append({"type": "text", "text": notice_url})
+            self._append_plan_link(messages, notice_url)
+        elif self._should_send_approaching_notice(plan_key, limit, flow.decision.usage):
+            group_id = event.group_id or ""
+            if self._claim_approaching_notice(group_id, approaching_period_key):
+                try:
+                    notice_text, notice_url = self._build_approaching_notice_text(
+                        group_id,
+                        usage=flow.decision.usage,
+                        limit=limit,
+                        period_key=approaching_period_key,
+                        period_end=period_end,
+                    )
+                except Exception:
+                    # 翻訳文は届ける。案内の claim は戻し、41〜49件目でやり直す。
+                    logger.warning(
+                        "Failed to build approaching quota notice",
+                        extra={"group_id": group_id},
+                    )
+                    self._release_approaching_notice(group_id, approaching_period_key)
+                else:
+                    messages.append({"type": "text", "text": notice_text})
+                    self._append_plan_link(messages, notice_url)
+                    approaching_claimed = True
 
-        if len(messages) == 1 and messages[0].get("type") == "text":
-            self._reply_text(event, messages[0].get("text"), normalize_lists=False)
-            return
-        self._reply_messages(event, messages)
+        try:
+            if len(messages) == 1 and messages[0].get("type") == "text":
+                self._reply_text(event, messages[0].get("text"), normalize_lists=False)
+                return
+            self._reply_messages(event, messages)
+        except Exception:
+            if approaching_claimed:
+                self._release_approaching_notice(event.group_id or "", approaching_period_key)
+            if quota_reset is not None:
+                self._rollback_quota_reset(event.group_id or "", quota_reset)
+            raise
 
     def _maybe_upsert_deferred_display_name(
         self,
@@ -1734,6 +2006,7 @@ class MessageHandler:
             limit,
             period_key=period_key,
             period_end=period_end,
+            reminder=False,
         )
 
         setter = getattr(self._repo, "set_limit_notice_plan", None)
@@ -1748,6 +2021,7 @@ class MessageHandler:
         *,
         period_key: Optional[str] = None,
         period_end: Optional[datetime] = None,
+        reminder: bool = False,
     ) -> None:
         """上限到達/超過時の統一通知。"""
         notice_text, url = self._build_limit_reached_notice_text(
@@ -1756,11 +2030,11 @@ class MessageHandler:
             limit,
             period_key=period_key,
             period_end=period_end,
+            reminder=reminder,
         )
         messages = [{"type": "text", "text": notice_text[:5000]}]
-        if url:
-            # URL は左右書字方向混在時に誤判定されやすいため別メッセージで送る
-            messages.append({"type": "text", "text": url})
+        # URL は左右書字方向混在時に誤判定されやすいため本文から分離する
+        self._append_plan_link(messages, url)
         self._reply_messages(event, messages)
 
     def _build_limit_reached_notice_text(
@@ -1772,6 +2046,7 @@ class MessageHandler:
         period_key: Optional[str] = None,
         period_end: Optional[datetime] = None,
         paid: Optional[bool] = None,
+        reminder: bool = False,
     ) -> tuple[str, Optional[str]]:
         normalized = normalize_plan_key(plan_key)
         if paid is True:
@@ -1779,58 +2054,232 @@ class MessageHandler:
         elif paid is False:
             normalized = FREE_PLAN
 
+        reset_date = self._resolve_quota_reset_date(
+            period_key=period_key,
+            period_end=period_end,
+            plan_key=normalized,
+        )
         if normalized == FREE_PLAN:
-            reset_date = self._resolve_quota_reset_date(period_key=period_key, period_end=period_end)
-            reset_line = (
-                f"Translation will resume automatically on {reset_date} (UTC) when the monthly quota resets."
-                if reset_date
-                else "Translation will resume automatically when the monthly quota resets."
-            )
-            base = (
-                f"Free quota ({limit:,} messages per month) is exhausted and translation will stop.\n"
-                f"{reset_line}\n"
-                "To continue using the service, please review plans from the link below."
+            base = build_free_limit_notice(
+                limit=limit,
+                reset_date=reset_date,
+                free_quota=self._free_quota,
+                standard_quota=self._standard_quota,
+                pro_quota=self._pro_quota,
+                reminder=reminder,
             )
             url = self._subscription_service.create_checkout_url(group_id)
         elif normalized == STANDARD_PLAN:
-            reset_date = self._resolve_quota_reset_date(period_key=period_key, period_end=period_end)
-            reset_line = (
-                f"Translation will resume automatically on {reset_date} (UTC) when the monthly quota resets."
-                if reset_date
-                else "Translation will resume automatically when the monthly quota resets."
-            )
-            base = (
-                f"The Standard plan monthly limit ({limit:,} messages) has been reached and translation is paused.\n"
-                f"{reset_line}\n"
-                "To unlock a higher limit now, upgrade to the Pro plan from the link below."
+            base = build_standard_limit_notice(
+                limit=limit,
+                reset_date=reset_date,
+                pro_quota=self._pro_quota,
+                reminder=reminder,
             )
             url = self._subscription_service.create_checkout_url(group_id)
         else:
-            reset_date = self._resolve_quota_reset_date(period_key=period_key, period_end=period_end)
-            reset_line = (
-                f"It will resume automatically on {reset_date} (UTC) when the monthly quota resets."
-                if reset_date
-                else "It will resume automatically when the monthly quota resets."
-            )
-            base = (
-                f"The Pro plan monthly limit ({limit:,} messages) has been reached and translation has stopped.\n"
-                f"{reset_line}"
-            )
+            base = build_pro_limit_notice(limit=limit, reset_date=reset_date, reminder=reminder)
             url = None
 
+        base = self._append_plan_link_sentence(base, url, include_link=normalized != PRO_PLAN)
         return self._build_multilingual_notice(
             base,
             group_id,
             url,
-            add_missing_link_notice=(paid is not True and normalized != PRO_PLAN),
+            add_missing_link_notice=False,
         )
+
+    def _append_plan_link(self, messages: List[dict], url: Optional[str]) -> None:
+        if not url:
+            return
+        messages.append(build_plan_link_message(url))
+
+    def _should_send_approaching_notice(self, plan_key: str, limit: int, usage: int) -> bool:
+        if normalize_plan_key(plan_key) != FREE_PLAN:
+            return False
+        threshold = approaching_usage_threshold(limit)
+        if threshold is None:
+            return False
+        return threshold <= int(usage) < int(limit)
+
+    def _claim_approaching_notice(self, group_id: str, period_key: str) -> bool:
+        claim = getattr(self._repo, "claim_approaching_notice", None)
+        if not callable(claim):
+            return False
+        try:
+            return bool(claim(group_id, period_key))
+        except Exception:
+            logger.warning("Failed to claim approaching quota notice", extra={"group_id": group_id})
+            return False
+
+    def _claim_quota_mention_reminder(self, group_id: str, period_key: str, on_date: str) -> bool:
+        claim = getattr(self._repo, "claim_quota_mention_reminder", None)
+        if not callable(claim):
+            return True
+        try:
+            return bool(claim(group_id, period_key, on_date))
+        except Exception:
+            logger.warning("Failed to claim quota mention reminder", extra={"group_id": group_id})
+            return False
+
+    def _release_approaching_notice(self, group_id: str, period_key: str) -> None:
+        release = getattr(self._repo, "release_approaching_notice", None)
+        if not callable(release):
+            return
+        try:
+            release(group_id, period_key)
+        except Exception:
+            logger.warning("Failed to release approaching quota notice", extra={"group_id": group_id})
+
+    def _release_quota_mention_reminder(self, group_id: str, period_key: str, on_date: str) -> None:
+        release = getattr(self._repo, "release_quota_mention_reminder", None)
+        if not callable(release):
+            return
+        try:
+            release(group_id, period_key, on_date)
+        except Exception:
+            logger.warning("Failed to release quota mention reminder", extra={"group_id": group_id})
+
+    def _build_approaching_notice_text(
+        self,
+        group_id: str,
+        *,
+        usage: int,
+        limit: int,
+        period_key: Optional[str],
+        period_end: Optional[datetime],
+    ) -> tuple[str, Optional[str]]:
+        reset_date = self._resolve_quota_reset_date(
+            period_key=period_key,
+            period_end=period_end,
+            plan_key=FREE_PLAN,
+        )
+        base = build_approaching_notice(
+            usage=usage,
+            limit=limit,
+            reset_date=reset_date,
+            free_quota=self._free_quota,
+            standard_quota=self._standard_quota,
+            pro_quota=self._pro_quota,
+        )
+        url = self._subscription_service.create_checkout_url(group_id)
+        base = self._append_plan_link_sentence(base, url, include_link=True)
+        return self._build_multilingual_notice(base, group_id, url, add_missing_link_notice=False)
+
+    @staticmethod
+    def _append_plan_link_sentence(base: str, url: Optional[str], *, include_link: bool) -> str:
+        if not include_link:
+            return base
+        if url:
+            return f"{base}\n{price_page_sentence()}"
+        return f"{base}\n{missing_plan_link_sentence()}"
+
+    def _quota_reset_notice_text(
+        self,
+        group_id: str,
+        *,
+        period_key: Optional[str],
+        period_end: Optional[datetime],
+    ) -> str:
+        reset_date = self._resolve_quota_reset_date(
+            period_key=period_key,
+            period_end=period_end,
+            plan_key=FREE_PLAN,
+        )
+        base = build_quota_reset_notice(reset_date=reset_date, free_quota=self._free_quota)
+        text, _url = self._build_multilingual_notice(base, group_id, None, add_missing_link_notice=False)
+        return text
+
+    def _quota_period_for_runtime(
+        self,
+        runtime: models.TranslationRuntimeState,
+        group_id: str,
+    ) -> tuple[str, str, int, int]:
+        """有効プラン、周期キー、上限、その周期の使用量。"""
+
+        plan_key = self._resolve_effective_plan_key(runtime.subscription_status, runtime.entitlement_plan)
+        period_key = self._current_period_key(
+            plan_key=plan_key,
+            period_start=runtime.period_start,
+            period_end=runtime.period_end,
+            quota_anchor_day=runtime.quota_anchor_day,
+        )
+        limit = self._quota_limit_for_plan(plan_key)
+        usage = int(runtime.usage or 0)
+        if runtime.period_key and runtime.period_key != period_key:
+            try:
+                usage = int(self._repo.get_usage(group_id, period_key) or 0)
+            except Exception:
+                logger.debug("Failed to read usage for quota pause reminder", exc_info=True)
+                usage = 0
+        return plan_key, period_key, limit, usage
+
+    def _translation_stays_paused_for_quota(self, group_id: str) -> bool:
+        """言語変更や unknown のあとでも、無料枠の停止理由を残すべきか。"""
+
+        if not group_id:
+            return False
+        return self._is_over_free_quota_pause(self._fetch_command_runtime_state(group_id), group_id)
+
+    def _is_over_free_quota_pause(self, runtime: models.TranslationRuntimeState, group_id: str) -> bool:
+        if runtime.translation_paused_reason != "quota" or runtime.translation_enabled:
+            return False
+        plan_key, _period_key, limit, usage = self._quota_period_for_runtime(runtime, group_id)
+        return normalize_plan_key(plan_key) == FREE_PLAN and usage >= limit
+
+    def _reply_quota_pause_reminder(
+        self,
+        event: models.MessageEvent,
+        runtime: models.TranslationRuntimeState,
+        *,
+        repeat: str,
+    ) -> None:
+        """停止中のメンションへ、UTC日に1回だけ上限案内を返す。"""
+
+        group_id = event.group_id or ""
+        plan_key, period_key, limit, _usage = self._quota_period_for_runtime(runtime, group_id)
+        on_date = datetime.now(timezone.utc).date().isoformat()
+        if self._claim_quota_mention_reminder(group_id, period_key, on_date):
+            try:
+                self._send_limit_reached_notice(
+                    event,
+                    plan_key,
+                    limit,
+                    period_key=period_key,
+                    period_end=runtime.period_end,
+                    reminder=True,
+                )
+            except Exception:
+                # 組み立てか送信に失敗した日は、同じUTC日の次のメンションでやり直す。
+                logger.warning("Failed to send quota pause reminder", extra={"group_id": group_id})
+                self._release_quota_mention_reminder(group_id, period_key, on_date)
+                raise
+            setter = getattr(self._repo, "set_limit_notice_plan", None)
+            if setter:
+                setter(group_id, period_key, plan_key)
+            return
+        if repeat != "short":
+            return
+        reset_date = self._resolve_quota_reset_date(
+            period_key=period_key,
+            period_end=runtime.period_end,
+            plan_key=plan_key,
+        )
+        base = build_resume_blocked_short(limit=limit, reset_date=reset_date)
+        text, _url = self._build_multilingual_notice(base, group_id, None, add_missing_link_notice=False)
+        self._reply_text(event, text)
 
     def _resolve_quota_reset_date(
         self,
         *,
         period_key: Optional[str],
         period_end: Optional[datetime],
+        plan_key: Optional[str] = None,
     ) -> Optional[str]:
+        # 解約済み・未払いでも購読行に旧 current_period_end が残る。
+        # Free は暦月なので、その終了日ではなく period_key の翌月1日（UTC）を使う。
+        if plan_key is not None and normalize_plan_key(plan_key) == FREE_PLAN:
+            period_end = None
         if period_end:
             return period_end.astimezone(timezone.utc).date().isoformat()
 
@@ -2444,21 +2893,15 @@ class MessageHandler:
         return status in {"active", "trialing"}
 
     def _resolve_effective_plan_key(self, status: Optional[str], entitlement_plan: Optional[str]) -> str:
-        plan_key = resolve_effective_plan(status, entitlement_plan)
-        if self._is_active_subscription(status) and plan_key == FREE_PLAN:
-            # 後方互換: entitlement_plan 未保存環境は paid を Pro 扱い
-            return PRO_PLAN
-        return plan_key
+        return effective_plan_key(status, entitlement_plan)
 
     def _quota_limit_for_plan(self, plan_key: str) -> int:
-        normalized = normalize_plan_key(plan_key)
-        if normalized == FREE_PLAN:
-            return self._free_quota
-        if normalized == STANDARD_PLAN:
-            return self._standard_quota
-        if normalized == PRO_PLAN:
-            return self._pro_quota
-        return monthly_quota_for(normalized)
+        return monthly_limit_for_plan(
+            plan_key,
+            free_quota=self._free_quota,
+            standard_quota=self._standard_quota,
+            pro_quota=self._pro_quota,
+        )
 
     def _would_exceed_language_limit(
         self,

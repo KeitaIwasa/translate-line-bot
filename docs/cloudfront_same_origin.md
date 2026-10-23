@@ -66,8 +66,10 @@ aws s3 sync ./kotori-homepage/ \
 
 ```bash
 cd translate-line-bot
-STACK_NAME=translate-line-bot-prod STAGE=prod PROFILE=line-translate-bot GEMINI_MODEL=gemini-2.5-flash ./scripts/deploy.sh
+STACK_NAME=translate-line-bot-prod STAGE=prod PROFILE=line-translate-bot ./scripts/deploy.sh
 ```
+
+`GEMINI_MODEL` を付けないときは `scripts/gemini_model_default.sh` の既定 `gemini-3.5-flash-lite` を使います。空文字はデプロイを止めます。
 
 ### 3. CloudFront キャッシュ無効化
 
