@@ -118,8 +118,8 @@ def _quota_notice_samples() -> list[str]:
         build_pro_limit_notice(limit=40000, reset_date=None, reminder=True),
         build_approaching_notice(usage=40, limit=50, reset_date="2026-11-01", **common),
         build_approaching_notice(usage=40, limit=50, reset_date=None, **common),
-        build_quota_reset_notice(reset_date="2026-11-01"),
-        build_quota_reset_notice(reset_date=None),
+        build_quota_reset_notice(reset_date="2026-11-01", free_quota=50),
+        build_quota_reset_notice(reset_date=None, free_quota=50),
         build_resume_blocked_short(limit=50, reset_date="2026-11-01"),
         build_resume_blocked_short(limit=50, reset_date=None),
     ]
@@ -149,13 +149,13 @@ def test_resume_blocked_short_stays_paused_until_reset():
 
 def test_quota_reset_notice_states_plan_cap_not_remaining():
     cap = monthly_quota_for("free")
-    dated = build_quota_reset_notice(reset_date="2026-11-01")
+    dated = build_quota_reset_notice(reset_date="2026-11-01", free_quota=cap)
     assert dated == (
         "The free monthly quota has reset. "
         f"The Free plan includes {cap:,} messages per month. "
         "The next reset is on 2026-11-01 (UTC)."
     )
-    undated = build_quota_reset_notice(reset_date=None)
+    undated = build_quota_reset_notice(reset_date=None, free_quota=cap)
     assert undated == f"The free monthly quota has reset. The Free plan includes {cap:,} messages per month."
     assert "on again" not in dated
     assert "this month" not in dated
@@ -164,7 +164,30 @@ def test_quota_reset_notice_states_plan_cap_not_remaining():
     # 呼び出し側の残数でも、文面に直書きした 50 でもない
     body = inspect.getsource(build_quota_reset_notice).split('"""', 2)[-1]
     assert "50" not in body
-    assert "monthly_quota_for" in body
+    assert "free_quota" in body
+    assert "monthly_quota_for" not in body
+
+
+def test_reset_notice_uses_the_configured_free_cap():
+    """FREE_QUOTA_PER_MONTH が 50 でなくても、上限判定と同じ件数を案内する。"""
+
+    line = RecordingLineClient()
+    repo = ProQuotaRepo(
+        initial_usage=0,
+        paid=False,
+        translation_enabled=False,
+        paused_reason="quota",
+    )
+    handler = _build_handler(repo, line, RecordingTranslationService())
+    handler._free_quota = 12
+
+    handler._handle_translation_flow(_build_event("new month"), sender_name="user", translation_enabled=False)
+
+    reset = "\n".join(line.sent_texts)
+    assert "The Free plan includes 12 messages per month." in reset
+    assert "includes 50" not in reset
+    assert repo.translation_enabled is True
+    assert repo.paused_reason is None
 
 
 def test_resume_sentences_start_from_the_reset():

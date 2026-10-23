@@ -75,11 +75,10 @@ from ...domain.services.plan_policy import (
     PRO_PLAN,
     STANDARD_PLAN,
     language_limit_for,
-    monthly_quota_for,
     normalize_plan_key,
-    resolve_effective_plan,
     stop_translation_on_quota,
 )
+from ...domain.services.quota_pause import effective_plan_key, monthly_limit_for_plan, reevaluate_quota_pause
 from ...domain.services.quota_notice import (
     approaching_usage_threshold,
     build_approaching_notice,
@@ -1516,8 +1515,28 @@ class MessageHandler:
         if runtime.translation_paused_reason != "quota":
             return _not_paused()
         plan_key, period_key, limit, usage = self._quota_period_for_runtime(runtime, group_id)
-        if normalize_plan_key(plan_key) != FREE_PLAN or usage >= limit:
+        if not reevaluate_quota_pause(
+            paused_reason=runtime.translation_paused_reason,
+            usage=usage,
+            limit=limit,
+        ):
             return _not_paused()
+        if normalize_plan_key(plan_key) != FREE_PLAN:
+            # 有料化などで上限未満に戻った。無料枠のリセット案内は出さない。
+            self._repo.set_translation_enabled(group_id, True)
+            logger.info(
+                "Lifted quota pause after eligibility change | group=%s plan=%s usage=%s limit=%s",
+                group_id,
+                plan_key,
+                usage,
+                limit,
+            )
+            return _QuotaResetLift(
+                status=QuotaResetStatus.LIFTED_WITH_NOTICE,
+                period_key=period_key,
+                notice="",
+                claimed=False,
+            )
 
         try:
             notice = self._quota_reset_notice_text(
@@ -2167,7 +2186,7 @@ class MessageHandler:
             period_end=period_end,
             plan_key=FREE_PLAN,
         )
-        base = build_quota_reset_notice(reset_date=reset_date)
+        base = build_quota_reset_notice(reset_date=reset_date, free_quota=self._free_quota)
         text, _url = self._build_multilingual_notice(base, group_id, None, add_missing_link_notice=False)
         return text
 
@@ -2874,21 +2893,15 @@ class MessageHandler:
         return status in {"active", "trialing"}
 
     def _resolve_effective_plan_key(self, status: Optional[str], entitlement_plan: Optional[str]) -> str:
-        plan_key = resolve_effective_plan(status, entitlement_plan)
-        if self._is_active_subscription(status) and plan_key == FREE_PLAN:
-            # 後方互換: entitlement_plan 未保存環境は paid を Pro 扱い
-            return PRO_PLAN
-        return plan_key
+        return effective_plan_key(status, entitlement_plan)
 
     def _quota_limit_for_plan(self, plan_key: str) -> int:
-        normalized = normalize_plan_key(plan_key)
-        if normalized == FREE_PLAN:
-            return self._free_quota
-        if normalized == STANDARD_PLAN:
-            return self._standard_quota
-        if normalized == PRO_PLAN:
-            return self._pro_quota
-        return monthly_quota_for(normalized)
+        return monthly_limit_for_plan(
+            plan_key,
+            free_quota=self._free_quota,
+            standard_quota=self._standard_quota,
+            pro_quota=self._pro_quota,
+        )
 
     def _would_exceed_language_limit(
         self,

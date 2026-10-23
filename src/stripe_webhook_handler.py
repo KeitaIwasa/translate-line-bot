@@ -13,6 +13,8 @@ import requests
 from src.config import get_settings
 from src.domain.services.interface_translation_service import InterfaceTranslationService
 from src.domain.services.plan_policy import FREE_PLAN, PRO_PLAN
+from src.domain.services.quota_pause import effective_plan_key, monthly_limit_for_plan, reevaluate_quota_pause
+from src.domain.services.quota_service import QuotaService
 from src.infra.gemini_translation import GeminiTranslationAdapter
 from src.infra.neon_client import get_client
 from src.infra.neon_repositories import NeonMessageRepository
@@ -90,7 +92,7 @@ def _handle_payment_succeeded(invoice: Dict[str, Any], event_created: Any) -> No
         return
 
     _sync_subscription(group_id, subscription, status_override=subscription.get("status"), event_created=event_created)
-    _set_translation_enabled(group_id, True)
+    _reevaluate_quota_pause(group_id)
     _push_payment_confirmation(group_id)
 
 
@@ -126,7 +128,10 @@ def _handle_subscription_updated(subscription: Dict[str, Any], event_created: An
 
     status = subscription.get("status") or "active"
     _sync_subscription(group_id, subscription, status_override=status, event_created=event_created)
-    _set_translation_enabled(group_id, status in {"active", "trialing"})
+    if status in {"active", "trialing"}:
+        _reevaluate_quota_pause(group_id)
+    else:
+        _set_translation_enabled(group_id, False)
 
 
 def _handle_checkout_session_completed(session: Dict[str, Any], event_created: Any) -> None:
@@ -161,9 +166,11 @@ def _handle_checkout_session_completed(session: Dict[str, Any], event_created: A
 
     status = subscription.get("status") or "active"
     _sync_subscription(group_id, subscription, status_override=status, event_created=event_created)
-    _set_translation_enabled(group_id, status in {"active", "trialing"})
     if status in {"active", "trialing"}:
+        _reevaluate_quota_pause(group_id)
         _push_payment_confirmation(group_id)
+    else:
+        _set_translation_enabled(group_id, False)
 
 
 def _handle_renewal_setup_completed(session: Dict[str, Any]) -> None:
@@ -489,6 +496,43 @@ def _upsert_subscription(
         is_grandfathered=is_grandfathered,
         quota_anchor_day=quota_anchor_day,
         billing_owner_user_id=billing_owner_user_id,
+    )
+
+
+def _reevaluate_quota_pause(group_id: str) -> None:
+    """購読の変更後に、quota 停止だけを今の上限で見直す。他の停止理由は変えない。"""
+
+    repo = _get_repo()
+    runtime = repo.fetch_translation_runtime_state(group_id)
+    plan_key = effective_plan_key(runtime.subscription_status, runtime.entitlement_plan)
+    period_key = QuotaService(repo).compute_period_key(
+        plan_key=plan_key,
+        period_start=runtime.period_start,
+        period_end=runtime.period_end,
+        quota_anchor_day=runtime.quota_anchor_day,
+    )
+    usage = int(runtime.usage or 0)
+    if runtime.period_key and runtime.period_key != period_key:
+        try:
+            usage = int(repo.get_usage(group_id, period_key) or 0)
+        except Exception:
+            logger.debug("Failed to read usage for quota pause reevaluation", exc_info=True)
+            usage = 0
+    limit = monthly_limit_for_plan(
+        plan_key,
+        free_quota=settings.free_quota_per_month,
+        standard_quota=settings.standard_quota_per_month,
+        pro_quota=settings.pro_quota_per_month,
+    )
+    if not reevaluate_quota_pause(paused_reason=runtime.translation_paused_reason, usage=usage, limit=limit):
+        return
+    repo.set_translation_enabled(group_id, True)
+    logger.info(
+        "Lifted quota pause after subscription change | group=%s plan=%s usage=%s limit=%s",
+        group_id,
+        plan_key,
+        usage,
+        limit,
     )
 
 
