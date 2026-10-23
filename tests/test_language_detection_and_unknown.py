@@ -4,6 +4,7 @@ import pytest
 from dotenv import load_dotenv
 
 from src.app.handlers.message_handler import MessageHandler, UNKNOWN_INSTRUCTION_BASE
+from src.presentation.rich_message import visible_reply_text
 from src.domain import models
 from src.domain.services.interface_translation_service import InterfaceTranslationService
 from src.domain.services.language_detection_service import LanguageDetectionService
@@ -191,6 +192,10 @@ def test_language_settings_invalid_operation_returns_unknown_instruction():
 
         def reply_text(self, _reply_token, text):
             self.last_text = text
+            return None
+
+        def reply_messages(self, _reply_token, messages):
+            self.last_text = visible_reply_text(messages)
             return None
 
     class InvalidOpCommandRouter:

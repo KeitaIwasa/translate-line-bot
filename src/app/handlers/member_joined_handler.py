@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import List
 
 from ...domain import models
 from ...domain.ports import LinePort, MessageRepositoryPort
+from ...presentation.guidance_cards import member_joined_card
+from ...presentation.rich_message import deliver_reply
+
+logger = logging.getLogger(__name__)
 
 
 class MemberJoinedHandler:
@@ -36,14 +41,7 @@ class MemberJoinedHandler:
                 joined_names.append(name)
 
         prefix = "、".join(joined_names) if joined_names else "everyone"
-        message = (
-            f"Hello {prefix} !\n\n"
-            "When you want to change the interpreter's language settings, please remove this bot from the group once and then invite it again!\n\n"
-            "通訳の言語設定を変更するときは、このボットを一度グループから削除してから、再度招待してね！\n\n"
-            "如果你想更改口译语言设置，请先将此机器人从群组中删除，然后再重新邀请它！\n\n"
-            "หากคุณต้องการเปลี่ยนการตั้งค่าภาษาของล่าม กรุณานำบอทนี้ออกจากกลุ่มก่อน แล้วค่อยเชิญกลับมาอีกครั้ง!"
-        )
-        self._line.reply_text(event.reply_token, message)
+        deliver_reply(self._line, event.reply_token, member_joined_card(prefix), logger=logger)
 
 
 def _event_timestamp(event: models.BaseEvent):

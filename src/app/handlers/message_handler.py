@@ -31,7 +31,16 @@ from ...domain.services.current_languages_question import (
     is_current_languages_question,
 )
 from ...infra.gemini_translation import GeminiRateLimitError
+from ...presentation.guidance_cards import (
+    catalog_card,
+    howto_card,
+    language_reset_card,
+    quota_notice_card,
+    settings_help_card,
+    unknown_command_card,
+)
 from ...presentation.list_layout import normalize_inline_lists
+from ...presentation.rich_message import deliver_reply, flex_action_count, flex_body_text
 from ...presentation.reply_formatter import (
     MAX_REPLY_LENGTH,
     _wrap_bidi_isolate,
@@ -180,6 +189,10 @@ class _CommandTrace:
                 continue
             if message.get("type") == "text":
                 self.text_length += len(message.get("text") or "")
+                continue
+            if message.get("type") == "flex":
+                self.text_length += len(flex_body_text(message))
+                self.template_action_count += flex_action_count(message)
                 continue
             if message.get("type") != "template":
                 continue
@@ -527,6 +540,47 @@ class MessageHandler:
             logger.exception("Failed to persist direct assistant message")
 
     # --- internal helpers ---
+    def _reply_guidance(
+        self,
+        event: models.MessageEvent,
+        guidance,
+        *,
+        command_trace: _CommandTrace | None = None,
+    ) -> bool:
+        """案内を Flex で返す。送信に失敗したときだけ、URL を分けた平文に戻す。"""
+
+        if not event.reply_token:
+            return False
+        started = time.perf_counter()
+        try:
+            sent = deliver_reply(self._line, event.reply_token, guidance, logger=logger)
+        except Exception:
+            if command_trace:
+                command_trace.record_reply(
+                    [{"type": "text", "text": ""}],
+                    (time.perf_counter() - started) * 1000,
+                    False,
+                )
+            raise
+        if command_trace:
+            command_trace.record_reply(sent, (time.perf_counter() - started) * 1000, True)
+        return True
+
+    def _notice_language(self, group_id: str) -> str:
+        """上限案内のボタン言語。英語以外が設定されていればそれを使う。"""
+
+        try:
+            languages = list(self._repo.fetch_group_languages(group_id) or [])
+        except Exception:
+            logger.debug("Failed to fetch languages for notice button", exc_info=True)
+            languages = []
+        for lang in languages:
+            if lang and not str(lang).lower().startswith("en"):
+                return str(lang)
+        if languages:
+            return str(languages[0])
+        return "en"
+
     def _reply_text(
         self,
         event: models.MessageEvent,
@@ -747,7 +801,11 @@ class MessageHandler:
                         message = howto_prompt(
                             family=family_for(instruction_lang or decision.instruction_language, command_text)
                         )
-                    handled = self._reply_text(event, message, command_trace=trace)
+                    handled = self._reply_guidance(
+                        event,
+                        howto_card(message, lang=instruction_lang or decision.instruction_language),
+                        command_trace=trace,
+                    )
                 elif action == "pause":
                     self._repo.set_translation_enabled(event.group_id, False)
                     base_ack = "I will pause translation. Please mention me again when you want to resume."
@@ -939,7 +997,11 @@ class MessageHandler:
                 instruction_lang,
             )
         if parsed.kind == "catalog":
-            self._reply_text(event, catalog_prompt(family=family, limit=limit), command_trace=command_trace)
+            self._reply_guidance(
+                event,
+                catalog_card(catalog_prompt(family=family, limit=limit), lang=family),
+                command_trace=command_trace,
+            )
             return True
         if parsed.kind == "settings_help":
             names = [
@@ -947,14 +1009,18 @@ class MessageHandler:
                 for code, stored in self._group_language_records(event.group_id)
                 if code
             ]
-            self._reply_text(
+            self._reply_guidance(
                 event,
-                settings_help_prompt(names, family=family, limit=limit),
+                settings_help_card(settings_help_prompt(names, family=family, limit=limit), lang=family),
                 command_trace=command_trace,
             )
             return True
         if parsed.kind == "howto":
-            self._reply_text(event, howto_prompt(family=family), command_trace=command_trace)
+            self._reply_guidance(
+                event,
+                howto_card(howto_prompt(family=family), lang=family),
+                command_trace=command_trace,
+            )
             return True
         if parsed.kind == "unsupported":
             self._reply_text(
@@ -1135,7 +1201,11 @@ class MessageHandler:
                 decision.instruction_language,
                 command_trace=command_trace,
             )
-            self._reply_text(event, ack, command_trace=command_trace)
+            self._reply_guidance(
+                event,
+                language_reset_card(str(ack or ""), lang=decision.instruction_language),
+                command_trace=command_trace,
+            )
             return True
 
         normalized_add: List[Tuple[str, str]] = []
@@ -1314,7 +1384,11 @@ class MessageHandler:
         )
         fallback = self._build_unknown_response(detected, command_trace=command_trace)
         self._repo.set_translation_enabled(event.group_id, True)
-        self._reply_text(event, fallback, command_trace=command_trace)
+        self._reply_guidance(
+            event,
+            unknown_command_card(fallback, lang=detected, bot_name=self._bot_mention_name),
+            command_trace=command_trace,
+        )
         return True
 
     def _handle_translation_flow(
@@ -1757,11 +1831,10 @@ class MessageHandler:
             period_key=period_key,
             period_end=period_end,
         )
-        messages = [{"type": "text", "text": notice_text[:5000]}]
-        if url:
-            # URL は左右書字方向混在時に誤判定されやすいため別メッセージで送る
-            messages.append({"type": "text", "text": url})
-        self._reply_messages(event, messages)
+        self._reply_guidance(
+            event,
+            quota_notice_card(notice_text, lang=self._notice_language(event.group_id), url=url),
+        )
 
     def _build_limit_reached_notice_text(
         self,
@@ -1789,7 +1862,7 @@ class MessageHandler:
             base = (
                 f"Free quota ({limit:,} messages per month) is exhausted and translation will stop.\n"
                 f"{reset_line}\n"
-                "To continue using the service, please review plans from the link below."
+                "To continue using the service, please review the plans."
             )
             url = self._subscription_service.create_checkout_url(group_id)
         elif normalized == STANDARD_PLAN:
@@ -1802,7 +1875,7 @@ class MessageHandler:
             base = (
                 f"The Standard plan monthly limit ({limit:,} messages) has been reached and translation is paused.\n"
                 f"{reset_line}\n"
-                "To unlock a higher limit now, upgrade to the Pro plan from the link below."
+                "To unlock a higher limit now, upgrade to the Pro plan."
             )
             url = self._subscription_service.create_checkout_url(group_id)
         else:

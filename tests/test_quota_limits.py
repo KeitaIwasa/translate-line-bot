@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from src.app.handlers.message_handler import MessageHandler
+from src.presentation.rich_message import visible_reply_text
 from src.domain import models
 from src.domain.models import TranslationRuntimeState
 from src.domain.services.quota_service import QuotaDecision
@@ -14,8 +15,7 @@ class RecordingLineClient:
         self.sent_texts.append(text)
 
     def reply_messages(self, _reply_token, messages):
-        texts = [msg.get("text", "") for msg in messages if isinstance(msg, dict)]
-        self.sent_texts.append("\n".join(texts))
+        self.sent_texts.append(visible_reply_text(messages))
 
     def get_display_name(self, *_args, **_kwargs):
         return None

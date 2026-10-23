@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from src.app.handlers.member_left_handler import MemberLeftHandler
 from src.domain import models
 from src.domain.services.interface_translation_service import InterfaceTranslationService
+from src.presentation.rich_message import flex_body_text
 
 
 class _Line:
@@ -15,6 +16,11 @@ class _Line:
         if to in self.fail_targets:
             raise RuntimeError("push failed")
         self.messages.append((to, text))
+
+    def push_messages(self, to, messages):
+        if to in self.fail_targets:
+            raise RuntimeError("push failed")
+        self.messages.append((to, messages))
 
     def get_group_name(self, _group_id):
         return self.group_name
@@ -101,10 +107,14 @@ def test_member_left_reserves_cancellation_and_pushes_notice():
 
     assert service.calls == ["G"]
     assert [target for target, _ in line.messages] == ["G", "OWNER"]
-    assert "2026-04-30" in line.messages[0][1]
+    group_flex = line.messages[0][1][0]
+    group_body = flex_body_text(group_flex)
+    assert group_flex["type"] == "flex"
+    assert "2026-04-30" in group_body
+    assert "https://billing.example.com/manage" not in group_body
+    assert group_flex["contents"]["footer"]["contents"][0]["action"]["uri"] == "https://billing.example.com/manage"
     assert "April 30, 2026" in line.messages[1][1]
     assert '"ABC Group,"' in line.messages[1][1]
-    assert line.messages[0][1].endswith("https://billing.example.com/manage")
     assert service.checkout_calls == ["G"]
 
 
@@ -152,7 +162,10 @@ def test_member_left_without_checkout_url_keeps_group_message_text_only():
     handler.handle(event)
 
     assert len(line.messages) == 2
-    assert "http" not in line.messages[0][1]
+    group_flex = line.messages[0][1][0]
+    assert group_flex["type"] == "flex"
+    assert "footer" not in group_flex["contents"]
+    assert "http" not in flex_body_text(group_flex)
 
 
 def test_member_left_builds_multilingual_messages_for_group_and_dm():
@@ -176,7 +189,7 @@ def test_member_left_builds_multilingual_messages_for_group_and_dm():
     handler.handle(event)
 
     assert len(line.messages) == 2
-    group_message = line.messages[0][1]
+    group_message = flex_body_text(line.messages[0][1][0])
     dm_message = line.messages[1][1]
     assert "ja:" in group_message
     assert "fr:" in group_message

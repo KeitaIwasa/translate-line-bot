@@ -53,6 +53,23 @@ class LineApiAdapter(LinePort):
                 extra={"status": response.status_code, "body": (response.text or "")[:500], "to": to},
             )
 
+    def push_messages(self, to: str, messages) -> None:  # type: ignore[override]
+        """複数メッセージを push する。失敗時は例外にし、呼び出し側が平文へ戻せるようにする。"""
+
+        url = f"{self.BASE_URL}/v2/bot/message/push"
+        sanitized = [self._sanitize_message(msg) for msg in messages[:5]]
+        payload = {"to": to, "messages": sanitized}
+        response = self._session.post(url, json=payload, timeout=5)
+        if not response.ok:
+            # 応答本文には署名付き URL がエコーされることがあるため、種類と件数だけ出す。
+            logger.warning(
+                "LINE push failed: status=%s types=%s count=%s",
+                response.status_code,
+                [msg.get("type") for msg in sanitized],
+                len(sanitized),
+            )
+            raise LineApiError(f"LINE push failed with status {response.status_code}")
+
     def get_display_name(
         self,
         source_type: str,
