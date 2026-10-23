@@ -1,6 +1,7 @@
 import pytest
 
 from src.app.handlers.message_handler import MessageHandler
+from src.presentation.rich_message import visible_reply_text
 from src.domain import models
 from src.domain.services.translation_service import TranslationService
 from src.domain.services.interface_translation_service import InterfaceTranslationService
@@ -415,6 +416,10 @@ class RecordingLineClient(DummyLineClient):
     def reply_text(self, reply_token, text):
         self.last_text = text
         super().reply_text(reply_token, text)
+
+    def reply_messages(self, reply_token, messages):
+        self.last_text = visible_reply_text(messages)
+        super().reply_messages(reply_token, messages)
 
 
 def test_language_settings_add_rejects_when_exceeding_limit():

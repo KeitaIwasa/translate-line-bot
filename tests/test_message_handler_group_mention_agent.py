@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timezone
 
 from src.app.handlers.message_handler import MessageHandler
+from src.presentation.rich_message import visible_reply_text
 from src.domain import models
 
 
@@ -16,6 +17,7 @@ class _Line:
 
     def reply_messages(self, *_args, **_kwargs):
         self.last_messages = _args[1] if len(_args) > 1 else _kwargs.get("messages")
+        self.last_text = visible_reply_text(self.last_messages)
 
     def get_display_name(self, *_args, **_kwargs):
         return None
@@ -188,7 +190,7 @@ def test_router_receives_runtime_payload_json():
     assert data["translation_enabled"] is True
 
 
-def test_command_logs_decision_timing_and_text_reply_metadata_without_body(caplog):
+def test_command_logs_decision_timing_and_flex_reply_metadata_without_body(caplog):
     class _Router:
         def decide(self, _text):
             return models.CommandDecision(
@@ -210,7 +212,7 @@ def test_command_logs_decision_timing_and_text_reply_metadata_without_body(caplo
     assert "Command stage | stage=router_decision" in logs
     assert "Command stage | stage=instruction_language_resolution" in logs
     assert "Command stage | stage=action_handler" in logs
-    assert "Command reply | status=sent reply_type=text message_count=1" in logs
+    assert "Command reply | status=sent reply_type=flex message_count=1" in logs
     assert "Command completed | status=success action=howto" in logs
     assert "total_elapsed_ms=" in logs
     assert "秘密の返信本文はログに出さない" not in logs

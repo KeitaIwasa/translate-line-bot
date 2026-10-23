@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 
 from src.app.handlers.join_handler import JoinHandler
 from src.domain import models
+from src.presentation.rich_message import flex_body_text
 
 
 def _make_event(group_id="gid", reply_token="rpt", timestamp_ms=0):
@@ -30,7 +31,11 @@ def test_join_handler_saves_group_name_and_calls_repo():
     repo.upsert_group_name.assert_called_once_with("gid", "Sample Group")
     repo.reset_group_language_settings.assert_called_once_with("gid")
     repo.set_translation_enabled.assert_called_once_with("gid", False)
-    line.reply_text.assert_called_once()
+    line.reply_messages.assert_called_once()
+    sent = line.reply_messages.call_args.args[1]
+    assert sent[0]["type"] == "flex"
+    assert "多言語翻訳ボット" in flex_body_text(sent[0])
+    line.reply_text.assert_not_called()
 
 
 def test_join_handler_continues_when_group_name_missing():
@@ -45,7 +50,7 @@ def test_join_handler_continues_when_group_name_missing():
 
     repo.record_bot_joined_at.assert_called_once()
     repo.upsert_group_name.assert_not_called()
-    line.reply_text.assert_called_once()
+    line.reply_messages.assert_called_once()
 
 
 def test_join_handler_swallows_group_name_errors():
@@ -59,4 +64,4 @@ def test_join_handler_swallows_group_name_errors():
     handler.handle(event)
 
     repo.record_bot_joined_at.assert_called_once()
-    line.reply_text.assert_called_once()
+    line.reply_messages.assert_called_once()

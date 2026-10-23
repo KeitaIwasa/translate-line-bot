@@ -451,6 +451,11 @@ class _Line:
     def reply_text(self, _token, text):
         self.last_text = text
 
+    def reply_messages(self, _token, messages):
+        from src.presentation.rich_message import visible_reply_text
+
+        self.last_text = visible_reply_text(messages)
+
 
 class _Translator:
     def translate(self, **kwargs):
