@@ -103,7 +103,10 @@ def test_japanese_and_english_lists_are_deterministic():
         "現在の翻訳言語はサンスクリット語、ネパール語、ミャンマー語、タガログ語、ウクライナ語、ベンガル語、不明な言語です。"
     )
     assert english == current_languages_base_text(_LISTED)
-    assert current_languages_localized_text(_LISTED, "ko") is None
+    korean = current_languages_localized_text(_LISTED, "ko")
+    assert korean == (
+        "현재 번역 언어는 산스크리트어, 네팔어, 미얀마어, 타갈로그어, 우크라이나어, 벵골어, 알 수 없는 언어야."
+    )
     assert current_languages_localized_text([], "ja") == "翻訳言語はまだ設定されていません。"
     assert _CODE_WORD.search(japanese) is None
 
@@ -136,17 +139,17 @@ def test_show_languages_uses_stored_names_and_translates_only_outside_ja_en():
     line = _Line()
     handler._line = line
     handler._handle_show_languages(_event("what languages are set?"), "ko")
-    assert translator.calls
-    translated = translator.calls[0]["message_text"]
-    assert translator.calls[0]["candidate_languages"] == ["ko"]
-    assert "Sanskrit" in translated
-    assert "Nepali" in translated
-    assert "Burmese" in translated
-    assert "Tagalog" in translated
-    assert "Ukrainian" in translated
-    assert "Bengali" in translated
-    assert "Unknown language" in translated
-    assert _CODE_WORD.search(translated) is None
+    assert translator.calls == []
+    korean = line.last_text or ""
+    assert "산스크리트어" in korean
+    assert "네팔어" in korean
+    assert "미얀마어" in korean
+    assert "타갈로그어" in korean
+    assert "우크라이나어" in korean
+    assert "벵골어" in korean
+    assert "알 수 없는 언어" in korean
+    assert "English, Japanese" not in korean
+    assert _CODE_WORD.search(korean) is None
 
 
 def test_repository_reads_stored_language_names():

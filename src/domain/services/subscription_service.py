@@ -43,10 +43,37 @@ class SubscriptionService:
     def create_support_contact_url(self, group_id: str) -> Optional[str]:
         return self._build_plan_url(group_id, scope="support", page_path="/contact.html")
 
-    def _build_plan_url(self, group_id: str, *, scope: str, page_path: str = "/pro.html") -> Optional[str]:
+    def create_language_settings_url(self, group_id: str, *, family: str = "") -> Optional[str]:
+        """グループの言語設定ページ。同一オリジンでは /api 配下、API 直は /group-languages。"""
+
+        if self._subscription_frontend_base_url:
+            page_path = "/api/group-languages"
+        elif self._checkout_api_base_url:
+            page_path = "/group-languages"
+        else:
+            return None
+        url = self._build_plan_url(
+            group_id,
+            scope="group_languages",
+            page_path=page_path,
+            base_url=self._subscription_frontend_base_url or self._checkout_api_base_url,
+        )
+        if not url or family not in {"ja", "en", "zh", "ko", "th"}:
+            return url
+        return f"{url}&ui={family}"
+
+    def _build_plan_url(
+        self,
+        group_id: str,
+        *,
+        scope: str,
+        page_path: str = "/pro.html",
+        base_url: str = "",
+    ) -> Optional[str]:
         if not group_id:
             return None
-        if not self._subscription_frontend_base_url or not self._subscription_token_secret:
+        resolved_base = (base_url or self._subscription_frontend_base_url).rstrip("/")
+        if not resolved_base or not self._subscription_token_secret:
             return None
         expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
         token = issue_token(
@@ -60,7 +87,7 @@ class SubscriptionService:
         )
         # LINE内ブラウザではログインのリダイレクトが途切れることがあるため、外部ブラウザで開く。
         query = urlencode((("openExternalBrowser", "1"), ("st", token)))
-        return f"{self._subscription_frontend_base_url}{page_path}?{query}"
+        return f"{resolved_base}{page_path}?{query}"
 
     def _create_legacy_checkout_url(self, group_id: str) -> Optional[str]:
         stripe = self._load_stripe()

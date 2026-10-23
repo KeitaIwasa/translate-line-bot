@@ -14,8 +14,10 @@ class _Line:
     def reply_text(self, _token, text):
         self.last_text = text
 
-    def reply_messages(self, *_args, **_kwargs):
-        self.last_messages = _args[1] if len(_args) > 1 else _kwargs.get("messages")
+    def reply_messages(self, _token, messages=None, **_kwargs):
+        self.last_messages = messages
+        if messages and isinstance(messages[0], dict) and messages[0].get("text"):
+            self.last_text = messages[0]["text"]
 
     def get_display_name(self, *_args, **_kwargs):
         return None
@@ -103,7 +105,7 @@ def test_howto_uses_ack_text_without_forcing_resume():
 
     handler._handle_command(event, "使い方を教えて")
 
-    assert "Add Thai" in (handler._line.last_text or "")
+    assert "タイ語を追加して" in (handler._line.last_text or "")
     assert "使い方を教えてと送って" not in (handler._line.last_text or "")
     assert repo.translation_enabled_calls == []
 

@@ -173,8 +173,20 @@ class PrivateChatResponse:
 
 # === Reply DTO ===
 @dataclass(frozen=True)
+class LanguagePromptResult:
+    """チャットの言語確認を閉じた結果。applied のときだけ真。"""
+
+    status: str  # applied | duplicate | stale
+
+    def __bool__(self) -> bool:
+        return self.status == "applied"
+
+
+@dataclass(frozen=True)
 class ReplyBundle:
     """送信用メッセージを束ねるシンプルな DTO。"""
 
     texts: Sequence[str] = field(default_factory=tuple)
     messages: Sequence[dict] = field(default_factory=tuple)
+    # stale のときだけ、古い確認ボタンを拒んだことを表す
+    notice_kind: str = ""

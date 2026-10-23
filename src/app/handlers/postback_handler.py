@@ -7,6 +7,16 @@ from ...domain import models
 from ...domain.ports import LinePort, MessageRepositoryPort
 from ...domain.services.interface_translation_service import InterfaceTranslationService
 from ...domain.services.subscription_service import SubscriptionService
+from ...domain.services.current_languages_question import (
+    current_languages_base_text,
+    current_languages_localized_text,
+)
+from ...domain.services.language_mention import (
+    howto_prompt,
+    language_quick_replies,
+    menu_family,
+    settings_page_line,
+)
 from ...domain.services.language_settings_service import LanguageSettingsService
 from ...presentation.reply_formatter import strip_source_echo
 from ..subscription_texts import (
@@ -49,6 +59,10 @@ class PostbackHandler:
         if not event.data or not event.reply_token or not event.group_id:
             return
 
+        if event.data.startswith("langmenu="):
+            self._handle_language_menu(event)
+            return
+
         payload = decode_postback_payload(event.data)
         if not payload:
             logger.debug("Ignoring unknown postback", extra={"data": event.data})
@@ -73,12 +87,18 @@ class PostbackHandler:
             tuples: List[Tuple[str, str]] = [
                 (item.get("code", ""), item.get("name", "")) for item in langs if item.get("code")
             ]
+            issued_at = payload.get("issued_at")
+            confirm_kwargs = {}
+            if isinstance(issued_at, str) and issued_at:
+                confirm_kwargs["issued_at"] = issued_at
             bundle = self._lang_settings.confirm(
                 group_id=event.group_id,
                 languages=tuples,
                 primary_language=primary_language,
                 completion_text=payload.get("completion_text"),
                 limit_text=payload.get("limit_text"),
+                settings_url=self._language_settings_url(event.group_id, ""),
+                **confirm_kwargs,
             )
             if not bundle:
                 logger.info(
@@ -88,16 +108,27 @@ class PostbackHandler:
                 return
             if event.reply_token and bundle.texts:
                 self._line.reply_text(event.reply_token, bundle.texts[0])
+            if bundle.notice_kind == "stale":
+                logger.info(
+                    "Stale language confirmation ignored",
+                    extra={"group_id": event.group_id, "languages": [code for code, _ in tuples]},
+                )
+                return
             logger.info(
                 "Language preferences saved",
                 extra={"group_id": event.group_id, "languages": [code for code, _ in tuples]},
             )
         elif action == "cancel":
             # 確認のキャンセルは、このポストバックをユーザーが押したときだけ。時間切れでは送らない
+            issued_at = payload.get("issued_at")
+            cancel_kwargs = {}
+            if isinstance(issued_at, str) and issued_at:
+                cancel_kwargs["issued_at"] = issued_at
             bundle = self._lang_settings.cancel(
                 group_id=event.group_id,
                 primary_language=primary_language,
                 cancel_text=payload.get("cancel_text"),
+                **cancel_kwargs,
             )
             if not bundle:
                 logger.info(
@@ -108,6 +139,63 @@ class PostbackHandler:
             if event.reply_token and bundle.texts:
                 self._line.reply_text(event.reply_token, bundle.texts[0])
             logger.info("Language enrollment cancelled", extra={"group_id": event.group_id, "user_id": event.user_id})
+
+    def _handle_language_menu(self, event: models.PostbackEvent) -> None:
+        """Quick Reply の「今の言語」「使い方」。グループの誰が押しても同じグループに返す。"""
+
+        if not event.reply_token or not event.group_id:
+            return
+        action = event.data.split("=", 1)[1]
+        records = self._language_records(event.group_id)
+        family = menu_family([code for code, _name in records])
+        url = self._language_settings_url(event.group_id, family)
+        if action == "help":
+            text = howto_prompt(family=family)
+        else:
+            localized = current_languages_localized_text(records, family)
+            text = localized if localized is not None else current_languages_base_text(records)
+        line = settings_page_line(family, url)
+        if line:
+            text = f"{text}\n\n{line}"
+        quick_reply = language_quick_replies(family, url)
+        message = {"type": "text", "text": text[:5000], "quickReply": {"items": quick_reply}}
+        reply_messages = getattr(self._line, "reply_messages", None)
+        if reply_messages:
+            reply_messages(event.reply_token, [message])
+            return
+        self._line.reply_text(event.reply_token, message["text"])
+
+    def _language_settings_url(self, group_id: str, family: str) -> str:
+        builder = getattr(self._subscription_service, "create_language_settings_url", None)
+        if not builder or not group_id:
+            return ""
+        try:
+            return builder(group_id, family=family) or ""
+        except Exception:
+            logger.debug("Failed to build language settings url", exc_info=True)
+            return ""
+
+    def _language_records(self, group_id: str) -> list:
+        fetcher = getattr(self._repo, "fetch_group_language_records", None)
+        if fetcher:
+            try:
+                rows = fetcher(group_id) or []
+            except Exception:
+                rows = []
+        else:
+            try:
+                rows = self._repo.fetch_group_languages(group_id) or []
+            except Exception:
+                rows = []
+        records = []
+        for row in rows:
+            if isinstance(row, str):
+                records.append((row, ""))
+            else:
+                code = row[0] if row else ""
+                name = row[1] if row and len(row) > 1 and isinstance(row[1], str) else ""
+                records.append((code or "", name or ""))
+        return records
 
     def _build_multilingual_message(self, base_text: str, group_id: str) -> str:
         languages = self._repo.fetch_group_languages(group_id)
