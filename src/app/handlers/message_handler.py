@@ -30,7 +30,8 @@ from ...domain.services.current_languages_question import (
     current_languages_localized_text,
     is_current_languages_question,
 )
-from ...infra.gemini_translation import GeminiRateLimitError
+from ...infra.gemini_errors import GeminiRateLimitError
+from ...infra.provider_failure import classify_provider_failure, record_provider_failure
 from ...presentation.list_layout import normalize_inline_lists
 from ...presentation.reply_formatter import (
     MAX_REPLY_LENGTH,
@@ -345,11 +346,20 @@ class MessageHandler:
 
         try:
             self._process_group_message(event, start)
-        except GeminiRateLimitError:
+        except GeminiRateLimitError as exc:
+            # アダプタが記録済みならメトリクスは増えない。429 の利用者案内は従来どおり。
+            record_provider_failure(exc, dependency="gemini")
             logger.warning("Gemini rate limited; notifying user")
             self._send_rate_limit_notice(event)
-        except Exception:
-            logger.exception("Message handling failed")
+        except Exception as exc:
+            failure = record_provider_failure(exc)
+            # 再試行できない障害ではグループへ返信しない。案内文の翻訳も同じ依存先に当たる。
+            logger.exception(
+                "Message handling failed | error_class=%s dependency=%s status=%s",
+                failure.error_class,
+                failure.dependency,
+                failure.status,
+            )
         finally:
             if not start.legacy:
                 try:
@@ -2213,8 +2223,9 @@ class MessageHandler:
         *,
         command_trace: _CommandTrace | None = None,
     ):
-        """翻訳系リトライ共通処理。"""
+        """翻訳系リトライ共通処理。認証・請求エラーは繰り返さない。"""
         last_error: Exception | None = None
+        last_failure = None
         for attempt in range(self._translation_retry):
             attempt_started = time.perf_counter()
             try:
@@ -2227,41 +2238,50 @@ class MessageHandler:
                         "success",
                     )
                 return result
-            except requests.exceptions.Timeout as exc:
-                if command_trace:
-                    command_trace.log_operation(
-                        label,
-                        attempt + 1,
-                        (time.perf_counter() - attempt_started) * 1000,
-                        "timeout",
-                    )
-                logger.warning(
-                    "%s timeout",
-                    label,
-                    extra={"attempt": attempt + 1, "timeout_seconds": timeout_seconds},
-                )
-                last_error = exc
             except Exception as exc:  # pylint: disable=broad-except
+                elapsed_ms = (time.perf_counter() - attempt_started) * 1000
+                failure = classify_provider_failure(exc, dependency="gemini")
+                last_failure = failure
+                outcome = "timeout" if isinstance(exc, requests.exceptions.Timeout) else "failed"
                 if command_trace:
-                    command_trace.log_operation(
+                    command_trace.log_operation(label, attempt + 1, elapsed_ms, outcome)
+                if isinstance(exc, requests.exceptions.Timeout):
+                    logger.warning(
+                        "%s timeout",
+                        label,
+                        extra={
+                            "attempt": attempt + 1,
+                            "timeout_seconds": timeout_seconds,
+                            "error_class": failure.error_class,
+                        },
+                    )
+                elif failure.retryable:
+                    logger.warning(
+                        "%s failed (attempt %s/%s) | error_class=%s status=%s",
                         label,
                         attempt + 1,
-                        (time.perf_counter() - attempt_started) * 1000,
-                        "failed",
+                        self._translation_retry,
+                        failure.error_class,
+                        failure.status,
                     )
-                if isinstance(exc, GeminiRateLimitError):
-                    last_error = exc
-                    break
-                logger.warning(
-                    "%s failed (attempt %s/%s)",
-                    label,
-                    attempt + 1,
-                    self._translation_retry,
-                )
+                else:
+                    logger.warning(
+                        "%s failed without retry | error_class=%s status=%s",
+                        label,
+                        failure.error_class,
+                        failure.status,
+                    )
                 last_error = exc
+                if not failure.retryable or attempt >= self._translation_retry - 1:
+                    break
             time.sleep(0.5 * (attempt + 1))
 
-        logger.error("%s failed after retries", label)
+        logger.error(
+            "%s failed after retries | error_class=%s status=%s",
+            label,
+            last_failure.error_class if last_failure else None,
+            last_failure.status if last_failure else None,
+        )
         if last_error:
             raise last_error
         return []
