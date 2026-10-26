@@ -6,11 +6,13 @@
 
 メトリクスは Embedded Metric Format の JSON を標準出力へ1行だけ出す。
 ロガーの接頭辞が付くと CloudWatch がメトリクスとして読まない。
+同じアカウント・リージョンの stg と prod が合算されないよう、各ディメンションに Stage を含める。
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import weakref
@@ -141,7 +143,18 @@ def post_gemini(
     return response
 
 
+def _metric_stage() -> str:
+    """KOTORI_STAGE をメトリクスの Stage にする。空値は CloudWatch が捨てるので unknown にする。"""
+
+    raw = os.environ.get("KOTORI_STAGE", "")
+    if not isinstance(raw, str):
+        return "unknown"
+    stage = raw.strip()
+    return stage or "unknown"
+
+
 def _emit(failure: ProviderFailure, *, model: str | None) -> None:
+    stage = _metric_stage()
     payload: dict = {
         "_aws": {
             "Timestamp": int(time.time() * 1000),
@@ -149,15 +162,16 @@ def _emit(failure: ProviderFailure, *, model: str | None) -> None:
                 {
                     "Namespace": METRIC_NAMESPACE,
                     "Dimensions": [
-                        ["Signal"],
-                        ["ErrorClass"],
-                        ["Dependency", "ErrorClass"],
+                        ["Stage", "Signal"],
+                        ["Stage", "ErrorClass"],
+                        ["Stage", "Dependency", "ErrorClass"],
                     ],
                     "Metrics": [{"Name": METRIC_NAME, "Unit": "Count"}],
                 }
             ],
         },
         METRIC_NAME: 1,
+        "Stage": stage,
         "Signal": SIGNAL_VALUE,
         "ErrorClass": failure.error_class,
         "Dependency": failure.dependency,

@@ -111,6 +111,8 @@ Globals:
         TRANSLATION_RETRY: !Ref TranslationRetry
         BOT_MENTION_NAME: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:BOT_MENTION_NAME}}"
         DEPLOY_NONCE: !Ref DeployNonce
+        # 失敗メトリクスの Stage。stg と prod を同じアカウントに置いてもアラームが混ざらない。
+        KOTORI_STAGE: !Ref StageName
         STRIPE_SECRET_KEY: !If
           - UseStripe
           - !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:STRIPE_SECRET_KEY}}"
@@ -367,6 +369,8 @@ Resources:
       Namespace: KOTORI/Translation
       MetricName: ProviderFailure
       Dimensions:
+        - Name: Stage
+          Value: !Ref StageName
         - Name: Signal
           Value: provider_failure
       Statistic: Sum
@@ -389,6 +393,8 @@ Resources:
       Namespace: KOTORI/Translation
       MetricName: ProviderFailure
       Dimensions:
+        - Name: Stage
+          Value: !Ref StageName
         - Name: ErrorClass
           Value: non_retryable
       Statistic: Sum

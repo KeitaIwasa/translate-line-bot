@@ -142,7 +142,8 @@ def test_http_status_classification(status, error_class, retryable):
     assert exc.retryable is retryable
 
 
-def test_record_emits_one_structured_line_and_is_idempotent(capsys):
+def test_record_emits_one_structured_line_and_is_idempotent(monkeypatch, capsys):
+    monkeypatch.setenv("KOTORI_STAGE", "stg")
     exc = GeminiRequestError("gemini-3.5-flash-lite", 402)
     first = record_provider_failure(exc, dependency="gemini")
     second = record_provider_failure(exc)
@@ -159,16 +160,34 @@ def test_record_emits_one_structured_line_and_is_idempotent(capsys):
     assert payload["ErrorClass"] == "non_retryable"
     assert payload["Dependency"] == "gemini"
     assert payload["Signal"] == SIGNAL_VALUE
+    assert payload["Stage"] == "stg"
     assert payload["model"] == "gemini-3.5-flash-lite"
     assert payload[METRIC_NAME] == 1
     assert "api-key" not in json.dumps(payload)
     metric = payload["_aws"]["CloudWatchMetrics"][0]
     assert metric["Namespace"] == METRIC_NAMESPACE
     assert metric["Metrics"][0]["Name"] == METRIC_NAME
+    assert metric["Dimensions"] == [
+        ["Stage", "Signal"],
+        ["Stage", "ErrorClass"],
+        ["Stage", "Dependency", "ErrorClass"],
+    ]
     flat = {name for group in metric["Dimensions"] for name in group}
-    assert flat == {"Signal", "ErrorClass", "Dependency"}
     assert "status" not in flat
     assert "model" not in flat
+
+
+def test_metric_stage_follows_env_and_blank_becomes_unknown(monkeypatch, capsys):
+    monkeypatch.setenv("KOTORI_STAGE", "prod")
+    record_provider_failure(GeminiRequestError("gemini-3.5-flash-lite", 401), dependency="gemini")
+    prod = _failures(capsys.readouterr().out)
+    assert prod[0]["Stage"] == "prod"
+
+    monkeypatch.setenv("KOTORI_STAGE", "  ")
+    record_provider_failure(GeminiRequestError("gemini-3.5-flash-lite", 403), dependency="gemini")
+    blank = _failures(capsys.readouterr().out)
+    assert blank[0]["Stage"] == "unknown"
+    assert "Stage" in {name for group in blank[0]["_aws"]["CloudWatchMetrics"][0]["Dimensions"] for name in group}
 
 
 @pytest.mark.parametrize(
@@ -434,6 +453,7 @@ def test_translation_failures_are_classified_for_each_input(
     attempts,
 ):
     monkeypatch.setattr("src.domain.services.retry_policy.time.sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setenv("KOTORI_STAGE", "stg")
     detector = LanguageDetectionService()
     session = _StatusSession(status)
     adapter = GeminiTranslationAdapter(api_key="api-key", model="gemini-3.5-flash-lite", timeout_seconds=5)
@@ -466,6 +486,12 @@ def test_translation_failures_are_classified_for_each_input(
     assert {item["error_class"] for item in payloads} == {error_class}
     assert {item["status"] for item in payloads} == {status}
     assert {item["dependency"] for item in payloads} == {"gemini"}
+    assert {item["Stage"] for item in payloads} == {"stg"}
+    assert payloads[0]["_aws"]["CloudWatchMetrics"][0]["Dimensions"] == [
+        ["Stage", "Signal"],
+        ["Stage", "ErrorClass"],
+        ["Stage", "Dependency", "ErrorClass"],
+    ]
     assert all("api-key" not in json.dumps(item) for item in payloads)
 
 
@@ -494,6 +520,20 @@ def test_alarm_template_matches_metric_contract():
     ]
     missing = [item for item in required if item not in text]
     assert missing == []
+    assert "KOTORI_STAGE: !Ref StageName" in text
+    failure_alarm = text.split("TranslationProviderFailureAlarm:", 1)[1].split(
+        "TranslationNonRetryableProviderAlarm:", 1
+    )[0]
+    non_retryable = text.split("TranslationNonRetryableProviderAlarm:", 1)[1].split(
+        "WebhookLambdaErrorsAlarm:", 1
+    )[0]
+    for block in (failure_alarm, non_retryable):
+        assert "Namespace: KOTORI/Translation" in block
+        assert "MetricName: ProviderFailure" in block
+        assert "Name: Stage" in block
+        assert "Value: !Ref StageName" in block
+    assert "Value: provider_failure" in failure_alarm
+    assert "Value: non_retryable" in non_retryable
     # 通知先の既定は空。未設定のデプロイを止めない。
     assert "AlertEmail:" in text
     email_block = text.split("AlertEmail:", 1)[1].split("AlertWebhookUrl:", 1)[0]
