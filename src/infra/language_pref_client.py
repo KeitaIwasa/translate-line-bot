@@ -9,7 +9,7 @@ import requests
 
 from ..domain.models import LanguageChoice, LanguagePreference
 from ..domain.ports import LanguagePreferencePort
-from .gemini_errors import GeminiRateLimitError, GeminiRequestError
+from .provider_failure import classify_provider_failure, post_gemini, should_retry_provider_error
 from .gemini_generation_config import build_generation_config
 from .jev_language_reader import read_language_preference
 
@@ -110,14 +110,18 @@ class LanguagePreferenceAdapter(LanguagePreferencePort):
                 return self._parse_response(body)
             except Exception as exc:  # pylint: disable=broad-except
                 last_error = exc
+                failure = classify_provider_failure(exc, dependency="gemini")
                 logger.warning(
-                    "Language preference request failed (attempt %s/%s)",
+                    "Language preference request failed (attempt %s/%s) | error_class=%s status=%s",
                     attempt + 1,
                     max_attempts,
-                    exc_info=exc,
+                    failure.error_class,
+                    failure.status,
                 )
-                if attempt + 1 < max_attempts:
-                    time.sleep(0.2 * (attempt + 1))
+                # 認証・請求エラーは2回目を撃たない
+                if not should_retry_provider_error(exc) or attempt + 1 >= max_attempts:
+                    break
+                time.sleep(0.2 * (attempt + 1))
 
         if last_error:
             raise last_error
@@ -148,26 +152,15 @@ class LanguagePreferenceAdapter(LanguagePreferencePort):
 
     def _request_language_preference(self, text: str) -> Dict:
         payload = self._build_payload(text)
-        response = self._session.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent",
+        response = post_gemini(
+            self._session,
+            model=self._model,
+            url=f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent",
             params={"key": self._api_key},
-            json=payload,
+            payload=payload,
             timeout=self._timeout,
         )
-        try:
-            response.raise_for_status()
-        except requests.HTTPError:
-            status_code = response.status_code
-            logger.error(
-                "Gemini language preference request failed | model=%s status=%s",
-                self._model,
-                status_code,
-            )
-            if status_code == 429:
-                raise GeminiRateLimitError(self._model) from None
-            raise GeminiRequestError(self._model, status_code) from None
-        body = response.json()
-        return body
+        return response.json()
 
     @staticmethod
     def _parse_response(body: Dict) -> LanguagePreference | None:
