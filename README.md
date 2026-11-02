@@ -293,11 +293,11 @@ sam build
 ### 3. デプロイ（推奨: `scripts/deploy.sh`）
 
 ```bash
-# ステージング
-STACK_NAME=translate-line-bot-stg STAGE=stg PROFILE=line-translate-bot GEMINI_MODEL=gemini-2.5-flash ./scripts/deploy.sh
+# ステージング（GEMINI_MODEL 未指定なら gemini-3.5-flash-lite）
+STACK_NAME=translate-line-bot-stg STAGE=stg PROFILE=line-translate-bot ./scripts/deploy.sh
 
 # 本番
-STACK_NAME=translate-line-bot-prod STAGE=prod PROFILE=line-translate-bot GEMINI_MODEL=gemini-2.5-flash ./scripts/deploy.sh
+STACK_NAME=translate-line-bot-prod STAGE=prod PROFILE=line-translate-bot ./scripts/deploy.sh
 ```
 
 Jev（TypeSafe）の API キーは SSM SecureString に置きます。`scripts/deploy.sh` は `STAGE` を次の既存名へ対応させ、`TypesafeApiKeySsmParameter` として SAM に渡します。`TYPESAFE_API_KEY_SSM_PARAMETER` で上書きできますが、Lambda が読めるのは `/kotori/<STAGE>/` 配下だけなので、その中で指定します。
@@ -324,7 +324,7 @@ sam deploy \
     StageName=stg \
     FunctionMemorySize=512 \
     FunctionTimeout=60 \
-    GeminiModel=gemini-2.5-flash \
+    GeminiModel=gemini-3.5-flash-lite \
     MaxContextMessages=8 \
     TranslationRetry=2 \
     RuntimeSecretArn=stg/line-translate-bot-secrets \
@@ -362,6 +362,7 @@ STACK_NAME=translate-line-bot-prod STAGE=prod PROFILE=line-translate-bot ./scrip
 - `PROFILE` (既定: line-translate-bot)
 - `REGION` (既定: ap-northeast-1)
 - `STAGE` (既定: stg。`stg` または `prod`。TypeSafe キーの SSM 名は上記の対応表)
+- `GEMINI_MODEL`（未設定なら `scripts/gemini_model_default.sh` の既定 `gemini-3.5-flash-lite`。空文字はデプロイを止める）
 - `TYPESAFE_API_KEY_SSM_PARAMETER`（既定: `STAGE=stg` なら `/kotori/stg/typesafe-api-key`、`STAGE=prod` なら `/kotori/prod/typesafe-api-key`）
 - `S3_BUCKET`（未指定なら `--resolve-s3` で自動バケット利用）
 - `RUNTIME_SECRET_ARN` ほか Lambda パラメータ
