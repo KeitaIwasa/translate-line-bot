@@ -1457,52 +1457,54 @@ class MessageHandler:
 
         self._log_translation_stage("before_translation_run", started, event.group_id)
 
-        flow = self._translation_flow.run(
-            event=event,
-            sender_name=sender_name,
-            candidate_languages=candidate_languages,
-            stop_translation_on_limit=stop_translation_on_limit,
-            limit=limit,
-            plan_key=plan_key,
-            period_start=runtime.period_start,
-            period_end=runtime.period_end,
-            quota_anchor_day=runtime.quota_anchor_day,
-            prefetched_messages=messages_future,
-        )
-        self._log_translation_stage("after_translation_run", started, event.group_id)
-
-        if self._handle_blocked_translation_flow(event, flow, period_end=runtime.period_end):
-            return True
-
-        if flow.reply_text:
-            self._reply_translation_result(
+        # claim と停止解除は、翻訳と LINE 送信が終わるまで仮の状態。
+        # ここで戻さないと、Gemini のタイムアウトのあとリセット案内をやり直せない。
+        try:
+            flow = self._translation_flow.run(
                 event=event,
-                flow=flow,
-                language_limit=language_limit,
-                removed_languages=removed_languages,
+                sender_name=sender_name,
+                candidate_languages=candidate_languages,
+                stop_translation_on_limit=stop_translation_on_limit,
                 limit=limit,
                 plan_key=plan_key,
+                period_start=runtime.period_start,
                 period_end=runtime.period_end,
-                quota_reset=quota_reset,
+                quota_anchor_day=runtime.quota_anchor_day,
+                prefetched_messages=messages_future,
             )
-            self._maybe_upsert_deferred_display_name(event, deferred_display_name)
-            self._log_translation_stage("after_line_reply", started, event.group_id)
-        elif self._reset_notice_to_send(quota_reset):
-            try:
+            self._log_translation_stage("after_translation_run", started, event.group_id)
+
+            if self._handle_blocked_translation_flow(event, flow, period_end=runtime.period_end):
+                return True
+
+            if flow.reply_text:
+                self._reply_translation_result(
+                    event=event,
+                    flow=flow,
+                    language_limit=language_limit,
+                    removed_languages=removed_languages,
+                    limit=limit,
+                    plan_key=plan_key,
+                    period_end=runtime.period_end,
+                    quota_reset=quota_reset,
+                )
+                self._maybe_upsert_deferred_display_name(event, deferred_display_name)
+                self._log_translation_stage("after_line_reply", started, event.group_id)
+            elif self._reset_notice_to_send(quota_reset):
                 self._reply_text(event, quota_reset.notice)
-            except Exception:
-                self._rollback_quota_reset(event.group_id or "", quota_reset)
-                raise
-            self._maybe_upsert_deferred_display_name(event, deferred_display_name)
-            self._log_translation_stage("after_line_reply", started, event.group_id)
-        else:
-            logger.warning(
-                "Translation finished without reply text | group=%s candidates=%s plan=%s period=%s",
-                event.group_id,
-                candidate_languages,
-                plan_key,
-                flow.decision.period_key,
-            )
+                self._maybe_upsert_deferred_display_name(event, deferred_display_name)
+                self._log_translation_stage("after_line_reply", started, event.group_id)
+            else:
+                logger.warning(
+                    "Translation finished without reply text | group=%s candidates=%s plan=%s period=%s",
+                    event.group_id,
+                    candidate_languages,
+                    plan_key,
+                    flow.decision.period_key,
+                )
+        except Exception:
+            self._rollback_quota_reset(event.group_id or "", quota_reset)
+            raise
 
         return True
 
@@ -1761,7 +1763,12 @@ class MessageHandler:
 
         approaching_claimed = False
         approaching_period_key = flow.decision.period_key
+        # 送信が成功するまで通知済みにしない。失敗した周期は次の投稿でやり直す。
+        limit_notice_period: str | None = None
         if flow.decision.should_notify:
+            # 案内の組み立ては失敗しうる。停止理由はそれより先に残す。
+            if stop_translation_on_quota(plan_key):
+                self._pause_translation_for_quota(event.group_id)
             notice_text, notice_url = self._build_limit_reached_notice_text(
                 event.group_id,
                 flow.decision.plan_key,
@@ -1769,13 +1776,9 @@ class MessageHandler:
                 period_key=flow.decision.period_key,
                 period_end=period_end,
             )
-            self._repo.set_limit_notice_plan(event.group_id, flow.decision.period_key, plan_key)
-            # 50件目は allowed のまま停止案内だけ出す。ここで理由を残さないと、
-            # 次の投稿までの再開・停止メンションが手動停止になり、翌月の自動再開が外れる。
-            if stop_translation_on_quota(plan_key):
-                self._pause_translation_for_quota(event.group_id)
             messages.append({"type": "text", "text": notice_text})
             self._append_plan_link(messages, notice_url)
+            limit_notice_period = flow.decision.period_key
         elif self._should_send_approaching_notice(plan_key, limit, flow.decision.usage):
             group_id = event.group_id or ""
             if self._claim_approaching_notice(group_id, approaching_period_key):
@@ -1802,14 +1805,23 @@ class MessageHandler:
         try:
             if len(messages) == 1 and messages[0].get("type") == "text":
                 self._reply_text(event, messages[0].get("text"), normalize_lists=False)
-                return
-            self._reply_messages(event, messages)
+            else:
+                self._reply_messages(event, messages)
         except Exception:
             if approaching_claimed:
                 self._release_approaching_notice(event.group_id or "", approaching_period_key)
             if quota_reset is not None:
                 self._rollback_quota_reset(event.group_id or "", quota_reset)
             raise
+        if limit_notice_period is not None:
+            # 送信済みの案内を、記録の失敗で未送信扱いに戻さない。
+            try:
+                self._repo.set_limit_notice_plan(event.group_id, limit_notice_period, plan_key)
+            except Exception:
+                logger.warning(
+                    "Failed to record limit notice plan",
+                    extra={"group_id": event.group_id, "period_key": limit_notice_period},
+                )
 
     def _maybe_upsert_deferred_display_name(
         self,

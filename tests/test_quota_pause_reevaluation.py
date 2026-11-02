@@ -89,6 +89,11 @@ class _SubscriptionRepo:
         if enabled:
             self.paused_reason = None
 
+    def set_translation_pause_state(self, _group_id, *, enabled, reason):
+        self.enable_calls += 1
+        self.enabled = enabled
+        self.paused_reason = reason
+
     def get_renewal_reservation(self, _group_id):
         return (False, None, None, None, None, None, None, None)
 

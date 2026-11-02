@@ -267,6 +267,14 @@ def _already_applied_checks() -> Dict[str, str]:
                   AND column_name = 'quota_reset_notice_sent'
               )
         """,
+        "20261102_allow_billing_pause_reason.sql": """
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_constraint
+                WHERE conname = 'chk_translation_paused_reason'
+                  AND pg_get_constraintdef(oid) ILIKE '%billing%'
+            )
+        """,
     }
 
 

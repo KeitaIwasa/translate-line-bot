@@ -903,6 +903,35 @@ class NeonMessageRepository(MessageRepositoryPort):
                 extra={"group_id": group_id},
             )
 
+    def set_translation_pause_state(self, group_id: str, *, enabled: bool, reason: Optional[str]) -> None:
+        """停止フラグと理由を同じ文で書く。理由の種類は呼び出し側の遷移が決める。"""
+
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO group_settings (group_id, translation_enabled, translation_paused_reason, updated_at)
+                    VALUES (%s, %s, %s, NOW())
+                    ON CONFLICT (group_id)
+                    DO UPDATE SET
+                        translation_enabled = EXCLUDED.translation_enabled,
+                        translation_paused_reason = EXCLUDED.translation_paused_reason,
+                        updated_at = NOW()
+                    """,
+                    (group_id, enabled, reason),
+                )
+            self._invalidate_group_runtime(group_id)
+        except errors.CheckViolation:
+            # billing を許す制約が未適用の間は、手動停止と区別できないので書かない。
+            logger.warning(
+                "translation_paused_reason rejected; apply the billing pause migration",
+                extra={"group_id": group_id, "reason": reason},
+            )
+        except errors.UndefinedColumn:
+            self.set_translation_enabled(group_id, enabled)
+        except errors.UndefinedTable:
+            logger.warning("group_settings table missing; skip persisting pause state", extra={"group_id": group_id})
+
     def set_translation_paused_by_quota(self, group_id: str) -> None:
         try:
             with self._client.cursor() as cur:
