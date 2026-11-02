@@ -598,8 +598,8 @@ def test_uncertain_message_language_leaves_ack_for_the_handler_to_translate():
 
     assert gemini._session.calls == []
     assert "en" in repo.languages
-    # 追加後の言語を固定文で返す。英語の確認文へ固定しない
-    assert line.last_text == "日本語・英語になったよ"
+    # 追加後の言語を固定文で返す。英語の確認文だけに固定しない
+    assert "日本語・英語になったよ" in (line.last_text or "")
     assert line.last_text != LANGUAGE_SETTINGS_ACK_BASE
 
 

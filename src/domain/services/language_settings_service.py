@@ -1,11 +1,24 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Dict, List, Sequence, Tuple
 
 from .. import models
 from ..ports import LanguagePreferencePort, MessageRepositoryPort
+from ...infra.jev_language_reader import LANGUAGE_NAMES
 from .interface_translation_service import InterfaceTranslationService
-from .language_mention import selection_prompt, ui_family, unsupported_prompt
+from .language_mention import (
+    enrollment_prompt,
+    exceeds_language_limit,
+    need_both_languages_prompt,
+    reply_family,
+    selection_prompt,
+    setup_confirmation,
+    stale_confirmation_notice,
+    ui_family,
+    unsupported_prompt,
+)
+from .plan_policy import FREE_PLAN, PRO_PLAN, language_limit_for, resolve_effective_plan
 from ...presentation.list_layout import normalize_inline_lists
 from ...presentation.reply_formatter import RTL_LANG_PREFIXES, _wrap_bidi_isolate, strip_source_echo
 
@@ -30,10 +43,18 @@ class LanguageSettingsService:
         try:
             result = self._pref.analyze(event.text)
         except Exception:  # pylint: disable=broad-except
-            return models.ReplyBundle(texts=[self._language_analysis_fallback()])
+            return models.ReplyBundle(
+                texts=[self._language_analysis_fallback()],
+                notice_kind="read_error",
+            )
 
-        if not result:
-            return models.ReplyBundle(texts=[self._language_analysis_fallback()])
+        # 読み取りが言語を返さなかったとき。通信失敗とは分け、設定の案内にする
+        if result is None:
+            family = reply_family(event.text or "", ())
+            return models.ReplyBundle(
+                texts=[enrollment_prompt(family)],
+                notice_kind="read_empty",
+            )
 
         supported = result.supported
         unsupported = result.unsupported
@@ -67,25 +88,38 @@ class LanguageSettingsService:
                 return models.ReplyBundle(messages=messages)
             return None
 
+        # 片側だけでは双方向に訳せない。確認ボタンで止まらず、もう一方を聞く
+        if len(limited_supported) == 1:
+            label = limited_supported[0].name or limited_supported[0].code
+            ask = need_both_languages_prompt([label], family=family)
+            if messages:
+                messages.append({"type": "text", "text": ask})
+                return models.ReplyBundle(messages=messages)
+            return models.ReplyBundle(texts=[ask[:5000]])
+
         prompt_texts = self._prepare_language_prompt_texts(limited_supported, result)
-        confirm_payload = self._encode_postback_payload(
-            {
-                "kind": "language_confirm",
-                "action": "confirm",
-                "languages": [{"code": lang.code, "name": lang.name} for lang in limited_supported],
-                "primary_language": prompt_texts["primary_language"],
-                "completion_text": prompt_texts["completion_text"],
-                "limit_text": self._build_language_limit_message(result.primary_language, max_languages=limit),
-            }
-        )
-        cancel_payload = self._encode_postback_payload(
-            {
-                "kind": "language_confirm",
-                "action": "cancel",
-                "primary_language": prompt_texts["primary_language"],
-                "cancel_text": prompt_texts["cancel_text"],
-            }
-        )
+        # ボタンには、この確認を開いたときの世代を載せる。保存のあとでは一致しない
+        stamp = self._repo.record_language_prompt(event.group_id)
+        confirm_body = {
+            "kind": "language_confirm",
+            "action": "confirm",
+            "languages": [{"code": lang.code, "name": lang.name} for lang in limited_supported],
+            "primary_language": prompt_texts["primary_language"],
+            "completion_text": prompt_texts["completion_text"],
+            "limit_text": self._build_language_limit_message(result.primary_language, max_languages=limit),
+        }
+        if isinstance(stamp, str) and stamp:
+            confirm_body["issued_at"] = stamp
+        confirm_payload = self._encode_postback_payload(confirm_body)
+        cancel_body = {
+            "kind": "language_confirm",
+            "action": "cancel",
+            "primary_language": prompt_texts["primary_language"],
+            "cancel_text": prompt_texts["cancel_text"],
+        }
+        if isinstance(stamp, str) and stamp:
+            cancel_body["issued_at"] = stamp
+        cancel_payload = self._encode_postback_payload(cancel_body)
 
         template_message = {
             "type": "template",
@@ -101,7 +135,6 @@ class LanguageSettingsService:
         }
 
         messages.append(template_message)
-        self._repo.record_language_prompt(event.group_id)
         self._repo.set_translation_enabled(event.group_id, False)
         return models.ReplyBundle(messages=messages)
 
@@ -114,6 +147,8 @@ class LanguageSettingsService:
         completion_text: str | None = None,
         limit_text: str | None = None,
         max_languages: int | None = None,
+        settings_url: str = "",
+        issued_at: str | None = None,
     ) -> models.ReplyBundle | None:
         limit = self._resolved_limit(max_languages)
         tuples = self._dedup_languages(languages)
@@ -123,17 +158,39 @@ class LanguageSettingsService:
             warning = limit_text or selection_prompt(labels, family=family, limit=limit)
             return models.ReplyBundle(texts=[warning])
 
-        completed = self._repo.try_complete_group_languages(group_id, tuples)
+        complete_kwargs = {}
+        if issued_at is not None:
+            complete_kwargs["issued_at"] = issued_at
+        completed = self._repo.try_complete_group_languages(group_id, tuples, **complete_kwargs)
+        status = getattr(completed, "status", "applied" if completed else "duplicate")
+        if status == "stale":
+            notice = stale_confirmation_notice(
+                self._saved_language_codes(group_id, primary_language),
+                translate=self._interface_translate(),
+            )
+            return models.ReplyBundle(texts=[notice], notice_kind="stale")
         if not completed:
             return None
         self._repo.set_translation_enabled(group_id, True)
 
-        base_text = completion_text or self._build_completion_message(tuples)
-        text = self._build_multilingual_completion_message(base_text, tuples)
+        # ボタンに入っていた completion_text は使わない。言語ごとに一度ずつ出す。
+        # リンクは呼び出し側が今発行したトークン。
+        del completion_text
+        text = setup_confirmation(tuples, url=settings_url or "", translate=self._interface_translate())
         return models.ReplyBundle(texts=[text])
 
-    def cancel(self, *, group_id: str, primary_language: str, cancel_text: str | None = None) -> models.ReplyBundle | None:
-        cancelled = self._repo.try_cancel_language_prompt(group_id)
+    def cancel(
+        self,
+        *,
+        group_id: str,
+        primary_language: str,
+        cancel_text: str | None = None,
+        issued_at: str | None = None,
+    ) -> models.ReplyBundle | None:
+        cancel_kwargs = {}
+        if issued_at is not None:
+            cancel_kwargs["issued_at"] = issued_at
+        cancelled = self._repo.try_cancel_language_prompt(group_id, **cancel_kwargs)
         if not cancelled:
             return None
         self._repo.set_translation_enabled(group_id, False)
@@ -176,6 +233,21 @@ class LanguageSettingsService:
             return base
         translated = self._translate_template(base, instruction_lang, force=True)
         return translated or base
+
+    def _interface_translate(self):
+        translate = getattr(self._interface_translation, "translate", None)
+        return translate if callable(translate) else None
+
+    def _saved_language_codes(self, group_id: str, primary_language: str) -> list[str]:
+        try:
+            rows = self._repo.fetch_group_languages(group_id) or []
+        except Exception:
+            rows = []
+        codes = [(code or "").strip().lower() for code in rows if code]
+        if codes:
+            return codes
+        primary = (primary_language or "").strip().lower()
+        return [primary] if primary else []
 
     def _resolved_limit(self, max_languages: int | None) -> int:
         if max_languages is None:
@@ -420,3 +492,86 @@ class LanguageSettingsService:
             "Sorry, I couldn't detect your languages. Please resend after a few seconds (e.g., English, 日本語, 中文, ไทย).\n"
             "ขออภัย ไม่สามารถระบุภาษาได้ กรุณาลองส่งมาใหม่อีกครั้ง (ตัวอย่าง: English, 日本語, 中文, ไทย)"
         )
+
+
+@dataclass(frozen=True)
+class CatalogSelection:
+    """ウェブの言語選択。error があるときは保存しない。"""
+
+    languages: tuple[tuple[str, str], ...]
+    error: str | None
+    unsupported: tuple[str, ...]
+
+
+def normalize_catalog_selection(
+    codes: Sequence[str],
+    *,
+    limit: int,
+    already: Sequence[str] = (),
+) -> CatalogSelection:
+    """チャットと同じ上限で、対応言語の選択を検証する。
+
+    重複は一つにまとめる。未対応コードが一つでもあれば全体を保存しない。
+    空の選択も保存しない。上限を超えた選択は一部だけ採用しない。
+    すでにグループへ入っているコードは、カタログ外でも残せる。
+    """
+
+    resolved_limit = 1 if limit < 1 else limit
+    allowed_existing = {(code or "").strip().lower() for code in already if (code or "").strip()}
+    seen: set[str] = set()
+    languages: list[tuple[str, str]] = []
+    unsupported: list[str] = []
+    for raw in codes:
+        code = (raw or "").strip().lower()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        if code in LANGUAGE_NAMES:
+            languages.append((code, LANGUAGE_NAMES[code]))
+            continue
+        if code in allowed_existing:
+            languages.append((code, code))
+            continue
+        unsupported.append(code)
+
+    selected = tuple(languages)
+    if unsupported:
+        return CatalogSelection(languages=selected, error="unsupported", unsupported=tuple(unsupported))
+    if not selected:
+        return CatalogSelection(languages=(), error="empty", unsupported=())
+    if len(selected) < 2:
+        return CatalogSelection(languages=selected, error="need_pair", unsupported=())
+    if exceeds_language_limit([code for code, _name in selected], limit=resolved_limit):
+        return CatalogSelection(languages=selected, error="too_many", unsupported=())
+    return CatalogSelection(languages=selected, error=None, unsupported=())
+
+
+def resolve_group_language_limit(repo: MessageRepositoryPort, group_id: str) -> int:
+    """チャットのメンション更新と同じ有効プランの言語上限。"""
+
+    status, entitlement = _read_group_plan(repo, group_id)
+    plan = resolve_effective_plan(status, entitlement)
+    if status in {"active", "trialing"} and plan == FREE_PLAN:
+        plan = PRO_PLAN
+    return language_limit_for(plan)
+
+
+def _read_group_plan(repo: MessageRepositoryPort, group_id: str) -> tuple[str | None, str | None]:
+    runtime_fetcher = getattr(repo, "fetch_translation_runtime_state", None)
+    if runtime_fetcher:
+        try:
+            runtime = runtime_fetcher(group_id)
+            return getattr(runtime, "subscription_status", None), getattr(runtime, "entitlement_plan", None)
+        except Exception:
+            pass
+
+    plan_fetcher = getattr(repo, "get_subscription_plan", None)
+    if plan_fetcher:
+        try:
+            row = plan_fetcher(group_id)
+            status = row[0] if row else None
+            entitlement = row[1] if row and len(row) > 1 else None
+            return status, entitlement
+        except Exception:
+            pass
+    return None, None
