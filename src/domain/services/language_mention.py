@@ -805,6 +805,39 @@ def settings_page_line(family: str, url: str) -> str:
     return f"{settings_anytime_sentence(family)}\n{url}"
 
 
+def group_language_copy(
+    codes: Sequence[str],
+    *,
+    english: str,
+    static: dict[str, str],
+    url: str = "",
+    translate=None,
+) -> str:
+    """英語原文をグループの各言語へ一度ずつ出す。
+
+    ja/zh/ko/th は固定文。それ以外は translate。リンクは翻訳文の外に一度だけ添える。
+    リンクがあるときだけ「いつでも変えられる」を各言語の本文に足す。
+    """
+
+    static_blocks: dict[str, str] = {}
+    for family in ("ja", "zh", "ko", "th"):
+        body = (static.get(family) or "").strip()
+        note = settings_anytime_sentence(family) if url else ""
+        static_blocks[family] = "\n".join(part for part in (body, note) if part)
+    english_body = (english or "").strip()
+    if url:
+        english_body = "\n".join(part for part in (english_body, settings_anytime_sentence("en")) if part)
+    text = texts_for_group_languages(
+        codes,
+        english=english_body,
+        static=static_blocks,
+        translate=translate,
+    )
+    if url:
+        return f"{text}\n\n{url}" if text else url
+    return text
+
+
 def setup_confirmation(
     pairs: Sequence[tuple[str, str]],
     *,
@@ -819,20 +852,14 @@ def setup_confirmation(
     """
 
     codes = [code for code, _name in pairs if code]
-    english_lines = [completion_prompt(pairs, family="en")]
-    static: dict[str, str] = {}
-    for family in ("ja", "zh", "ko", "th"):
-        lines = [completion_prompt(pairs, family=family)]
-        if url:
-            lines.append(settings_anytime_sentence(family))
-        static[family] = "\n".join(line for line in lines if line)
-    if url:
-        english_lines.append(settings_anytime_sentence("en"))
-    english = "\n".join(line for line in english_lines if line)
-    text = texts_for_group_languages(codes, english=english, static=static, translate=translate)
-    if url:
-        return f"{text}\n\n{url}" if text else url
-    return text
+    static = {family: completion_prompt(pairs, family=family) for family in ("ja", "zh", "ko", "th")}
+    return group_language_copy(
+        codes,
+        english=completion_prompt(pairs, family="en"),
+        static=static,
+        url=url,
+        translate=translate,
+    )
 
 
 def need_both_languages_prompt(names: Sequence[str], *, family: str) -> str:
@@ -1168,8 +1195,17 @@ def completion_prompt(pairs: Sequence[tuple[str, str]], *, family: str) -> str:
     return f"{_english_join(names)} have been set as the translation languages."
 
 
-def reply_family(text: str, group_languages: Sequence[str] = ()) -> str:
-    """返信の言語。本文から分かる言語、無ければグループの先頭、それも無ければ日本語。"""
+def reply_family(
+    text: str,
+    group_languages: Sequence[str] = (),
+    instruction_lang: str = "",
+) -> str:
+    """返信の言語。本文、グループの先頭、解決済みの指示言語、日本語、の順。
+
+    「英語、日本語」のようなかなの無い漢字は中国語と決めない。
+    簡体字の「英语」「日语」や「翻译」「换成」は中国語のまま。
+    指示言語は、本文もグループ言語も家族を決められないときだけ使う。
+    """
 
     detected = _detect_reply_family(text)
     if detected:
@@ -1178,7 +1214,29 @@ def reply_family(text: str, group_languages: Sequence[str] = ()) -> str:
         family = ui_family(code)
         if family:
             return family
+    hinted = _explicit_ui_family(instruction_lang)
+    # かなの無い「英語」を langdetect が zh とすることがある。本文が中国語と分かるときだけ zh
+    if hinted and hinted != "zh":
+        return hinted
     return "ja"
+
+
+def _explicit_ui_family(code: str) -> str:
+    """ja/zh/ko/th/en のコードだけ返す。fr などを en に丸めてグループ言語を潰さない。"""
+
+    lowered = (code or "").strip().lower().replace("_", "-")
+    if not lowered:
+        return ""
+    head = lowered.split("-", 1)[0]
+    if head in {"ja", "zh", "ko", "th", "en"}:
+        return head
+    return ""
+
+
+def needs_catalog_fallback(parsed: MentionRead) -> bool:
+    """ローカル解析にカタログ外の名前がある。未対応で確定せず propose へ渡す。"""
+
+    return bool(parsed.unsupported) or parsed.kind == "unsupported"
 
 
 _EXACT_REPLY_FAMILY = {
@@ -1223,7 +1281,8 @@ def _detect_reply_family(text: str) -> str:
         return "ko"
     if re.search(r"[\u0e00-\u0e7f]", raw):
         return "th"
-    if re.search(r"换成|換成|翻译|翻譯|语言|語言|设置|設置|请把|請把|英语|英語|日语|日語|中文", raw):
+    # 英語・日語は日本語でも書く。かなが無いだけで中国語にしない
+    if re.search(r"换成|換成|翻译|翻譯|语言|語言|设置|設置|请把|請把|英语|日语|中文", raw):
         return "zh"
     if re.search(r"[A-Za-z]", raw) and not re.search(r"[\u4e00-\u9fff]", raw):
         return "en"

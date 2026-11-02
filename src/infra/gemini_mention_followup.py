@@ -7,12 +7,11 @@ from pathlib import Path
 from typing import Any, List, Optional, Sequence
 
 import requests
-from requests import HTTPError
-
 from ..domain.models import CommandDecision, LanguageChoice
 from ..presentation.list_layout import normalize_inline_lists
 from ..domain.services.explicit_language_reset import allows_language_reset
 from .gemini_generation_config import build_generation_config
+from .provider_failure import post_gemini
 
 logger = logging.getLogger(__name__)
 
@@ -188,16 +187,14 @@ class GeminiMentionFollowUp:
             ],
             "generationConfig": build_generation_config(self._model, schema),
         }
-        response = self._session.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent",
+        response = post_gemini(
+            self._session,
+            model=self._model,
+            url=f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent",
             params={"key": self._api_key},
-            json=payload,
+            payload=payload,
             timeout=self._timeout,
         )
-        try:
-            response.raise_for_status()
-        except HTTPError as exc:
-            raise RuntimeError(f"gemini_http_{response.status_code}") from exc
         body = response.json()
         try:
             part_text = body["candidates"][0]["content"]["parts"][0]["text"]

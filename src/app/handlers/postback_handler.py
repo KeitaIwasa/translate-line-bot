@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Tuple
 
 from ...domain import models
 from ...domain.ports import LinePort, MessageRepositoryPort
@@ -12,10 +12,10 @@ from ...domain.services.current_languages_question import (
     current_languages_localized_text,
 )
 from ...domain.services.language_mention import (
+    group_language_copy,
     howto_prompt,
     language_quick_replies,
     menu_family,
-    settings_page_line,
 )
 from ...domain.services.language_settings_service import LanguageSettingsService
 from ...presentation.reply_formatter import strip_source_echo
@@ -147,16 +147,25 @@ class PostbackHandler:
             return
         action = event.data.split("=", 1)[1]
         records = self._language_records(event.group_id)
-        family = menu_family([code for code, _name in records])
+        codes = [code for code, _name in records if code]
+        family = menu_family(codes)
         url = self._language_settings_url(event.group_id, family)
         if action == "help":
-            text = howto_prompt(family=family)
+            english = howto_prompt(family="en")
+            static = {name: howto_prompt(family=name) for name in ("ja", "zh", "ko", "th")}
         else:
-            localized = current_languages_localized_text(records, family)
-            text = localized if localized is not None else current_languages_base_text(records)
-        line = settings_page_line(family, url)
-        if line:
-            text = f"{text}\n\n{line}"
+            english = current_languages_base_text(records)
+            static = {
+                name: current_languages_localized_text(records, name) or ""
+                for name in ("ja", "zh", "ko", "th")
+            }
+        text = group_language_copy(
+            codes,
+            english=english,
+            static=static,
+            url=url,
+            translate=self._interface_translate(),
+        )
         quick_reply = language_quick_replies(family, url)
         message = {"type": "text", "text": text[:5000], "quickReply": {"items": quick_reply}}
         reply_messages = getattr(self._line, "reply_messages", None)
@@ -164,6 +173,10 @@ class PostbackHandler:
             reply_messages(event.reply_token, [message])
             return
         self._line.reply_text(event.reply_token, message["text"])
+
+    def _interface_translate(self):
+        translate = getattr(self._interface_translation, "translate", None)
+        return translate if callable(translate) else None
 
     def _language_settings_url(self, group_id: str, family: str) -> str:
         builder = getattr(self._subscription_service, "create_language_settings_url", None)

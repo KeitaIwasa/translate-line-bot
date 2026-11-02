@@ -30,7 +30,8 @@ from ...domain.services.current_languages_question import (
     current_languages_localized_text,
     is_current_languages_question,
 )
-from ...infra.gemini_translation import GeminiRateLimitError
+from ...infra.gemini_errors import GeminiRateLimitError
+from ...infra.provider_failure import classify_provider_failure, record_provider_failure
 from ...presentation.list_layout import normalize_inline_lists
 from ...presentation.reply_formatter import (
     MAX_REPLY_LENGTH,
@@ -62,6 +63,7 @@ from ...domain.services.language_mention import (
     language_label,
     language_quick_replies,
     need_both_languages_prompt,
+    needs_catalog_fallback,
     read_mention,
     reply_family,
     settings_help_prompt,
@@ -349,11 +351,20 @@ class MessageHandler:
 
         try:
             self._process_group_message(event, start)
-        except GeminiRateLimitError:
+        except GeminiRateLimitError as exc:
+            # アダプタが記録済みならメトリクスは増えない。429 の利用者案内は従来どおり。
+            record_provider_failure(exc, dependency="gemini")
             logger.warning("Gemini rate limited; notifying user")
             self._send_rate_limit_notice(event)
-        except Exception:
-            logger.exception("Message handling failed")
+        except Exception as exc:
+            failure = record_provider_failure(exc)
+            # 再試行できない障害ではグループへ返信しない。案内文の翻訳も同じ依存先に当たる。
+            logger.exception(
+                "Message handling failed | error_class=%s dependency=%s status=%s",
+                failure.error_class,
+                failure.dependency,
+                failure.status,
+            )
         finally:
             if not start.legacy:
                 try:
@@ -617,7 +628,7 @@ class MessageHandler:
 
     def _attempt_language_enrollment(self, event: models.MessageEvent) -> bool:
         text = event.text or ""
-        family = reply_family(text, self._group_languages_for_reply(event.group_id))
+        family = self._reply_family_for(event.group_id, text)
         if text and is_nonlinguistic(text):
             self._reply_text(
                 event,
@@ -633,15 +644,26 @@ class MessageHandler:
             )
             return self._handle_local_mention(event, text, parsed, instruction)
         if parsed.kind in {"languages", "unsupported", "translate_all", "swap_unclear"}:
-            if self._enroll_from_local_parse(event, text, parsed, family):
+            # カタログ外は未対応や一部保存にせず、下の propose へ渡す
+            if not needs_catalog_fallback(parsed) and self._enroll_from_local_parse(event, text, parsed, family):
                 return True
-        plan_key = self._resolve_effective_plan_for_group(event.group_id)
+        return self._propose_language_enrollment(event)
+
+    def _propose_language_enrollment(self, event: models.MessageEvent, text: str | None = None) -> bool:
+        """既存の propose。カタログ外はここで Gemini へ戻る。"""
+
+        target = event
+        if text is not None and text != (event.text or ""):
+            target = replace(event, text=text)
+        plan_key = self._resolve_effective_plan_for_group(target.group_id)
         bundle = self._language_settings.propose(
-            event,
+            target,
             max_languages=language_limit_for(plan_key),
         )
         if not bundle:
             return False
+        source = target.text or ""
+        family = self._reply_family_for(event.group_id, source)
         if bundle.notice_kind == "read_empty":
             body = bundle.texts[0] if bundle.texts else enrollment_prompt(family)
             self._reply_with_language_menu(event, body, family)
@@ -992,15 +1014,20 @@ class MessageHandler:
                     group_languages=runtime.group_languages,
                 )
                 trace.log_stage("instruction_language_resolution", language_started)
-                handled = self._handle_local_mention(
-                    event,
-                    command_text,
-                    local,
-                    instruction_lang,
-                    command_trace=trace,
-                )
-                if handled:
-                    return True
+                # 未設定グループのカタログ外は、ローカル確定せず propose へ渡す
+                if needs_catalog_fallback(local) and not runtime.group_languages:
+                    if self._propose_language_enrollment(event, command_text):
+                        return True
+                else:
+                    handled = self._handle_local_mention(
+                        event,
+                        command_text,
+                        local,
+                        instruction_lang,
+                        command_trace=trace,
+                    )
+                    if handled:
+                        return True
 
             router_input = self._build_command_router_input(command_text, runtime)
             router_started = time.perf_counter()
@@ -1238,7 +1265,7 @@ class MessageHandler:
     ) -> bool:
         """モデルが取りこぼす言語設定・使い方を、固定文で返す。"""
 
-        family = reply_family(command_text, self._group_languages_for_reply(event.group_id))
+        family = self._reply_family_for(event.group_id, command_text, instruction_lang)
         limit = language_limit_for(self._resolve_effective_plan_for_group(event.group_id))
         if command_trace:
             command_trace.set_decision(
@@ -1337,8 +1364,18 @@ class MessageHandler:
         command_trace: _CommandTrace | None = None,
     ) -> bool:
         text = command_text or ""
-        family = reply_family(text, self._group_languages_for_reply(event.group_id))
+        family = self._reply_family_for(event.group_id, text, decision.instruction_language)
         parsed = read_mention(text)
+        # 未設定のカタログ外は、ここでも一部保存せず propose へ戻す
+        if needs_catalog_fallback(parsed) and not self._current_language_pairs(event.group_id):
+            if self._propose_language_enrollment(event, text):
+                return True
+            self._reply_text(
+                event,
+                self._with_settings_link(event.group_id, enrollment_prompt(family), family),
+                command_trace=command_trace,
+            )
+            return True
         # 絵文字だけ・数字だけでは、モデルが reset_all と返しても設定を消さない
         if text and is_nonlinguistic(text):
             self._reply_text(event, unrecognized_prompt(family), command_trace=command_trace)
@@ -1567,6 +1604,19 @@ class MessageHandler:
             except Exception:
                 logger.debug("Failed to fetch group language names", exc_info=True)
         return [(code, "") for code in self._group_languages_for_reply(group_id)]
+
+    def _reply_family_for(self, group_id: str, text: str, instruction_lang: str = "") -> str:
+        """本文で決まらなければグループ言語、それも無ければ指示言語。漢字だけの日本語は中国語にしない。"""
+
+        group_languages = self._group_languages_for_reply(group_id)
+        hinted = instruction_lang
+        if not hinted:
+            hinted = self._resolve_command_instruction_language(
+                text,
+                preferred="",
+                group_languages=group_languages,
+            )
+        return reply_family(text, group_languages, hinted)
 
     def _group_languages_for_reply(self, group_id: str) -> List[str]:
         try:
@@ -2490,8 +2540,9 @@ class MessageHandler:
         *,
         command_trace: _CommandTrace | None = None,
     ):
-        """翻訳系リトライ共通処理。"""
+        """翻訳系リトライ共通処理。認証・請求エラーは繰り返さない。"""
         last_error: Exception | None = None
+        last_failure = None
         for attempt in range(self._translation_retry):
             attempt_started = time.perf_counter()
             try:
@@ -2504,41 +2555,50 @@ class MessageHandler:
                         "success",
                     )
                 return result
-            except requests.exceptions.Timeout as exc:
-                if command_trace:
-                    command_trace.log_operation(
-                        label,
-                        attempt + 1,
-                        (time.perf_counter() - attempt_started) * 1000,
-                        "timeout",
-                    )
-                logger.warning(
-                    "%s timeout",
-                    label,
-                    extra={"attempt": attempt + 1, "timeout_seconds": timeout_seconds},
-                )
-                last_error = exc
             except Exception as exc:  # pylint: disable=broad-except
+                elapsed_ms = (time.perf_counter() - attempt_started) * 1000
+                failure = classify_provider_failure(exc, dependency="gemini")
+                last_failure = failure
+                outcome = "timeout" if isinstance(exc, requests.exceptions.Timeout) else "failed"
                 if command_trace:
-                    command_trace.log_operation(
+                    command_trace.log_operation(label, attempt + 1, elapsed_ms, outcome)
+                if isinstance(exc, requests.exceptions.Timeout):
+                    logger.warning(
+                        "%s timeout",
+                        label,
+                        extra={
+                            "attempt": attempt + 1,
+                            "timeout_seconds": timeout_seconds,
+                            "error_class": failure.error_class,
+                        },
+                    )
+                elif failure.retryable:
+                    logger.warning(
+                        "%s failed (attempt %s/%s) | error_class=%s status=%s",
                         label,
                         attempt + 1,
-                        (time.perf_counter() - attempt_started) * 1000,
-                        "failed",
+                        self._translation_retry,
+                        failure.error_class,
+                        failure.status,
                     )
-                if isinstance(exc, GeminiRateLimitError):
-                    last_error = exc
-                    break
-                logger.warning(
-                    "%s failed (attempt %s/%s)",
-                    label,
-                    attempt + 1,
-                    self._translation_retry,
-                )
+                else:
+                    logger.warning(
+                        "%s failed without retry | error_class=%s status=%s",
+                        label,
+                        failure.error_class,
+                        failure.status,
+                    )
                 last_error = exc
+                if not failure.retryable or attempt >= self._translation_retry - 1:
+                    break
             time.sleep(0.5 * (attempt + 1))
 
-        logger.error("%s failed after retries", label)
+        logger.error(
+            "%s failed after retries | error_class=%s status=%s",
+            label,
+            last_failure.error_class if last_failure else None,
+            last_failure.status if last_failure else None,
+        )
         if last_error:
             raise last_error
         return []
