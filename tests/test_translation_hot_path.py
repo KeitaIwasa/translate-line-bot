@@ -2,6 +2,7 @@ import json
 import threading
 from datetime import datetime, timezone
 
+import pytest
 from psycopg import errors
 
 from src.app.handlers.message_handler import MessageHandler
@@ -194,14 +195,15 @@ def test_missing_display_name_is_cached_shorter_than_a_known_name():
     assert len(_prefetch_queries(cursor)) == 2
 
 
-def test_prefetch_retries_once_when_the_connection_drops():
+def test_prefetch_does_not_retry_a_dropped_connection_itself():
+    # 接続のやり直しは NeonClient 側。リポジトリが同じ SELECT を繰り返さない。
     repo, cursor, _clock = _repo()
     cursor.fail_prefetch_times = 1
 
-    prefetch = repo.fetch_group_message_prefetch("group", "user")
+    with pytest.raises(errors.OperationalError):
+        repo.fetch_group_message_prefetch("group", "user")
 
-    assert prefetch.display_name == "Ann"
-    assert len(_prefetch_queries(cursor)) == 2
+    assert len(_prefetch_queries(cursor)) == 1
 
 
 def test_prefetch_falls_back_when_combined_query_is_unsupported(monkeypatch):

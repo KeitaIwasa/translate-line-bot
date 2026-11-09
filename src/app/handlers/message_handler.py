@@ -1414,11 +1414,12 @@ class MessageHandler:
             self._log_translation_stage("after_line_reply", started, event.group_id)
         else:
             logger.warning(
-                "Translation finished without reply text | group=%s candidates=%s plan=%s period=%s",
+                "Translation finished without reply text | group=%s candidates=%s plan=%s period=%s reason=%s",
                 event.group_id,
                 candidate_languages,
                 plan_key,
                 flow.decision.period_key,
+                getattr(flow, "empty_reason", "") or "unknown",
             )
 
         return True
