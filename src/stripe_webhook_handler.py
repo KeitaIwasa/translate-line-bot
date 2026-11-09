@@ -13,6 +13,14 @@ import requests
 from src.config import get_settings
 from src.domain.services.interface_translation_service import InterfaceTranslationService
 from src.domain.services.plan_policy import FREE_PLAN, PRO_PLAN
+from src.domain.services.quota_pause import (
+    PauseState,
+    effective_plan_key,
+    monthly_limit_for_plan,
+    pause_for_billing,
+    recover_pause,
+)
+from src.domain.services.quota_service import QuotaService
 from src.infra.gemini_translation import GeminiTranslationAdapter
 from src.infra.neon_client import get_client
 from src.infra.neon_repositories import NeonMessageRepository
@@ -90,8 +98,8 @@ def _handle_payment_succeeded(invoice: Dict[str, Any], event_created: Any) -> No
         return
 
     _sync_subscription(group_id, subscription, status_override=subscription.get("status"), event_created=event_created)
-    _set_translation_enabled(group_id, True)
-    _push_payment_confirmation(group_id)
+    if _recover_paid_access(group_id).enabled:
+        _push_payment_confirmation(group_id)
 
 
 def _handle_payment_failed(invoice: Dict[str, Any], event_created: Any) -> None:
@@ -105,7 +113,7 @@ def _handle_payment_failed(invoice: Dict[str, Any], event_created: Any) -> None:
         return
 
     _sync_subscription(group_id, subscription, status_override="unpaid", event_created=event_created)
-    _set_translation_enabled(group_id, False)
+    _apply_billing_failure(group_id)
 
 
 def _handle_subscription_deleted(subscription: Dict[str, Any], event_created: Any) -> None:
@@ -115,7 +123,7 @@ def _handle_subscription_deleted(subscription: Dict[str, Any], event_created: An
         return
 
     _sync_subscription(group_id, subscription, status_override="canceled", event_created=event_created)
-    _set_translation_enabled(group_id, False)
+    _apply_billing_failure(group_id)
 
 
 def _handle_subscription_updated(subscription: Dict[str, Any], event_created: Any) -> None:
@@ -126,7 +134,10 @@ def _handle_subscription_updated(subscription: Dict[str, Any], event_created: An
 
     status = subscription.get("status") or "active"
     _sync_subscription(group_id, subscription, status_override=status, event_created=event_created)
-    _set_translation_enabled(group_id, status in {"active", "trialing"})
+    if status in {"active", "trialing"}:
+        _recover_paid_access(group_id)
+    else:
+        _apply_billing_failure(group_id)
 
 
 def _handle_checkout_session_completed(session: Dict[str, Any], event_created: Any) -> None:
@@ -161,9 +172,11 @@ def _handle_checkout_session_completed(session: Dict[str, Any], event_created: A
 
     status = subscription.get("status") or "active"
     _sync_subscription(group_id, subscription, status_override=status, event_created=event_created)
-    _set_translation_enabled(group_id, status in {"active", "trialing"})
     if status in {"active", "trialing"}:
-        _push_payment_confirmation(group_id)
+        if _recover_paid_access(group_id).enabled:
+            _push_payment_confirmation(group_id)
+    else:
+        _apply_billing_failure(group_id)
 
 
 def _handle_renewal_setup_completed(session: Dict[str, Any]) -> None:
@@ -492,17 +505,85 @@ def _upsert_subscription(
     )
 
 
-def _set_translation_enabled(group_id: str, enabled: bool) -> None:
-    dsn = settings.neon_database_url
-    query_settings = """
-        INSERT INTO group_settings (group_id, translation_enabled, updated_at)
-        VALUES (%s, %s, NOW())
-        ON CONFLICT (group_id)
-        DO UPDATE SET translation_enabled = EXCLUDED.translation_enabled, updated_at = NOW()
-    """
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        with conn.cursor() as cur:
-            cur.execute(query_settings, (group_id, enabled))
+def _pause_snapshot(group_id: str) -> tuple[PauseState, int, int, str]:
+    """今の停止状態と、有効プランの使用量・上限。"""
+
+    repo = _get_repo()
+    runtime = repo.fetch_translation_runtime_state(group_id)
+    plan_key = effective_plan_key(runtime.subscription_status, runtime.entitlement_plan)
+    period_key = QuotaService(repo).compute_period_key(
+        plan_key=plan_key,
+        period_start=runtime.period_start,
+        period_end=runtime.period_end,
+        quota_anchor_day=runtime.quota_anchor_day,
+    )
+    usage = int(runtime.usage or 0)
+    if runtime.period_key and runtime.period_key != period_key:
+        try:
+            usage = int(repo.get_usage(group_id, period_key) or 0)
+        except Exception:
+            logger.debug("Failed to read usage for pause transition", exc_info=True)
+            usage = 0
+    limit = monthly_limit_for_plan(
+        plan_key,
+        free_quota=settings.free_quota_per_month,
+        standard_quota=settings.standard_quota_per_month,
+        pro_quota=settings.pro_quota_per_month,
+    )
+    state = PauseState(bool(runtime.translation_enabled), runtime.translation_paused_reason)
+    return state, usage, limit, plan_key
+
+
+def _write_pause_state(group_id: str, state: PauseState) -> None:
+    """遷移結果を一箇所で書く。enabled だけを変える SQL は使わない。"""
+
+    repo = _get_repo()
+    writer = getattr(repo, "set_translation_pause_state", None)
+    if callable(writer):
+        writer(group_id, enabled=state.enabled, reason=state.reason)
+        return
+    if state.reason == "quota" and not state.enabled:
+        pause = getattr(repo, "set_translation_paused_by_quota", None)
+        if callable(pause):
+            pause(group_id)
+            return
+    repo.set_translation_enabled(group_id, state.enabled)
+
+
+def _apply_billing_failure(group_id: str) -> None:
+    """課金停止。手動停止と quota 停止はそのまま。"""
+
+    current, _usage, _limit, plan_key = _pause_snapshot(group_id)
+    nxt = pause_for_billing(current)
+    if nxt == current:
+        return
+    _write_pause_state(group_id, nxt)
+    logger.info(
+        "Paused translation for billing | group=%s plan=%s from=%s to=%s",
+        group_id,
+        plan_key,
+        current.reason,
+        nxt.reason,
+    )
+
+
+def _recover_paid_access(group_id: str) -> PauseState:
+    """billing を外し、上限未満の quota 停止も外す。変わらなければ何も書かない。"""
+
+    current, usage, limit, plan_key = _pause_snapshot(group_id)
+    nxt = recover_pause(current, usage=usage, limit=limit)
+    if nxt == current:
+        return nxt
+    _write_pause_state(group_id, nxt)
+    logger.info(
+        "Recovered translation after subscription change | group=%s plan=%s usage=%s limit=%s reason=%s",
+        group_id,
+        plan_key,
+        usage,
+        limit,
+        current.reason,
+    )
+    return nxt
 
 
 def _push_payment_confirmation(group_id: str) -> None:
