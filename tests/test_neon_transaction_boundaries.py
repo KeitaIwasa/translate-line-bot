@@ -183,17 +183,6 @@ def test_single_statement_write_stays_on_autocommit_cursor():
     assert "last_prompted_at" in client.committed[0]
 
 
-class _PoolConnection:
-    def __init__(self, conn):
-        self.conn = conn
-
-    def __enter__(self):
-        return self.conn
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
-
-
 class _FakeConnection:
     def __init__(self, events, *, fail_second=False):
         self.events = events
@@ -240,10 +229,13 @@ class _FakeDriverCursor:
 def _client(monkeypatch, conn) -> NeonClient:
     class _Pool:
         def __init__(self, *args, **kwargs):
-            pass
+            self.max_size = kwargs.get("max_size", 4)
 
-        def connection(self):
-            return _PoolConnection(conn)
+        def getconn(self, timeout=None):
+            return conn
+
+        def putconn(self, _returned):
+            return None
 
     monkeypatch.setattr("src.infra.neon_client.ConnectionPool", _Pool)
     return NeonClient("postgres://user:secret@localhost/neondb")
