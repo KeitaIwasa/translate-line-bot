@@ -157,6 +157,97 @@ JAPANESE_LANGUAGE_NAMES = {
 
 UNKNOWN_LANGUAGE_NAME = "Unknown language"
 UNKNOWN_LANGUAGE_NAME_JA = "不明な言語"
+UNKNOWN_LANGUAGE_NAME_ZH = "未知语言"
+UNKNOWN_LANGUAGE_NAME_KO = "알 수 없는 언어"
+UNKNOWN_LANGUAGE_NAME_TH = "ภาษาที่ไม่รู้จัก"
+
+# 固定文の言語名。Gemini には渡さない。表に無いコードは英語名に戻す。
+_LOCAL_LANGUAGE_NAMES = {
+    "zh": {
+        "ar": "阿拉伯语",
+        "bn": "孟加拉语",
+        "de": "德语",
+        "en": "英语",
+        "es": "西班牙语",
+        "fr": "法语",
+        "hi": "印地语",
+        "id": "印尼语",
+        "it": "意大利语",
+        "ja": "日语",
+        "ko": "韩语",
+        "ms": "马来语",
+        "my": "缅甸语",
+        "ne": "尼泊尔语",
+        "pt": "葡萄牙语",
+        "ru": "俄语",
+        "sa": "梵语",
+        "th": "泰语",
+        "tl": "他加禄语",
+        "uk": "乌克兰语",
+        "vi": "越南语",
+        "zh": "中文",
+        "zh-cn": "中文",
+        "zh-tw": "繁体中文",
+    },
+    "ko": {
+        "ar": "아랍어",
+        "bn": "벵골어",
+        "de": "독일어",
+        "en": "영어",
+        "es": "스페인어",
+        "fr": "프랑스어",
+        "hi": "힌디어",
+        "id": "인도네시아어",
+        "it": "이탈리아어",
+        "ja": "일본어",
+        "ko": "한국어",
+        "ms": "말레이어",
+        "my": "미얀마어",
+        "ne": "네팔어",
+        "pt": "포르투갈어",
+        "ru": "러시아어",
+        "sa": "산스크리트어",
+        "th": "태국어",
+        "tl": "타갈로그어",
+        "uk": "우크라이나어",
+        "vi": "베트남어",
+        "zh": "중국어",
+        "zh-cn": "중국어",
+        "zh-tw": "번체 중국어",
+    },
+    "th": {
+        "ar": "อาหรับ",
+        "bn": "เบงกาลี",
+        "de": "เยอรมัน",
+        "en": "อังกฤษ",
+        "es": "สเปน",
+        "fr": "ฝรั่งเศส",
+        "hi": "ฮินดี",
+        "id": "อินโดนีเซีย",
+        "it": "อิตาลี",
+        "ja": "ญี่ปุ่น",
+        "ko": "เกาหลี",
+        "ms": "มลายู",
+        "my": "พม่า",
+        "ne": "เนปาล",
+        "pt": "โปรตุเกส",
+        "ru": "รัสเซีย",
+        "sa": "สันสกฤต",
+        "th": "ไทย",
+        "tl": "ตากาล็อก",
+        "uk": "ยูเครน",
+        "vi": "เวียดนาม",
+        "zh": "จีน",
+        "zh-cn": "จีน",
+        "zh-tw": "จีนตัวเต็ม",
+    },
+}
+
+_UNKNOWN_BY_FAMILY = {
+    "zh": UNKNOWN_LANGUAGE_NAME_ZH,
+    "ko": UNKNOWN_LANGUAGE_NAME_KO,
+    "th": UNKNOWN_LANGUAGE_NAME_TH,
+}
 
 # 2〜3文字や zh-tw のようなコードを、言語名として採用しない
 _CODE_TOKEN = re.compile(r"^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$")
@@ -168,9 +259,34 @@ def english_language_name(code: str, stored_name: str = "") -> str:
 
     normalized = _normalize_code(code)
     usable = _usable_stored_name(normalized, stored_name)
+    canonical = ENGLISH_LANGUAGE_NAMES.get(normalized, "")
+    if usable and canonical and usable.casefold() == canonical.casefold():
+        return canonical
     if usable:
         return usable
-    return ENGLISH_LANGUAGE_NAMES.get(normalized, UNKNOWN_LANGUAGE_NAME)
+    return canonical or UNKNOWN_LANGUAGE_NAME
+
+
+def localized_language_name(code: str, family: str, stored_name: str = "") -> str:
+    """ja/en/zh/ko/th の固定名。英語の保存名は表の名前に戻し、独自の保存名はそのまま使う。"""
+
+    if family == "ja":
+        return japanese_language_name(code, stored_name)
+    if family not in _LOCAL_LANGUAGE_NAMES:
+        return english_language_name(code, stored_name)
+    normalized = _normalize_code(code)
+    usable = _usable_stored_name(normalized, stored_name)
+    canonical = ENGLISH_LANGUAGE_NAMES.get(normalized, "")
+    japanese = JAPANESE_LANGUAGE_NAMES.get(normalized, "")
+    local = _LOCAL_LANGUAGE_NAMES[family].get(normalized)
+    # 英語名・日本語名は表の名前に戻す。表に無い独自の保存名だけ残す
+    if usable and usable.casefold() != canonical.casefold() and usable != japanese and usable != local:
+        return usable
+    if local:
+        return local
+    if canonical:
+        return canonical
+    return _UNKNOWN_BY_FAMILY[family]
 
 
 def japanese_language_name(code: str, stored_name: str = "") -> str:

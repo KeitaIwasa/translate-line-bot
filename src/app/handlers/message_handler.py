@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import logging
 import json
-import base64
-import zlib
 import re
 import time
 from dataclasses import dataclass, field, replace
@@ -53,22 +51,29 @@ from ...domain.services.translation_flow_service import TranslationFlowService
 from ...domain.services.explicit_language_reset import allows_language_reset
 from ...domain.services.language_mention import (
     MentionRead,
-    catalog_labels,
     catalog_prompt,
-    completion_prompt,
+    exceeds_language_limit,
+    enrollment_prompt,
     family_for,
+    group_language_copy,
     howto_prompt,
     is_howto_loop,
     is_nonlinguistic,
     language_label,
+    language_quick_replies,
+    menu_family,
+    need_both_languages_prompt,
+    needs_catalog_fallback,
     read_mention,
-    selection_prompt,
+    reply_family,
     settings_help_prompt,
-    swap_prompt,
+    settings_page_line,
+    setup_confirmation,
     unrecognized_prompt,
     unsupported_prompt,
 )
 from ...domain.services.language_settings_service import LanguageSettingsService
+from ...domain.services.language_update import LanguageUpdate, decide_language_update, language_group_state
 from ...domain.services.private_chat_support_service import PrivateChatSupportService
 from ...domain.services.plan_policy import (
     FREE_PLAN,
@@ -544,6 +549,7 @@ class MessageHandler:
         *,
         command_trace: _CommandTrace | None = None,
         normalize_lists: bool = True,
+        quick_reply: Sequence[dict] | None = None,
     ) -> bool:
         if not event.reply_token or not text:
             return False
@@ -551,6 +557,18 @@ class MessageHandler:
         # ユーザー翻訳は build_translation_reply 側で、原文に改行があるときだけ整える。
         reply_text = normalize_inline_lists(text) if normalize_lists else text
         reply_text = reply_text[:LINE_REPLY_TEXT_LIMIT]
+        if quick_reply:
+            return self._reply_messages(
+                event,
+                [
+                    {
+                        "type": "text",
+                        "text": reply_text,
+                        "quickReply": {"items": list(quick_reply)},
+                    }
+                ],
+                command_trace=command_trace,
+            )
         started = time.perf_counter()
         try:
             self._line.reply_text(event.reply_token, reply_text)
@@ -609,13 +627,47 @@ class MessageHandler:
         return True
 
     def _attempt_language_enrollment(self, event: models.MessageEvent) -> bool:
-        plan_key = self._resolve_effective_plan_for_group(event.group_id)
+        text = event.text or ""
+        family = self._reply_family_for(event.group_id, text)
+        if text and is_nonlinguistic(text):
+            self._reply_text(
+                event,
+                self._with_settings_link(event.group_id, unrecognized_prompt(family), family),
+            )
+            return True
+        parsed = read_mention(text)
+        if parsed.kind in {"settings_help", "howto", "catalog"}:
+            instruction = self._resolve_command_instruction_language(
+                text,
+                preferred="",
+                group_languages=[],
+            )
+            return self._handle_local_mention(event, text, parsed, instruction)
+        if parsed.kind in {"languages", "unsupported", "translate_all", "swap_unclear"}:
+            # カタログ外は未対応や一部保存にせず、下の propose へ渡す
+            if not needs_catalog_fallback(parsed) and self._enroll_from_local_parse(event, text, parsed, family):
+                return True
+        return self._propose_language_enrollment(event)
+
+    def _propose_language_enrollment(self, event: models.MessageEvent, text: str | None = None) -> bool:
+        """既存の propose。カタログ外はここで Gemini へ戻る。"""
+
+        target = event
+        if text is not None and text != (event.text or ""):
+            target = replace(event, text=text)
+        plan_key = self._resolve_effective_plan_for_group(target.group_id)
         bundle = self._language_settings.propose(
-            event,
+            target,
             max_languages=language_limit_for(plan_key),
         )
         if not bundle:
             return False
+        source = target.text or ""
+        family = self._reply_family_for(event.group_id, source)
+        if bundle.notice_kind == "read_empty":
+            body = bundle.texts[0] if bundle.texts else enrollment_prompt(family)
+            self._reply_with_language_menu(event, body, family)
+            return True
         if bundle.messages:
             self._reply_messages(event, list(bundle.messages))
         elif bundle.texts:
@@ -625,6 +677,268 @@ class MessageHandler:
             extra={"group_id": event.group_id, "user_id": event.user_id},
         )
         return True
+
+    def _enroll_from_local_parse(
+        self,
+        event: models.MessageEvent,
+        text: str,
+        parsed: MentionRead,
+        family: str,
+    ) -> bool:
+        """はっきり読めた言語は、確認ボタンを挟まず保存して一度だけ伝える。"""
+
+        limit = language_limit_for(self._resolve_effective_plan_for_group(event.group_id))
+        if parsed.kind not in {"translate_all", "unsupported", "languages", "swap_unclear"}:
+            return False
+        update = decide_language_update(
+            mode=parsed.mode,
+            current=self._current_language_pairs(event.group_id),
+            requested=parsed.languages,
+            limit=limit,
+            family=family,
+            kind=parsed.kind,
+            unsupported=parsed.unsupported,
+            swap_from=parsed.swap_from,
+            swap_to=parsed.swap_to,
+        )
+        # 削除や不明を置換として保存しない。propose へ落とすと、また言語として読まれる
+        return self._dispatch_language_update(
+            event,
+            update,
+            family,
+            parsed.unsupported,
+            source="enroll",
+        )
+
+    def _current_language_pairs(self, group_id: str) -> List[Tuple[str, str]]:
+        return [(code, name) for code, name in self._group_language_records(group_id) if code]
+
+    def _dispatch_language_update(
+        self,
+        event: models.MessageEvent,
+        update: LanguageUpdate,
+        family: str,
+        unsupported: Sequence[str] = (),
+        *,
+        source: str,
+        instruction_lang: str = "",
+        command_trace: _CommandTrace | None = None,
+    ) -> bool:
+        """決定どおりに返す。未知の action は保存せず失敗させる。"""
+
+        if update.action == "reset":
+            self._repo.reset_group_language_settings(event.group_id)
+            self._repo.set_translation_enabled(event.group_id, False)
+            ack = self._translate_template(
+                "Your language settings have been reset. Please tell us all the languages ​​you would like to translate.",
+                instruction_lang,
+                command_trace=command_trace,
+            )
+            self._reply_text(
+                event,
+                self._with_settings_link(event.group_id, ack, family),
+                command_trace=command_trace,
+            )
+            return True
+        if update.action == "show":
+            return self._handle_show_languages(
+                event,
+                instruction_lang,
+                command_trace=command_trace,
+            )
+        if update.action == "noop":
+            raise ValueError("language update produced no reply")
+        if update.action == "reply":
+            if update.enable_translation is False:
+                self._repo.set_translation_enabled(event.group_id, False)
+            self._reply_language_update(
+                event,
+                update,
+                family,
+                unsupported,
+                source=source,
+                instruction_lang=instruction_lang,
+                command_trace=command_trace,
+            )
+            return True
+        if update.action != "save":
+            raise ValueError(f"unknown language update action: {update.action}")
+
+        if source == "enroll" and update.write == "replace":
+            # 保存できないリポジトリは、確認ボタンの propose に戻す
+            if not self._persist_enrollment_languages(event.group_id, update.languages):
+                return False
+        else:
+            try:
+                self._write_language_update(event.group_id, update)
+            except AttributeError:
+                if source == "enroll":
+                    return False
+                raise
+            if update.enable_translation is True:
+                self._repo.set_translation_enabled(event.group_id, True)
+            elif update.enable_translation is False:
+                self._repo.set_translation_enabled(event.group_id, False)
+        pairs = self._confirmation_pairs(event.group_id, update.languages)
+        ack = setup_confirmation(
+            pairs,
+            url=self._language_settings_url(event.group_id, ""),
+            translate=self._group_copy_translate(),
+        )
+        notice = unsupported_prompt(unsupported, family)
+        if notice:
+            if source == "settings":
+                notice = self._localize_fixed_reply(
+                    notice,
+                    family=family,
+                    instruction_lang=instruction_lang,
+                    command_trace=command_trace,
+                )
+            ack = f"{ack}\n{notice}"
+        self._reply_text(event, ack, command_trace=command_trace)
+        return True
+
+    def _reply_language_update(
+        self,
+        event: models.MessageEvent,
+        update: LanguageUpdate,
+        family: str,
+        unsupported: Sequence[str],
+        *,
+        source: str,
+        instruction_lang: str,
+        command_trace: _CommandTrace | None,
+    ) -> None:
+        text = update.reply or ""
+        extra = unsupported_prompt(unsupported, family)
+        if extra and extra not in text:
+            text = f"{extra}\n{text}" if text else extra
+        if source == "settings" and text:
+            text = self._localize_fixed_reply(
+                text,
+                family=family,
+                instruction_lang=instruction_lang,
+                command_trace=command_trace,
+            )
+        if not text:
+            raise ValueError("language update produced no reply")
+        # 未設定の削除、片側だけ、役割が合わない置換は、ページへのリンク付きで返す
+        if source == "enroll" or update.page_error in {"need_pair", "none_set", "not_set", "clarify"}:
+            self._reply_with_language_menu(event, text, family, command_trace=command_trace)
+            return
+        if update.page_error in {"too_many", "select"}:
+            self._reply_text(
+                event,
+                self._with_settings_link(event.group_id, text, family),
+                command_trace=command_trace,
+            )
+            return
+        self._reply_text(event, text, command_trace=command_trace)
+
+    def _write_language_update(self, group_id: str, update: LanguageUpdate) -> None:
+        """決定の write だけを実行する。未知の write は置換にしない。"""
+
+        if update.languages and exceeds_language_limit(
+            [code for code, _name in update.languages],
+            limit=self._max_group_languages,
+        ):
+            raise ValueError("language update exceeds the absolute cap")
+        if update.write == "none":
+            return
+        if update.write == "replace":
+            self._repo.replace_group_languages(group_id, update.languages)
+            return
+        if update.write == "add":
+            if update.added:
+                self._repo.add_group_languages(group_id, update.added)
+            return
+        if update.write == "remove":
+            if update.removed:
+                self._repo.remove_group_languages(group_id, update.removed)
+            return
+        if update.write == "apply":
+            self._repo.apply_language_changes(group_id, update.added, update.removed)
+            return
+        raise ValueError(f"unknown language write: {update.write}")
+
+    def _persist_enrollment_languages(self, group_id: str, pairs: Sequence[Tuple[str, str]]) -> bool:
+        completer = getattr(self._repo, "try_complete_group_languages", None)
+        if completer:
+            try:
+                if completer(group_id, pairs):
+                    self._repo.set_translation_enabled(group_id, True)
+                    return True
+            except Exception:
+                logger.debug("Failed to complete group languages", exc_info=True)
+        replacer = getattr(self._repo, "replace_group_languages", None)
+        if not replacer:
+            return False
+        replacer(group_id, pairs)
+        self._repo.set_translation_enabled(group_id, True)
+        return True
+
+    def _group_copy_translate(self):
+        """インターフェース翻訳。translate が無いスタブでは固定文のままにする。"""
+
+        translate = getattr(self._interface_translation, "translate", None)
+        return translate if callable(translate) else None
+
+    def _reply_setup_confirmation(
+        self,
+        event: models.MessageEvent,
+        pairs: Sequence[Tuple[str, str]],
+        family: str,
+        unsupported: Sequence[str] = (),
+    ) -> None:
+        url = self._language_settings_url(event.group_id, "")
+        ack = setup_confirmation(pairs, url=url, translate=self._group_copy_translate())
+        notice = unsupported_prompt(unsupported, family)
+        if notice:
+            ack = f"{ack}\n{notice}"
+        self._reply_text(event, ack)
+
+    def _reply_need_both(
+        self,
+        event: models.MessageEvent,
+        parsed: MentionRead,
+        family: str,
+        text: str,
+    ) -> None:
+        labels = [language_label(code, family, surface=surface) for code, surface in parsed.languages if code]
+        message = need_both_languages_prompt(labels, family=family)
+        notice = unsupported_prompt(parsed.unsupported, family)
+        if notice:
+            message = f"{notice}\n{message}"
+        message = self._localize_fixed_reply(
+            message,
+            family=family,
+            instruction_lang=family_for("", text),
+        )
+        self._reply_with_language_menu(event, message, family)
+
+    def _reply_with_language_menu(
+        self,
+        event: models.MessageEvent,
+        text: str,
+        family: str,
+        *,
+        command_trace: _CommandTrace | None = None,
+    ) -> None:
+        self._reply_text(
+            event,
+            self._with_settings_link(event.group_id, text, family),
+            command_trace=command_trace,
+            quick_reply=self._language_quick_replies(event.group_id, family),
+        )
+
+    def _language_quick_replies(self, group_id: str, family: str) -> list:
+        return language_quick_replies(family, self._language_settings_url(group_id, family))
+
+    @staticmethod
+    def _mention_language_name(code: str, surface: str) -> str:
+        if re.search(r"[ぁ-んァ-ン一-龯]", surface or ""):
+            return surface
+        return language_label(code, "en")
 
     # --- command mode helpers ---
     def _extract_command_text(self, event: models.MessageEvent) -> Optional[str]:
@@ -700,15 +1014,20 @@ class MessageHandler:
                     group_languages=runtime.group_languages,
                 )
                 trace.log_stage("instruction_language_resolution", language_started)
-                handled = self._handle_local_mention(
-                    event,
-                    command_text,
-                    local,
-                    instruction_lang,
-                    command_trace=trace,
-                )
-                if handled:
-                    return True
+                # 未設定グループのカタログ外は、ローカル確定せず propose へ渡す
+                if needs_catalog_fallback(local) and not runtime.group_languages:
+                    if self._propose_language_enrollment(event, command_text):
+                        return True
+                else:
+                    handled = self._handle_local_mention(
+                        event,
+                        command_text,
+                        local,
+                        instruction_lang,
+                        command_trace=trace,
+                    )
+                    if handled:
+                        return True
 
             router_input = self._build_command_router_input(command_text, runtime)
             router_started = time.perf_counter()
@@ -752,12 +1071,17 @@ class MessageHandler:
                     )
                 elif action == "howto":
                     message = (decision.ack_text or "").strip()
+                    howto_family = reply_family(command_text, runtime.group_languages)
                     # 「使い方を教えてと送って」でループさせず、その場で答える
                     if not message or is_howto_loop(message):
-                        message = howto_prompt(
-                            family=family_for(instruction_lang or decision.instruction_language, command_text)
-                        )
-                    handled = self._reply_text(event, message, command_trace=trace)
+                        message = howto_prompt(family=howto_family)
+                    message = self._with_settings_link(event.group_id, message, howto_family)
+                    handled = self._reply_text(
+                        event,
+                        message,
+                        command_trace=trace,
+                        quick_reply=self._language_quick_replies(event.group_id, howto_family),
+                    )
                 elif action == "pause":
                     self._repo.set_translation_enabled(event.group_id, False)
                     base_ack = "I will pause translation. Please mention me again when you want to resume."
@@ -941,7 +1265,7 @@ class MessageHandler:
     ) -> bool:
         """モデルが取りこぼす言語設定・使い方を、固定文で返す。"""
 
-        family = family_for(instruction_lang, command_text)
+        family = self._reply_family_for(event.group_id, command_text, instruction_lang)
         limit = language_limit_for(self._resolve_effective_plan_for_group(event.group_id))
         if command_trace:
             command_trace.set_decision(
@@ -952,19 +1276,44 @@ class MessageHandler:
             self._reply_text(event, catalog_prompt(family=family, limit=limit), command_trace=command_trace)
             return True
         if parsed.kind == "settings_help":
-            names = [
-                language_label(code, family, stored=stored)
+            records = [
+                (code, stored)
                 for code, stored in self._group_language_records(event.group_id)
                 if code
             ]
+
+            def labels(target: str) -> list[str]:
+                return [language_label(code, target, stored=stored) for code, stored in records]
+
+            text, button_family = self._copy_for_group_languages(
+                event.group_id,
+                family,
+                english=settings_help_prompt(labels("en"), family="en", limit=limit),
+                static={
+                    name: settings_help_prompt(labels(name), family=name, limit=limit)
+                    for name in ("ja", "zh", "ko", "th")
+                },
+            )
             self._reply_text(
                 event,
-                settings_help_prompt(names, family=family, limit=limit),
+                text,
                 command_trace=command_trace,
+                quick_reply=self._language_quick_replies(event.group_id, button_family),
             )
             return True
         if parsed.kind == "howto":
-            self._reply_text(event, howto_prompt(family=family), command_trace=command_trace)
+            text, button_family = self._copy_for_group_languages(
+                event.group_id,
+                family,
+                english=howto_prompt(family="en"),
+                static={name: howto_prompt(family=name) for name in ("ja", "zh", "ko", "th")},
+            )
+            self._reply_text(
+                event,
+                text,
+                command_trace=command_trace,
+                quick_reply=self._language_quick_replies(event.group_id, button_family),
+            )
             return True
         if parsed.kind == "unsupported":
             self._reply_text(
@@ -1012,12 +1361,14 @@ class MessageHandler:
                 languages_to_remove=choices,
                 instruction_language=instruction_lang,
             )
-        return models.CommandDecision(
-            action="language_settings",
-            operation="add",
-            languages_to_add=choices,
-            instruction_language=instruction_lang,
-        )
+        if parsed.mode == "add":
+            return models.CommandDecision(
+                action="language_settings",
+                operation="add",
+                languages_to_add=choices,
+                instruction_language=instruction_lang,
+            )
+        return models.CommandDecision(action="unknown", instruction_language=instruction_lang)
 
     def _handle_language_settings(
         self,
@@ -1028,163 +1379,150 @@ class MessageHandler:
         command_trace: _CommandTrace | None = None,
     ) -> bool:
         text = command_text or ""
-        family = family_for(decision.instruction_language, text)
+        family = self._reply_family_for(event.group_id, text, decision.instruction_language)
         parsed = read_mention(text)
+        # 未設定のカタログ外は、ここでも一部保存せず propose へ戻す
+        if needs_catalog_fallback(parsed) and not self._current_language_pairs(event.group_id):
+            if self._propose_language_enrollment(event, text):
+                return True
+            self._reply_text(
+                event,
+                self._with_settings_link(event.group_id, enrollment_prompt(family), family),
+                command_trace=command_trace,
+            )
+            return True
         # 絵文字だけ・数字だけでは、モデルが reset_all と返しても設定を消さない
         if text and is_nonlinguistic(text):
             self._reply_text(event, unrecognized_prompt(family), command_trace=command_trace)
             return True
-        plan_key = self._resolve_effective_plan_for_group(event.group_id)
-        language_limit = language_limit_for(plan_key)
-        # 上限を超える依頼は、全消去にも置換にもしない
-        over_set = (
-            parsed.kind == "languages"
-            and parsed.mode != "add"
-            and len(parsed.languages) > language_limit
-        )
-        if parsed.kind == "translate_all" or over_set:
-            if parsed.kind == "translate_all":
-                labels = catalog_labels(family)
-            else:
-                labels = [language_label(code, family, surface=surface) for code, surface in parsed.languages]
-            message = selection_prompt(labels, family=family, limit=language_limit)
-            notice = unsupported_prompt(parsed.unsupported, family)
-            if notice:
-                message = f"{notice}\n{message}"
-            self._reply_text(
+        limit = language_limit_for(self._resolve_effective_plan_for_group(event.group_id))
+        # 文面から読めた操作は、モデルの operation より先に同じ決定表へ乗せる
+        if parsed.kind in {"languages", "translate_all", "unsupported", "swap_unclear"}:
+            update = decide_language_update(
+                mode=parsed.mode,
+                current=self._current_language_pairs(event.group_id),
+                requested=parsed.languages,
+                limit=limit,
+                family=family,
+                kind=parsed.kind,
+                unsupported=parsed.unsupported,
+                swap_from=parsed.swap_from,
+                swap_to=parsed.swap_to,
+            )
+            return self._dispatch_language_update(
                 event,
-                self._localize_fixed_reply(
-                    message,
-                    family=family,
-                    instruction_lang=decision.instruction_language,
-                    command_trace=command_trace,
-                ),
+                update,
+                family,
+                parsed.unsupported,
+                source="settings",
+                instruction_lang=decision.instruction_language,
                 command_trace=command_trace,
             )
-            return True
-        if parsed.kind == "unsupported":
-            self._reply_text(
-                event,
-                self._localize_fixed_reply(
-                    unsupported_prompt(parsed.unsupported, family),
-                    family=family,
-                    instruction_lang=decision.instruction_language,
-                    command_trace=command_trace,
-                ),
-                command_trace=command_trace,
-            )
-            return True
-
-        op = decision.operation or "reset_all"
-        add_langs = [(lang.code, lang.name) for lang in decision.languages_to_add]
-        remove_codes = [lang.code for lang in decision.languages_to_remove]
-        # 「英語だけにして」が reset_all と追加リストで来たら、全消去ではなくその言語への置き換え
-        replacing = op == "reset_all" and any((code or "").strip() for code, _name in add_langs)
-        # モデルの explicit_reset か、英語・日本語の明示表現があるときだけ全消去する
-        if op == "reset_all" and not replacing and not allows_language_reset(
-            explicit_reset=decision.explicit_reset,
-            text=command_text or "",
-        ):
-            op = "show"
-        if op == "show":
-            return self._handle_show_languages(
-                event,
-                decision.instruction_language,
-                command_trace=command_trace,
-            )
-        valid_ops = {"reset_all", "add_and_remove", "add", "remove"}
-        if op not in valid_ops:
-            logger.info("Unsupported language operation", extra={"op": op})
+        update = self._language_update_from_decision(event, decision, text, family, limit)
+        if update is None:
+            logger.info("Unsupported language operation", extra={"op": decision.operation})
             return self._respond_unknown_instruction(
                 event,
                 decision.instruction_language,
                 command_text,
                 command_trace=command_trace,
             )
-        current_langs = self._dedup_language_codes(self._repo.fetch_group_languages(event.group_id))
-        if op in {"add", "add_and_remove"} or replacing:
-            # 置き換えは今の言語を残さないので、上限は追加リストだけで見る
-            limit_current = [] if replacing else current_langs
-            limit_remove = [] if replacing else remove_codes
-            if self._would_exceed_language_limit(
-                limit_current,
-                add_langs,
-                limit_remove,
-                max_languages=language_limit,
-            ):
-                logger.info(
-                    "Language update rejected: exceeds max",
-                    extra={
-                        "group_id": event.group_id,
-                        "current": current_langs,
-                        "add": [code for code, _ in add_langs],
-                        "remove": remove_codes,
-                    },
-                )
-                msg = self._localize_fixed_reply(
-                    self._language_limit_reply(
-                        family,
-                        language_limit,
-                        current=limit_current,
-                        wanted=add_langs,
-                    ),
-                    family=family,
-                    instruction_lang=decision.instruction_language,
-                    command_trace=command_trace,
-                )
-                self._reply_text(event, msg, command_trace=command_trace)
-                return True
-
-        if op == "reset_all" and not replacing:
-            self._repo.reset_group_language_settings(event.group_id)
-            # 言語設定モード中は翻訳停止
-            self._repo.set_translation_enabled(event.group_id, False)
-            # リセット時は必ずガイダンス文言を返す（LLM 生成のあいまいな承諾メッセージを避ける）
-            ack = self._translate_template(
-                "Your language settings have been reset. Please tell us all the languages ​​you would like to translate.",
-                decision.instruction_language,
-                command_trace=command_trace,
-            )
-            self._reply_text(event, ack, command_trace=command_trace)
-            return True
-
-        normalized_add: List[Tuple[str, str]] = []
-        if replacing:
-            # 削除と挿入は一つのトランザクション。挿入失敗で既存言語を消さない
-            normalized_add = self._normalize_new_languages(add_langs, set())
-            self._repo.replace_group_languages(event.group_id, normalized_add)
-        elif op == "add_and_remove":
-            remove_set = {code.lower() for code in remove_codes if code}
-            after_remove = [lang for lang in current_langs if lang not in remove_set]
-            normalized_add = self._normalize_new_languages(add_langs, set(after_remove))
-            self._repo.apply_language_changes(event.group_id, normalized_add, remove_codes)
-        elif op == "add":
-            normalized_add = self._normalize_new_languages(add_langs, set(current_langs))
-            if normalized_add:
-                self._repo.add_group_languages(event.group_id, normalized_add)
-        elif op == "remove":
-            if remove_codes:
-                self._repo.remove_group_languages(event.group_id, remove_codes)
-
-        # 言語変更後は翻訳再開。置き換えも翻訳を止めない
-        self._repo.set_translation_enabled(event.group_id, True)
-
-        # 結果の言語を固定文で言う。「言語設定を更新しました」だけでは何になったか分からない
-        ack = completion_prompt(self._resulting_language_pairs(event.group_id), family=family)
-        notice = unsupported_prompt(parsed.unsupported, family)
-        if notice:
-            ack = f"{ack}\n{notice}"
-        self._reply_text(
+        return self._dispatch_language_update(
             event,
-            self._localize_fixed_reply(
-                ack,
-                family=family,
-                instruction_lang=decision.instruction_language,
-                command_trace=command_trace,
-            ),
+            update,
+            family,
+            parsed.unsupported,
+            source="settings",
+            instruction_lang=decision.instruction_language,
             command_trace=command_trace,
         )
-        return True
+
+    def _language_update_from_decision(
+        self,
+        event: models.MessageEvent,
+        decision: models.CommandDecision,
+        text: str,
+        family: str,
+        limit: int,
+    ) -> LanguageUpdate | None:
+        """モデルの operation を決定表のモードへ写す。空は全消去にしない。"""
+
+        op = (decision.operation or "").strip()
+        add_langs = [(lang.code, lang.name) for lang in decision.languages_to_add]
+        remove_codes = [lang.code for lang in decision.languages_to_remove if lang.code]
+        state = language_group_state(
+            self._dedup_language_codes(self._repo.fetch_group_languages(event.group_id)),
+            limit=limit,
+        )
+        if op == "show":
+            return LanguageUpdate(action="show", mode="show", state=state)
+        named = any((code or "").strip() for code, _name in add_langs)
+        if op == "reset_all" and not named:
+            if allows_language_reset(explicit_reset=decision.explicit_reset, text=text):
+                return LanguageUpdate(action="reset", mode="reset", state=state, enable_translation=False)
+            return LanguageUpdate(action="show", mode="show", state=state)
+        if op == "reset_all":
+            mode, requested, remove = "replace", add_langs, ()
+        elif op == "add":
+            mode, requested, remove = "add", add_langs, ()
+        elif op == "remove":
+            mode, requested, remove = "remove", [(code, "") for code in remove_codes], ()
+        elif op == "add_and_remove":
+            mode, requested, remove = "add_remove", add_langs, remove_codes
+        else:
+            return None
+        return decide_language_update(
+            mode=mode,
+            current=self._current_language_pairs(event.group_id),
+            requested=requested,
+            remove=remove,
+            limit=limit,
+            family=family,
+            kind="languages",
+        )
+
+    def _language_settings_url(self, group_id: str, family: str) -> str:
+        builder = getattr(self._subscription_service, "create_language_settings_url", None)
+        if not builder or not group_id:
+            return ""
+        try:
+            return builder(group_id, family=family) or ""
+        except Exception:
+            logger.debug("Failed to build language settings url", exc_info=True)
+            return ""
+
+    def _with_settings_link(self, group_id: str, text: str, family: str) -> str:
+        line = settings_page_line(family, self._language_settings_url(group_id, family))
+        if not line:
+            return text
+        return f"{text}\n\n{line}"
+
+    def _copy_for_group_languages(
+        self,
+        group_id: str,
+        family: str,
+        *,
+        english: str,
+        static: dict[str, str],
+    ) -> tuple[str, str]:
+        """設定言語があれば英語原文を各言語へ出す。未設定なら送ってきた文の固定文。
+
+        戻り値は本文と、クイック返信の表示言語。
+        """
+
+        codes = [code for code, _name in self._group_language_records(group_id) if code]
+        if not codes:
+            body = static.get(family) or english
+            return self._with_settings_link(group_id, body, family), family
+        page_family = menu_family(codes)
+        text = group_language_copy(
+            codes,
+            english=english,
+            static=static,
+            url=self._language_settings_url(group_id, page_family),
+            translate=self._group_copy_translate(),
+        )
+        return text, page_family
 
     def _localize_fixed_reply(
         self,
@@ -1201,25 +1539,27 @@ class MessageHandler:
         lowered = (instruction_lang or "").strip().lower()
         if not lowered or lowered.startswith("en"):
             return text
+        # 本文が英語なら、ja/zh/ko/th の指示には固定文を切り替えず英語のまま返す
+        if family_for(lowered) != "en":
+            return text
         return self._safe_translate_for_instruction(
             text,
             instruction_lang,
             command_trace=command_trace,
         )
 
-    def _language_limit_reply(
+    def _confirmation_pairs(
         self,
-        family: str,
-        limit: int,
-        *,
-        current: Sequence[str],
-        wanted: Sequence[Tuple[str, str]],
-    ) -> str:
-        wanted_labels = [language_label(code, family, stored=name) for code, name in wanted if code]
-        if not current:
-            return selection_prompt(wanted_labels, family=family, limit=limit)
-        current_labels = [language_label(code, family) for code in current if code]
-        return swap_prompt(current_labels, wanted_labels, family=family, limit=limit)
+        group_id: str,
+        written: Sequence[Tuple[str, str]],
+    ) -> List[Tuple[str, str]]:
+        """保存後のコードに、依頼文の表示名を残す。"""
+
+        stored = self._resulting_language_pairs(group_id)
+        names = {code: name for code, name in written if code and name}
+        if not stored:
+            return [(code, name) for code, name in written if code]
+        return [(code, names.get(code) or name) for code, name in stored if code]
 
     def _resulting_language_pairs(self, group_id: str) -> List[Tuple[str, str]]:
         records = self._group_language_records(group_id)
@@ -1246,6 +1586,12 @@ class MessageHandler:
                 current_languages_base_text(records),
                 instruction_lang,
                 command_trace=command_trace,
+            )
+        if len([code for code, _name in records if code]) < 2:
+            message = self._with_settings_link(
+                event.group_id,
+                message,
+                family_for(instruction_lang),
             )
         self._reply_text(event, message, command_trace=command_trace)
         return True
@@ -1300,6 +1646,19 @@ class MessageHandler:
             except Exception:
                 logger.debug("Failed to fetch group language names", exc_info=True)
         return [(code, "") for code in self._group_languages_for_reply(group_id)]
+
+    def _reply_family_for(self, group_id: str, text: str, instruction_lang: str = "") -> str:
+        """本文で決まらなければグループ言語、それも無ければ指示言語。漢字だけの日本語は中国語にしない。"""
+
+        group_languages = self._group_languages_for_reply(group_id)
+        hinted = instruction_lang
+        if not hinted:
+            hinted = self._resolve_command_instruction_language(
+                text,
+                preferred="",
+                group_languages=group_languages,
+            )
+        return reply_family(text, group_languages, hinted)
 
     def _group_languages_for_reply(self, group_id: str) -> List[str]:
         try:
@@ -2480,32 +2839,6 @@ class MessageHandler:
             return self._pro_quota
         return monthly_quota_for(normalized)
 
-    def _would_exceed_language_limit(
-        self,
-        current_langs: Sequence[str],
-        add_langs: Sequence[Tuple[str, str]],
-        remove_codes: Sequence[str],
-        *,
-        max_languages: Optional[int] = None,
-    ) -> bool:
-        limit = max_languages if max_languages is not None else self._max_group_languages
-        remove_set = {code.lower() for code in remove_codes if code}
-        remaining = [code.lower() for code in current_langs if code and code.lower() not in remove_set]
-
-        to_add: list[str] = []
-        seen = set(remaining)
-        for code, _name in add_langs:
-            if not code:
-                continue
-            lowered = code.lower()
-            if lowered in seen:
-                continue
-            seen.add(lowered)
-            to_add.append(lowered)
-
-        final_count = len(remaining) + len(to_add)
-        return final_count > limit
-
     def _limit_language_choices(self, languages: Sequence[models.LanguageChoice]) -> Tuple[List[models.LanguageChoice], List[models.LanguageChoice]]:
         limited: List[models.LanguageChoice] = []
         dropped: List[models.LanguageChoice] = []
@@ -2550,41 +2883,6 @@ class MessageHandler:
 
     @staticmethod
     def _encode_postback_payload(payload: Dict, max_bytes: int = 280) -> str:
-        """Encode payload for LINE postback with size guard (LINE上限≈300 bytes)."""
-        def _encode(data: Dict) -> str:
-            raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
-            compressed = base64.urlsafe_b64encode(zlib.compress(raw)).decode("ascii").rstrip("=")
-            return f"langpref2={compressed}"
+        """LINE postback 用。言語設定と同じ符号器を使い、切れ端は返さない。"""
 
-        encoded = _encode(payload)
-        if len(encoded.encode("utf-8")) <= max_bytes:
-            return encoded
-
-        # try shortening optional texts first
-        def _shrink_text(key: str, factor: float = 0.6) -> bool:
-            if key in payload and payload[key]:
-                text = payload[key]
-                new_len = max(int(len(text) * factor), 32)
-                payload[key] = text[:new_len]
-                return True
-            return False
-
-        optional_keys = ("limit_text", "cancel_text", "completion_text")
-        for key in optional_keys:
-            # try shrinking this key up to 3 times before moving on
-            for _ in range(3):
-                changed = _shrink_text(key)
-                encoded = _encode(payload)
-                if len(encoded.encode("utf-8")) <= max_bytes:
-                    return encoded
-                if not changed:
-                    break
-            # drop the key entirely if still too large
-            if key in payload:
-                payload.pop(key, None)
-                encoded = _encode(payload)
-                if len(encoded.encode("utf-8")) <= max_bytes:
-                    return encoded
-
-        encoded = _encode(payload)
-        return encoded[:max_bytes]
+        return LanguageSettingsService._encode_postback_payload(payload, max_bytes)
