@@ -14,11 +14,38 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 
 from .plan_policy import FREE_PLAN, PRO_PLAN, STANDARD_PLAN, monthly_quota_for, normalize_plan_key, resolve_effective_plan
 
 QUOTA_PAUSE = "quota"
 BILLING_PAUSE = "billing"
+
+
+class NoticeClaim(Enum):
+    """リセット案内をこの周期で送ってよいか。例外と取得済みは別の値。"""
+
+    # この呼び出しが案内を送る。送信成功まで通知済みにしない。
+    ACQUIRED = "acquired"
+    # この周期は送り終えている。
+    ALREADY = "already"
+    # DB 例外などで確保できなかった。未送信のまま次の投稿でやり直す。
+    FAILED = "failed"
+
+
+def reset_pause_for_claim(claim: NoticeClaim) -> PauseState:
+    """claim の直後に保存する停止状態。送信が成功するまで理由は消さない。
+
+    ALREADY だけ、案内を送り終えているので quota 理由を外す。
+    FAILED は未送信。翻訳は再開し、理由を残して次の投稿でやり直す。
+    ACQUIRED はこれから送る。送信成功まで quota 停止のまま残す。
+    """
+
+    if claim is NoticeClaim.ALREADY:
+        return PauseState(enabled=True, reason=None)
+    if claim is NoticeClaim.FAILED:
+        return PauseState(enabled=True, reason=QUOTA_PAUSE)
+    return PauseState(enabled=False, reason=QUOTA_PAUSE)
 
 
 @dataclass(frozen=True)

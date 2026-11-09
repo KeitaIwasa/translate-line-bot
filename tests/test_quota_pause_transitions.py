@@ -12,9 +12,11 @@ from src.domain.services.language_detection_service import LanguageDetectionServ
 from src.domain.services.quota_pause import (
     BILLING_PAUSE,
     QUOTA_PAUSE,
+    NoticeClaim,
     PauseState,
     pause_for_billing,
     recover_pause,
+    reset_pause_for_claim,
 )
 from src.domain.services.translation_service import TranslationService
 from tests.test_quota_limits import (
@@ -29,6 +31,7 @@ from tests.test_quota_notice_flow import (
     _FailingLine,
     _MutableLanguageRepo,
     _next_month,
+    _uris,
     _with_checkout,
 )
 from tests.test_quota_pause_reevaluation import _SubscriptionRepo, _standard_subscription
@@ -56,6 +59,18 @@ _PAUSE_ROWS = [
     ("recover_quota_still_over", _stopped(QUOTA_PAUSE), "recover", 50, 50, False, QUOTA_PAUSE),
     ("recover_notice_pending", _active(QUOTA_PAUSE), "recover", 0, 50, True, None),
 ]
+
+
+@pytest.mark.parametrize(
+    ("claim", "enabled", "reason"),
+    [
+        (NoticeClaim.ACQUIRED, False, QUOTA_PAUSE),
+        (NoticeClaim.ALREADY, True, None),
+        (NoticeClaim.FAILED, True, QUOTA_PAUSE),
+    ],
+)
+def test_reset_claim_keeps_a_quota_reason_until_the_notice_is_sent(claim, enabled, reason):
+    assert reset_pause_for_claim(claim) == PauseState(enabled=enabled, reason=reason)
 
 
 @pytest.mark.parametrize(
@@ -182,6 +197,52 @@ def test_limit_notice_send_failure_does_not_record_the_plan():
     assert repo.notice_plan == "free"
     assert "Translation stopped" in "\n".join(line.sent_texts)
     assert repo.paused_reason == "quota"
+
+
+def test_reset_claim_db_error_keeps_the_quota_reason_and_retries(monkeypatch):
+    """claim の DB 例外は通知済みではない。停止理由を残し、次の投稿で案内する。"""
+
+    monkeypatch.setattr("src.app.handlers.message_handler.time.sleep", lambda *_args, **_kwargs: None)
+    repo = _MutableLanguageRepo(
+        initial_usage=0,
+        paid=False,
+        translation_enabled=False,
+        paused_reason="quota",
+        languages=["en", "ja"],
+    )
+    line = RecordingLineClient()
+    translation = RecordingTranslationService()
+    handler = _free_handler(repo, line, translation)
+
+    def db_down(*_args, **_kwargs):
+        raise RuntimeError("db down")
+
+    repo.claim_quota_reset_notice = db_down
+
+    _run(handler, "hello", enabled=False)
+
+    assert translation.calls == 1
+    assert repo.usage == 1
+    assert repo.translation_enabled is True
+    assert repo.paused_reason == "quota"
+    assert repo.reset_notices == set()
+    assert "has reset" not in "\n".join(line.sent_texts)
+
+    def claim(_group_id, period_key):
+        if period_key in repo.reset_notices:
+            return False
+        repo.reset_notices.add(period_key)
+        return True
+
+    repo.claim_quota_reset_notice = claim
+    retry_line = RecordingLineClient()
+    retry = _free_handler(repo, retry_line, translation)
+    _run(retry, "again", enabled=True)
+
+    assert repo.translation_enabled is True
+    assert repo.paused_reason is None
+    assert repo.reset_notices
+    assert "has reset" in "\n".join(retry_line.sent_texts)
 
 
 def test_reset_claim_rolls_back_when_translation_times_out():
@@ -502,3 +563,65 @@ def test_notice_path_keeps_numbers_for_many_languages_and_falls_back():
     assert "[emo]" not in notice
     # en と、数字を落とした訳の代わり。未登録コードも英語原文。
     assert notice.count("Translation stopped") >= 4
+
+
+class _MarkingPort:
+    """英語原文を残したまま、言語ごとの印を付ける。"""
+
+    def translate(self, request):
+        return [
+            TranslationResult(lang=lang, text=f"[{lang}] {request.message_text}")
+            for lang in request.candidate_languages
+        ]
+
+
+@pytest.mark.parametrize(
+    "languages",
+    [
+        ["ja"],
+        ["en"],
+        ["th"],
+        ["my"],
+        ["ne"],
+        ["vi"],
+        ["yue"],
+        ["zz"],
+        ["ja", "th", "my"],
+    ],
+)
+def test_limit_notice_for_group_languages_is_not_empty_and_has_plan_link(languages):
+    """案内は英語原文を設定言語へ訳す。空にならず、課金リンクを別メッセージに付ける。"""
+
+    repo = _MutableLanguageRepo(initial_usage=49, paid=False, languages=languages)
+    line = _CapturingLine()
+    handler = _with_checkout(_build_handler(repo, line, RecordingTranslationService()))
+    handler._interface_translation = InterfaceTranslationService(_MarkingPort())
+
+    _run(handler, "fiftieth")
+
+    notice = "\n".join(line.sent_texts).strip()
+    assert notice
+    assert "Translation stopped" in notice or any(f"[{lang}]" in notice for lang in languages)
+    assert _uris(line.payloads) == ["https://short.example.com/cs"]
+    assert repo.paused_reason == "quota"
+    assert repo.translation_enabled is False
+
+
+@pytest.mark.parametrize("text", ["😀😀😀", "12345", " \n\t ", "@bot"])
+def test_inputs_after_the_quota_cap_do_not_crash(text):
+    repo = ProQuotaRepo(
+        initial_usage=50,
+        paid=False,
+        translation_enabled=False,
+        paused_reason="quota",
+        notice_plan="free",
+    )
+    line = _CapturingLine()
+    handler = _with_checkout(_build_handler(repo, line, RecordingTranslationService()))
+    event = _build_event(text)
+
+    handler._process_group_message(event, handler._begin_group_message(event))
+
+    assert repo.paused_reason == "quota"
+    assert repo.translation_enabled is False
+    assert repo.usage == 50
