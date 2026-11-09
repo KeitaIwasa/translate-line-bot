@@ -31,7 +31,11 @@ from ...domain.services.current_languages_question import (
     is_current_languages_question,
 )
 from ...infra.gemini_errors import GeminiRateLimitError
-from ...infra.provider_failure import classify_provider_failure, record_provider_failure
+from ...infra.provider_failure import (
+    classify_provider_failure,
+    is_database_connection_failure,
+    record_provider_failure,
+)
 from ...presentation.list_layout import normalize_inline_lists
 from ...presentation.reply_formatter import (
     MAX_REPLY_LENGTH,
@@ -85,6 +89,8 @@ from .postback_handler import _build_cancel_message, _build_completion_message
 logger = logging.getLogger(__name__)
 
 RATE_LIMIT_MESSAGE = "You have reached the rate limit. Please try again later."
+# DB に届かないときは言語一覧を引けない。英語の原文をそのまま返す。
+DATABASE_RETRY_NOTICE = "I couldn't process that message. Please send it again in a moment."
 _last_rate_limit_message: Dict[str, str] = {}
 LINE_REPLY_TEXT_LIMIT = 5000
 
@@ -318,6 +324,7 @@ class MessageHandler:
         )
         self._private_chat_support = private_chat_support_service
         self._executor = executor or ThreadPoolExecutor(max_workers=4)
+        self._replied_token = None
 
     def handle(self, event: models.MessageEvent) -> None:
         if not event.reply_token:
@@ -326,25 +333,28 @@ class MessageHandler:
         if not event.group_id or not event.user_id:
             return
 
+        self._replied_token = None
         timestamp = datetime.fromtimestamp(event.timestamp / 1000, tz=timezone.utc)
-
-        # 個人チャットはサポート応答を返す。
-        if event.sender_type == "user" and event.group_id == event.user_id:
-            sender_name, _deferred_name = self._resolve_sender_name(event)
-            self._handle_private_chat(event, sender_name, timestamp)
-            return
-
-        start = self._begin_group_message(event)
-
-        logger.info(
-            "Handling message event | group=%s user=%s sender=%s text=%.40s",
-            event.group_id,
-            event.user_id,
-            event.sender_type,
-            (event.text or ""),
-        )
+        start = None
+        group_path = False
 
         try:
+            # 個人チャットはサポート応答を返す。
+            if event.sender_type == "user" and event.group_id == event.user_id:
+                sender_name, _deferred_name = self._resolve_sender_name(event)
+                self._handle_private_chat(event, sender_name, timestamp)
+                return
+
+            group_path = True
+            start = self._begin_group_message(event)
+
+            logger.info(
+                "Handling message event | group=%s user=%s sender=%s text=%.40s",
+                event.group_id,
+                event.user_id,
+                event.sender_type,
+                (event.text or ""),
+            )
             self._process_group_message(event, start)
         except GeminiRateLimitError as exc:
             # アダプタが記録済みならメトリクスは増えない。429 の利用者案内は従来どおり。
@@ -353,24 +363,38 @@ class MessageHandler:
             self._send_rate_limit_notice(event)
         except Exception as exc:
             failure = record_provider_failure(exc)
-            # 再試行できない障害ではグループへ返信しない。案内文の翻訳も同じ依存先に当たる。
+            # 再試行しても戻らない障害では案内を訳さない。翻訳も同じ依存先に当たる。
+            # 接続が切れて再試行も失敗したときだけ、英語の原文で再送を頼む。
             logger.exception(
                 "Message handling failed | error_class=%s dependency=%s status=%s",
                 failure.error_class,
                 failure.dependency,
                 failure.status,
             )
+            self._send_database_retry_notice(event, exc)
         finally:
-            if not start.legacy:
+            if group_path and start is not None:
+                if not start.legacy:
+                    try:
+                        start.sender_name = self._finish_deferred_group_bookkeeping(event, start)
+                    except Exception:
+                        logger.exception("Deferred member bookkeeping failed")
+                self._drain_optional_future(start.messages_future, "recent_messages")
                 try:
-                    start.sender_name = self._finish_deferred_group_bookkeeping(event, start)
+                    self._record_message(event, sender_name=start.sender_name, timestamp=timestamp)
                 except Exception:
-                    logger.exception("Deferred member bookkeeping failed")
-            self._drain_optional_future(start.messages_future, "recent_messages")
-            try:
-                self._record_message(event, sender_name=start.sender_name, timestamp=timestamp)
-            except Exception:
-                logger.exception("Failed to persist message")
+                    logger.exception("Failed to persist message")
+
+    def _send_database_retry_notice(self, event: models.MessageEvent, exc: BaseException) -> None:
+        if not is_database_connection_failure(exc):
+            return
+        if self._replied_token == event.reply_token:
+            return
+        logger.warning("Asking the user to resend after a database connection failure")
+        try:
+            self._reply_text(event, DATABASE_RETRY_NOTICE)
+        except Exception:
+            logger.exception("Failed to send database retry notice")
 
     def _begin_group_message(self, event: models.MessageEvent) -> _GroupMessageStart:
         loader = getattr(self._repo, "fetch_group_message_prefetch", None)
@@ -554,6 +578,7 @@ class MessageHandler:
         started = time.perf_counter()
         try:
             self._line.reply_text(event.reply_token, reply_text)
+            self._replied_token = event.reply_token
         except Exception:
             if command_trace:
                 command_trace.record_reply(
@@ -592,6 +617,7 @@ class MessageHandler:
         started = time.perf_counter()
         try:
             self._line.reply_messages(event.reply_token, normalized)
+            self._replied_token = event.reply_token
         except Exception:
             if command_trace:
                 command_trace.record_reply(
