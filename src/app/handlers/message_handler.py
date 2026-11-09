@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import logging
 import json
-import base64
-import zlib
 import re
 import time
 from dataclasses import dataclass, field, replace
@@ -57,11 +55,13 @@ from ...domain.services.language_mention import (
     exceeds_language_limit,
     enrollment_prompt,
     family_for,
+    group_language_copy,
     howto_prompt,
     is_howto_loop,
     is_nonlinguistic,
     language_label,
     language_quick_replies,
+    menu_family,
     need_both_languages_prompt,
     needs_catalog_fallback,
     read_mention,
@@ -1276,28 +1276,43 @@ class MessageHandler:
             self._reply_text(event, catalog_prompt(family=family, limit=limit), command_trace=command_trace)
             return True
         if parsed.kind == "settings_help":
-            names = [
-                language_label(code, family, stored=stored)
+            records = [
+                (code, stored)
                 for code, stored in self._group_language_records(event.group_id)
                 if code
             ]
+
+            def labels(target: str) -> list[str]:
+                return [language_label(code, target, stored=stored) for code, stored in records]
+
+            text, button_family = self._copy_for_group_languages(
+                event.group_id,
+                family,
+                english=settings_help_prompt(labels("en"), family="en", limit=limit),
+                static={
+                    name: settings_help_prompt(labels(name), family=name, limit=limit)
+                    for name in ("ja", "zh", "ko", "th")
+                },
+            )
             self._reply_text(
                 event,
-                self._with_settings_link(
-                    event.group_id,
-                    settings_help_prompt(names, family=family, limit=limit),
-                    family,
-                ),
+                text,
                 command_trace=command_trace,
-                quick_reply=self._language_quick_replies(event.group_id, family),
+                quick_reply=self._language_quick_replies(event.group_id, button_family),
             )
             return True
         if parsed.kind == "howto":
+            text, button_family = self._copy_for_group_languages(
+                event.group_id,
+                family,
+                english=howto_prompt(family="en"),
+                static={name: howto_prompt(family=name) for name in ("ja", "zh", "ko", "th")},
+            )
             self._reply_text(
                 event,
-                self._with_settings_link(event.group_id, howto_prompt(family=family), family),
+                text,
                 command_trace=command_trace,
-                quick_reply=self._language_quick_replies(event.group_id, family),
+                quick_reply=self._language_quick_replies(event.group_id, button_family),
             )
             return True
         if parsed.kind == "unsupported":
@@ -1481,6 +1496,33 @@ class MessageHandler:
         if not line:
             return text
         return f"{text}\n\n{line}"
+
+    def _copy_for_group_languages(
+        self,
+        group_id: str,
+        family: str,
+        *,
+        english: str,
+        static: dict[str, str],
+    ) -> tuple[str, str]:
+        """設定言語があれば英語原文を各言語へ出す。未設定なら送ってきた文の固定文。
+
+        戻り値は本文と、クイック返信の表示言語。
+        """
+
+        codes = [code for code, _name in self._group_language_records(group_id) if code]
+        if not codes:
+            body = static.get(family) or english
+            return self._with_settings_link(group_id, body, family), family
+        page_family = menu_family(codes)
+        text = group_language_copy(
+            codes,
+            english=english,
+            static=static,
+            url=self._language_settings_url(group_id, page_family),
+            translate=self._group_copy_translate(),
+        )
+        return text, page_family
 
     def _localize_fixed_reply(
         self,
@@ -2841,41 +2883,6 @@ class MessageHandler:
 
     @staticmethod
     def _encode_postback_payload(payload: Dict, max_bytes: int = 280) -> str:
-        """Encode payload for LINE postback with size guard (LINE上限≈300 bytes)."""
-        def _encode(data: Dict) -> str:
-            raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
-            compressed = base64.urlsafe_b64encode(zlib.compress(raw)).decode("ascii").rstrip("=")
-            return f"langpref2={compressed}"
+        """LINE postback 用。言語設定と同じ符号器を使い、切れ端は返さない。"""
 
-        encoded = _encode(payload)
-        if len(encoded.encode("utf-8")) <= max_bytes:
-            return encoded
-
-        # try shortening optional texts first
-        def _shrink_text(key: str, factor: float = 0.6) -> bool:
-            if key in payload and payload[key]:
-                text = payload[key]
-                new_len = max(int(len(text) * factor), 32)
-                payload[key] = text[:new_len]
-                return True
-            return False
-
-        optional_keys = ("limit_text", "cancel_text", "completion_text")
-        for key in optional_keys:
-            # try shrinking this key up to 3 times before moving on
-            for _ in range(3):
-                changed = _shrink_text(key)
-                encoded = _encode(payload)
-                if len(encoded.encode("utf-8")) <= max_bytes:
-                    return encoded
-                if not changed:
-                    break
-            # drop the key entirely if still too large
-            if key in payload:
-                payload.pop(key, None)
-                encoded = _encode(payload)
-                if len(encoded.encode("utf-8")) <= max_bytes:
-                    return encoded
-
-        encoded = _encode(payload)
-        return encoded[:max_bytes]
+        return LanguageSettingsService._encode_postback_payload(payload, max_bytes)

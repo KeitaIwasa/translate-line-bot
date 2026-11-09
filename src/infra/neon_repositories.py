@@ -776,11 +776,7 @@ class NeonMessageRepository(MessageRepositoryPort):
                                 _UPSERT_GROUP_LANGUAGE_SQL,
                                 [(group_id, code, name) for code, name in normalized],
                             )
-                    cur.execute(_TRANSLATION_ENABLED_SQL, (group_id, True))
-                    cur.execute(
-                        _SEAL_LANGUAGE_PROMPT_SQL,
-                        (group_id, GROUP_LANG_MARKER, GROUP_LANG_MARKER),
-                    )
+                    self._enable_translation_and_seal_prompt(cur, group_id)
         self._invalidate_group_runtime(group_id)
 
     def add_group_languages(self, group_id: str, languages: Sequence[Tuple[str, str]]) -> None:
@@ -798,13 +794,23 @@ class NeonMessageRepository(MessageRepositoryPort):
         limited = normalized
         if not limited:
             return
-        # 複数行の INSERT を一つのトランザクションにまとめる
+        # 挿入と確認の無効化は同じトランザクション。挿入に失敗したら確認は開いたまま
         with self._client.connection() as conn, conn.cursor() as cur:
             cur.executemany(
                 _UPSERT_GROUP_LANGUAGE_SQL,
                 [(group_id, code, name) for code, name in limited],
             )
+            self._enable_translation_and_seal_prompt(cur, group_id)
         self._invalidate_group_runtime(group_id)
+
+    def _enable_translation_and_seal_prompt(self, cur, group_id: str) -> None:
+        """翻訳をオンにし、開いている確認を呼び出し側のトランザクションで閉じる。"""
+
+        cur.execute(_TRANSLATION_ENABLED_SQL, (group_id, True))
+        cur.execute(
+            _SEAL_LANGUAGE_PROMPT_SQL,
+            (group_id, GROUP_LANG_MARKER, GROUP_LANG_MARKER),
+        )
 
     def replace_group_languages(self, group_id: str, languages: Sequence[Tuple[str, str]]) -> None:
         """グループの言語を指定の集合だけにし、翻訳はオンのままにする。

@@ -18,6 +18,7 @@ from .language_mention import (
     ui_family,
     unsupported_prompt,
 )
+from .language_names import english_language_name
 from .plan_policy import FREE_PLAN, PRO_PLAN, language_limit_for, resolve_effective_plan
 from ...presentation.list_layout import normalize_inline_lists
 from ...presentation.reply_formatter import RTL_LANG_PREFIXES, _wrap_bidi_isolate, strip_source_echo
@@ -108,9 +109,6 @@ class LanguageSettingsService:
             "completion_text": prompt_texts["completion_text"],
             "limit_text": self._build_language_limit_message(result.primary_language, max_languages=limit),
         }
-        if isinstance(stamp, str) and stamp:
-            confirm_body["issued_at"] = stamp
-        confirm_payload = self._encode_postback_payload(confirm_body)
         cancel_body = {
             "kind": "language_confirm",
             "action": "cancel",
@@ -118,8 +116,18 @@ class LanguageSettingsService:
             "cancel_text": prompt_texts["cancel_text"],
         }
         if isinstance(stamp, str) and stamp:
+            confirm_body["issued_at"] = stamp
             cancel_body["issued_at"] = stamp
+        confirm_payload = self._encode_postback_payload(confirm_body)
         cancel_payload = self._encode_postback_payload(cancel_body)
+        # 切れたデータは OK を押しても保存できない。ボタンは出さず、確認も残さない
+        if not confirm_payload or not cancel_payload:
+            self._abandon_unsendable_prompt(event.group_id, stamp)
+            family = ui_family(result.primary_language)
+            return models.ReplyBundle(
+                texts=[enrollment_prompt(family)],
+                notice_kind="read_empty",
+            )
 
         template_message = {
             "type": "template",
@@ -151,7 +159,11 @@ class LanguageSettingsService:
         issued_at: str | None = None,
     ) -> models.ReplyBundle | None:
         limit = self._resolved_limit(max_languages)
-        tuples = self._dedup_languages(languages)
+        # ボタンから表示名を落としたときは、コードから英語名を戻して保存する
+        tuples = [
+            (code, name or english_language_name(code))
+            for code, name in self._dedup_languages(languages)
+        ]
         if len(tuples) > limit:
             family = ui_family(primary_language)
             labels = [name or code for code, name in tuples if code]
@@ -387,8 +399,27 @@ class LanguageSettingsService:
                 seen_texts.add(cleaned)
         return "\n\n".join(lines)
 
+    def _abandon_unsendable_prompt(self, group_id: str, stamp: str | None) -> None:
+        """ボタンを出せない確認は、開いたままにしない。翻訳は止めない。"""
+
+        canceller = getattr(self._repo, "try_cancel_language_prompt", None)
+        if not callable(canceller):
+            return
+        try:
+            if isinstance(stamp, str) and stamp:
+                canceller(group_id, issued_at=stamp)
+                return
+            canceller(group_id)
+        except TypeError:
+            canceller(group_id)
+
     @staticmethod
     def _encode_postback_payload(payload: Dict, max_bytes: int = 280) -> str:
+        """LINE の postback は約300バイト。切れ端は復号できないので、空文字を返す。
+
+        案内文、それでも足りなければ表示名を落とす。コードと世代は残す。
+        """
+
         import base64
         import json
         import zlib
@@ -398,35 +429,42 @@ class LanguageSettingsService:
             compressed = base64.urlsafe_b64encode(zlib.compress(raw)).decode("ascii").rstrip("=")
             return f"langpref2={compressed}"
 
-        encoded = _encode(payload)
-        if len(encoded.encode("utf-8")) <= max_bytes:
+        def _fit(data: Dict) -> str:
+            encoded = _encode(data)
+            if len(encoded.encode("utf-8")) <= max_bytes:
+                return encoded
+            return ""
+
+        current = dict(payload)
+        encoded = _fit(current)
+        if encoded:
             return encoded
 
-        def _shrink_text(key: str, factor: float = 0.6) -> bool:
-            if key in payload and payload[key]:
-                text = payload[key]
-                new_len = max(int(len(text) * factor), 32)
-                payload[key] = text[:new_len]
-                return True
-            return False
+        # 確認後の文はボタンに無くてもサーバで組み立て直せる
+        for key in ("limit_text", "cancel_text", "completion_text"):
+            if key not in current:
+                continue
+            current.pop(key, None)
+            encoded = _fit(current)
+            if encoded:
+                return encoded
 
-        optional_keys = ("limit_text", "cancel_text", "completion_text")
-        for key in optional_keys:
-            for _ in range(3):
-                changed = _shrink_text(key)
-                encoded = _encode(payload)
-                if len(encoded.encode("utf-8")) <= max_bytes:
-                    return encoded
-                if not changed:
-                    break
-            if key in payload:
-                payload.pop(key, None)
-                encoded = _encode(payload)
-                if len(encoded.encode("utf-8")) <= max_bytes:
-                    return encoded
+        languages = current.get("languages")
+        if isinstance(languages, list):
+            slim = []
+            for item in languages:
+                if isinstance(item, dict):
+                    code = (item.get("code") or "").strip()
+                    if code:
+                        slim.append({"code": code})
+                elif item:
+                    slim.append(item)
+            current["languages"] = slim
+            encoded = _fit(current)
+            if encoded:
+                return encoded
 
-        encoded = _encode(payload)
-        return encoded[:max_bytes]
+        return ""
 
     @staticmethod
     def _build_simple_confirm_text(limited_supported) -> str:

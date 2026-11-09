@@ -103,6 +103,7 @@ def test_unconfigured_group_sends_out_of_catalog_requests_to_propose():
         "英語とカタルーニャ語",
         "英語と日本語とカタルーニャ語",
         "English and Catalan",
+        "add English and Catalan",
         "エルヴ語",
     )
     for text in cases:
@@ -229,3 +230,36 @@ def test_quick_reply_help_and_current_translate_into_group_languages():
     assert "French" in current_text or "Spanish" in current_text
     targets = [call[1] for call in interface.calls]
     assert targets == [["fr", "es"], ["fr", "es"]]
+
+
+def test_chat_settings_and_help_use_the_group_language():
+    """paramètres / ayuda も、Quick Reply と同じくグループの設定言語で返す。"""
+
+    marks = {
+        "ja": ("今の翻訳言語", "グループにメッセージ"),
+        "en": ("Current translation languages", "Send a message in the group"),
+        "fr": ("fr: Current translation languages", "fr: Send a message in the group"),
+        "es": ("es: Current translation languages", "es: Send a message in the group"),
+        "th": ("ภาษาตอนนี้", "ส่งข้อความในกลุ่ม"),
+        "my": ("my: Current translation languages", "my: Send a message in the group"),
+        "ne": ("ne: Current translation languages", "ne: Send a message in the group"),
+        "vi": ("vi: Current translation languages", "vi: Send a message in the group"),
+        "yue": ("yue: Current translation languages", "yue: Send a message in the group"),
+    }
+    for code, (settings_mark, help_mark) in marks.items():
+        for trigger, mark in (("paramètres", settings_mark), ("ayuda", help_mark)):
+            repo = _Repo([code])
+            line = _Line()
+            interface = _Interface()
+            handler = _handler(repo, line, pref=_Pref())
+            handler._interface_translation = interface
+            handler._handle_command(_event(trigger), trigger)
+            reply = line.last_text or ""
+            assert mark in reply, (code, trigger, reply)
+            assert reply.count("group-languages") == 1
+            if code in {"ja", "en", "th"}:
+                assert interface.calls == [], (code, trigger)
+            else:
+                assert [targets for _base, targets in interface.calls] == [[code]]
+            if code == "en":
+                assert "fr:" not in reply

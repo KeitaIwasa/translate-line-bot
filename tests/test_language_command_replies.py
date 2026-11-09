@@ -104,12 +104,14 @@ def test_settings_reply_language_follows_the_message():
     line = _Line()
     subs = _Subs()
     handler = _handler(group, line, subs)
+    # 言語が設定済みなら、引き金の「语言」ではなくグループの言語で返す
     handler._handle_command(_event("语言"), "语言")
     reply = line.last_text or ""
-    assert "要改的话" in reply
-    assert "今の翻訳言語" not in reply
-    assert subs.calls[-1][1] == "zh"
-    assert "ui=zh" in reply
+    assert "今の翻訳言語" in reply
+    assert "Current translation languages" in reply
+    assert "要改的话" not in reply
+    assert subs.calls[-1][1] == "ja"
+    assert "ui=ja" in reply
 
 
 def test_fixed_copy_keeps_static_text_when_translation_is_wrong():

@@ -389,3 +389,38 @@ def test_unchanged_web_save_reenables_translation_and_rejects_the_old_ok():
     assert repo.fetch_group_languages("g1") == ["en", "ja"]
     assert store.translation_enabled["g1"] is True
     assert "その確認は古いよ" in line.replies[-1]
+
+
+def test_direct_add_seals_a_pending_confirmation_with_the_insert():
+    store = _LanguageStore({}, translation_enabled=False)
+    repo = _repo(store)
+    issued = repo.record_language_prompt("g1")
+    assert store.markers["g1"]["completed"] is None
+
+    repo.add_group_languages("g1", [("en", "English"), ("ja", "Japanese")])
+
+    assert repo.fetch_group_languages("g1") == ["en", "ja"]
+    assert store.translation_enabled["g1"] is True
+    assert store.markers["g1"]["completed"] is not None
+    assert store.markers["g1"]["prompted"] != issued
+    stale = repo.try_complete_group_languages(
+        "g1",
+        [("fr", "French"), ("de", "German")],
+        issued_at=issued,
+    )
+    assert stale.status == "stale"
+    assert repo.fetch_group_languages("g1") == ["en", "ja"]
+
+
+def test_direct_add_leaves_the_confirmation_open_when_the_insert_fails():
+    store = _LanguageStore({}, translation_enabled=False)
+    repo = _repo(store, fail_language_insert=True)
+    issued = repo.record_language_prompt("g1")
+
+    with pytest.raises(RuntimeError):
+        repo.add_group_languages("g1", [("en", "English"), ("ja", "Japanese")])
+
+    assert repo.fetch_group_languages("g1") == []
+    assert store.translation_enabled.get("g1") is False
+    assert store.markers["g1"]["prompted"] == int(issued)
+    assert store.markers["g1"]["completed"] is None
