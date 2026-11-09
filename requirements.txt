@@ -1,4 +1,6 @@
 psycopg[binary,pool]==3.1.18
+# check_connection は 3.2 以降。3.3 の既定接続クラスは psycopg 3.1 のまま使える。
+psycopg-pool>=3.2.1,<4
 requests==2.32.3
 langdetect==1.0.9
 python-dotenv==1.0.1

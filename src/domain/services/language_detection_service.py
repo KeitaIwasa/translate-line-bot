@@ -345,6 +345,24 @@ class LanguageDetectionService:
         without_amounts = _CURRENCY_AMOUNT_RE.sub(" ", normalized)
         return bool(_letters(without_amounts))
 
+    def nonlinguistic_reason(self, text: str) -> str:
+        """翻訳しない入力の種類。本文は含めない。翻訳できる文では空。"""
+
+        if self.has_translatable_text(text):
+            return ""
+        normalized = _normalize(text)
+        if not normalized.strip():
+            return "whitespace_only"
+        has_emoji = any(_is_emoji(ord(char)) for char in normalized)
+        has_digit = any(char.isdecimal() for char in normalized)
+        if has_emoji and has_digit:
+            return "emoji_and_digits"
+        if has_emoji:
+            return "emoji_only"
+        if has_digit:
+            return "digits_only"
+        return "symbols_only"
+
     def is_mixed_language(self, text: str, group_languages: Sequence[str] | None = None) -> bool:
         """全文が単一言語で書かれていないとき True。
 

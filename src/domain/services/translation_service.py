@@ -33,6 +33,8 @@ class TranslationService:
     def __init__(self, translator: TranslationPort, language_detector: LanguageDetectionService | None = None) -> None:
         self._translator = translator
         self._language_detector = language_detector or LanguageDetectionService()
+        # 直近の空結果の理由。本文は入れない。呼び出し直後に読む。
+        self.last_empty_reason = ""
 
     def translate(
         self,
@@ -46,8 +48,13 @@ class TranslationService:
     ) -> List[TranslationResult]:
         # 絵文字や数字だけは言語判定が暴れるので、翻訳自体をしない
         if not allow_same_language and not self._language_detector.has_translatable_text(message_text):
-            logger.info("Skip translation; message has no linguistic content")
+            self.last_empty_reason = self._language_detector.nonlinguistic_reason(message_text)
+            logger.info(
+                "Skip translation; message has no linguistic content | reason=%s",
+                self.last_empty_reason,
+            )
             return []
+        self.last_empty_reason = ""
 
         # 混在文はどの言語でも「全文がその言語」ではないので、グループの全言語へ訳す
         mixed = not allow_same_language and self._language_detector.is_mixed_language(
@@ -69,6 +76,7 @@ class TranslationService:
             ]
 
         if not filtered_targets:
+            self.last_empty_reason = "no_target_languages"
             logger.info("No target languages after filtering", extra={"detected": detected_lang})
             return []
 
@@ -79,4 +87,11 @@ class TranslationService:
             candidate_languages=list(dict.fromkeys(filtered_targets)),
             context_messages=list(context_messages),
         )
-        return self._translator.translate(request)
+        results = self._translator.translate(request)
+        if not results:
+            self.last_empty_reason = "empty_provider_result"
+            logger.info(
+                "Translation provider returned no results | targets=%s",
+                list(request.candidate_languages),
+            )
+        return results
