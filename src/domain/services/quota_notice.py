@@ -10,7 +10,6 @@ from .plan_policy import language_limit_for
 
 SEE_PLANS_LABEL = "See plans"
 SEE_PLANS_BUTTON_TEXT = "Plans and prices"
-PLAN_LINK_ALT_PREFIX = "See plans: "
 # LINE の URI アクションとテンプレート altText の上限
 _LINE_URI_LIMIT = 1000
 _LINE_ALT_TEXT_LIMIT = 400
@@ -172,25 +171,40 @@ def price_page_sentence() -> str:
     return "Prices are on the plan page in the next message."
 
 
-def build_plan_link_message(url: str) -> dict:
-    """課金ページへのボタン。URI が長すぎるときは URL テキストに戻す。"""
+def build_plan_link_message(
+    url: str,
+    *,
+    button_text: str | None = None,
+    label: str | None = None,
+) -> dict:
+    """課金ページへのボタン。URI が長すぎるときは URL テキストに戻す。
+
+    本文とラベルは呼び出し側が設定言語へ訳した文字列を渡す。
+    空、または LINE の文字数上限を超える訳は英語原文に戻す。
+    """
 
     link = (url or "").strip()
     if not link:
         return {"type": "text", "text": ""}
     if len(link) > _LINE_URI_LIMIT:
         return {"type": "text", "text": link[:5000]}
-    alt = f"{PLAN_LINK_ALT_PREFIX}{link}"
+    text = (button_text or "").strip() or SEE_PLANS_BUTTON_TEXT
+    action_label = (label or "").strip() or SEE_PLANS_LABEL
+    if len(text) > _LINE_BUTTON_TEXT_LIMIT:
+        text = SEE_PLANS_BUTTON_TEXT
+    if len(action_label) > _LINE_BUTTON_LABEL_LIMIT:
+        action_label = SEE_PLANS_LABEL
+    alt = f"{action_label}: {link}"
     return {
         "type": "template",
         "altText": alt[:_LINE_ALT_TEXT_LIMIT],
         "template": {
             "type": "buttons",
-            "text": SEE_PLANS_BUTTON_TEXT[:_LINE_BUTTON_TEXT_LIMIT],
+            "text": text,
             "actions": [
                 {
                     "type": "uri",
-                    "label": SEE_PLANS_LABEL[:_LINE_BUTTON_LABEL_LIMIT],
+                    "label": action_label,
                     "uri": link,
                 }
             ],

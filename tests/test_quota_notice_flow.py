@@ -219,7 +219,16 @@ def test_plan_link_is_a_button_and_long_urls_stay_text():
     button = build_plan_link_message("https://short.example.com/cs")
     assert button["type"] == "template"
     assert button["template"]["actions"][0]["uri"] == "https://short.example.com/cs"
+    assert button["template"]["text"] == "Plans and prices"
     assert button["template"]["actions"][0]["label"] == "See plans"
+
+    too_long = build_plan_link_message(
+        "https://short.example.com/cs",
+        button_text="料金ページ",
+        label="プランを見る" + "あ" * 20,
+    )
+    assert too_long["template"]["text"] == "料金ページ"
+    assert too_long["template"]["actions"][0]["label"] == "See plans"
 
     long_url = "https://example.com/" + ("a" * 1200)
     fallback = build_plan_link_message(long_url)

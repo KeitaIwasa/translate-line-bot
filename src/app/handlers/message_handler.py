@@ -90,6 +90,8 @@ from ...domain.services.quota_pause import (
     reset_pause_for_claim,
 )
 from ...domain.services.quota_notice import (
+    SEE_PLANS_BUTTON_TEXT,
+    SEE_PLANS_LABEL,
     approaching_usage_threshold,
     build_approaching_notice,
     build_free_limit_notice,
@@ -107,6 +109,13 @@ logger = logging.getLogger(__name__)
 
 # claim メソッドが無いリポジトリ向け。周期につき1回。
 _LOCAL_RESET_CLAIMS: set[tuple] = set()
+
+# 案内本文に付ける双方向制御。ボタンの文字数には含めない。
+_BIDI_CONTROLS = dict.fromkeys(map(ord, "\u200e\u200f\u202a\u202b\u202c\u202d\u202e"))
+
+
+def _strip_bidi_controls(text: str) -> str:
+    return (text or "").translate(_BIDI_CONTROLS)
 
 
 class QuotaResetStatus(Enum):
@@ -1875,7 +1884,7 @@ class MessageHandler:
                 period_end=period_end,
             )
             messages.append({"type": "text", "text": notice_text})
-            self._append_plan_link(messages, notice_url)
+            self._append_plan_link(messages, notice_url, event.group_id)
             limit_notice_period = flow.decision.period_key
         elif self._should_send_approaching_notice(plan_key, limit, flow.decision.usage):
             group_id = event.group_id or ""
@@ -1897,7 +1906,7 @@ class MessageHandler:
                     self._release_approaching_notice(group_id, approaching_period_key)
                 else:
                     messages.append({"type": "text", "text": notice_text})
-                    self._append_plan_link(messages, notice_url)
+                    self._append_plan_link(messages, notice_url, group_id)
                     approaching_claimed = True
 
         try:
@@ -2153,7 +2162,7 @@ class MessageHandler:
         )
         messages = [{"type": "text", "text": notice_text[:5000]}]
         # URL は左右書字方向混在時に誤判定されやすいため本文から分離する
-        self._append_plan_link(messages, url)
+        self._append_plan_link(messages, url, event.group_id)
         self._reply_messages(event, messages)
 
     def _build_limit_reached_notice_text(
@@ -2208,10 +2217,24 @@ class MessageHandler:
             add_missing_link_notice=False,
         )
 
-    def _append_plan_link(self, messages: List[dict], url: Optional[str]) -> None:
+    def _append_plan_link(self, messages: List[dict], url: Optional[str], group_id: str | None = None) -> None:
         if not url:
             return
-        messages.append(build_plan_link_message(url))
+        button_text = self._translate_plan_button_field(SEE_PLANS_BUTTON_TEXT, group_id or "")
+        label = self._translate_plan_button_field(SEE_PLANS_LABEL, group_id or "")
+        messages.append(build_plan_link_message(url, button_text=button_text, label=label))
+
+    def _translate_plan_button_field(self, source: str, group_id: str) -> str:
+        """ボタン文言。案内本文と同じインターフェース翻訳。失敗時は英語原文。"""
+
+        try:
+            translated = self._build_multilingual_interface_message(source, group_id)
+        except Exception:
+            logger.warning("Failed to translate plan link copy", extra={"group_id": group_id})
+            return source
+        # 案内本文向けの方向制御はボタンの文字数に数えない。
+        cleaned = _strip_bidi_controls(translated).strip()
+        return cleaned or source
 
     def _should_send_approaching_notice(self, plan_key: str, limit: int, usage: int) -> bool:
         if normalize_plan_key(plan_key) != FREE_PLAN:

@@ -607,6 +607,119 @@ def test_limit_notice_for_group_languages_is_not_empty_and_has_plan_link(languag
     assert repo.translation_enabled is False
 
 
+def _plan_button(payloads) -> dict:
+    for messages in payloads:
+        for message in messages:
+            if message.get("type") == "template":
+                return message
+    raise AssertionError("plan button missing")
+
+
+@pytest.mark.parametrize(
+    "languages",
+    [
+        ["ja"],
+        ["en"],
+        ["th"],
+        ["my"],
+        ["ne"],
+        ["vi"],
+        ["yue"],
+        ["zz"],
+        ["ja", "th"],
+    ],
+)
+def test_plan_button_copy_follows_group_languages(languages):
+    """課金ボタンは案内本文と同じ翻訳。英語は原文。混在でラベルが上限を超えたら英語。"""
+
+    class _Port:
+        def __init__(self):
+            self.sources = []
+
+        def translate(self, request):
+            self.sources.append(request.message_text)
+            return [
+                TranslationResult(lang=lang, text=f"[{lang}] {request.message_text}")
+                for lang in request.candidate_languages
+            ]
+
+    port = _Port()
+    repo = _MutableLanguageRepo(initial_usage=49, paid=False, languages=languages)
+    line = _CapturingLine()
+    handler = _with_checkout(_build_handler(repo, line, RecordingTranslationService()))
+    handler._interface_translation = InterfaceTranslationService(port)
+
+    _run(handler, "fiftieth")
+
+    button = _plan_button(line.payloads)
+    assert button["template"]["actions"][0]["uri"] == "https://short.example.com/cs"
+    text = button["template"]["text"]
+    label = button["template"]["actions"][0]["label"]
+    assert text.strip()
+    assert label.strip()
+    non_english = [lang for lang in languages if lang.lower() != "en"]
+    if not non_english:
+        assert text == "Plans and prices"
+        assert label == "See plans"
+        assert port.sources == []
+    elif len(non_english) == 1:
+        lang = non_english[0]
+        assert text == f"[{lang}] Plans and prices"
+        assert label == f"[{lang}] See plans"
+        assert "Plans and prices" in port.sources
+        assert "See plans" in port.sources
+    else:
+        for lang in non_english:
+            assert f"[{lang}] Plans and prices" in text
+        assert label == "See plans"
+        assert len(label) <= 20
+
+
+def test_plan_button_falls_back_to_english_when_translation_fails():
+    class _Port:
+        def translate(self, request):
+            if request.message_text in {"See plans", "Plans and prices"}:
+                raise RuntimeError("button down")
+            return [
+                TranslationResult(lang=lang, text=f"[{lang}] {request.message_text}")
+                for lang in request.candidate_languages
+            ]
+
+    repo = _MutableLanguageRepo(initial_usage=49, paid=False, languages=["ja"])
+    line = _CapturingLine()
+    handler = _with_checkout(_build_handler(repo, line, RecordingTranslationService()))
+    handler._interface_translation = InterfaceTranslationService(_Port())
+
+    _run(handler, "fiftieth")
+
+    button = _plan_button(line.payloads)
+    assert button["template"]["text"] == "Plans and prices"
+    assert button["template"]["actions"][0]["label"] == "See plans"
+    assert button["template"]["actions"][0]["uri"] == "https://short.example.com/cs"
+    assert "[ja]" in "\n".join(line.sent_texts)
+
+
+def test_plan_button_label_over_the_line_limit_falls_back_to_english():
+    class _Port:
+        def translate(self, request):
+            if request.message_text == "See plans":
+                text = "あ" * 21
+            else:
+                text = f"[ja] {request.message_text}"
+            return [TranslationResult(lang=lang, text=text) for lang in request.candidate_languages]
+
+    repo = _MutableLanguageRepo(initial_usage=49, paid=False, languages=["ja"])
+    line = _CapturingLine()
+    handler = _with_checkout(_build_handler(repo, line, RecordingTranslationService()))
+    handler._interface_translation = InterfaceTranslationService(_Port())
+
+    _run(handler, "fiftieth")
+
+    button = _plan_button(line.payloads)
+    assert button["template"]["text"] == "[ja] Plans and prices"
+    assert button["template"]["actions"][0]["label"] == "See plans"
+
+
 @pytest.mark.parametrize("text", ["😀😀😀", "12345", " \n\t ", "@bot"])
 def test_inputs_after_the_quota_cap_do_not_crash(text):
     repo = ProQuotaRepo(
