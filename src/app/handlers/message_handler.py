@@ -1521,23 +1521,40 @@ class MessageHandler:
 
         messages.append({"type": "text", "text": flow.reply_text})
 
-        if flow.decision.should_notify:
-            notice_text, notice_url = self._build_limit_reached_notice_text(
-                event.group_id,
-                flow.decision.plan_key,
-                limit,
-                period_key=flow.decision.period_key,
-                period_end=period_end,
-            )
-            self._repo.set_limit_notice_plan(event.group_id, flow.decision.period_key, plan_key)
-            messages.append({"type": "text", "text": notice_text})
-            if notice_url:
-                messages.append({"type": "text", "text": notice_url})
+        # 有料プランは上限ちょうどを翻訳した返信に通知を足す。無料はここでは通知しない。
+        claimed = False
+        if flow.decision.should_notify and self._claim_limit_notice(
+            event.group_id or "",
+            flow.decision.period_key,
+            plan_key,
+        ):
+            claimed = True
+            try:
+                notice_text, notice_url = self._build_limit_reached_notice_text(
+                    event.group_id,
+                    flow.decision.plan_key,
+                    limit,
+                    period_key=flow.decision.period_key,
+                    period_end=period_end,
+                )
+                messages.append({"type": "text", "text": notice_text})
+                if notice_url:
+                    messages.append({"type": "text", "text": notice_url})
+            except Exception:
+                self._release_limit_notice(event.group_id or "", flow.decision.period_key, plan_key)
+                raise
 
-        if len(messages) == 1 and messages[0].get("type") == "text":
-            self._reply_text(event, messages[0].get("text"), normalize_lists=False)
-            return
-        self._reply_messages(event, messages)
+        try:
+            if len(messages) == 1 and messages[0].get("type") == "text":
+                self._reply_text(event, messages[0].get("text"), normalize_lists=False)
+            else:
+                self._reply_messages(event, messages)
+        except Exception:
+            if claimed:
+                self._release_limit_notice(event.group_id or "", flow.decision.period_key, plan_key)
+            raise
+        if claimed:
+            self._log_quota_notice_sent(event.group_id or "", plan_key, flow.decision.period_key, limit)
 
     def _maybe_upsert_deferred_display_name(
         self,
@@ -1732,23 +1749,62 @@ class MessageHandler:
         period_key: str,
         period_end: Optional[datetime] = None,
     ) -> None:
-        """プラン別に月1回だけ上限通知を送る。"""
-        previous_plan = getattr(self._repo, "get_limit_notice_plan", lambda *_: None)(event.group_id, period_key)
-        if previous_plan == plan_key:
-            # 同一プランで既に通知済み
+        """プラン別に月1回だけ上限通知を送る。未記録なら停止中でも送る。"""
+        if not self._claim_limit_notice(event.group_id or "", period_key, plan_key):
             return
 
-        self._send_limit_reached_notice(
-            event,
-            plan_key,
-            limit,
-            period_key=period_key,
-            period_end=period_end,
-        )
+        try:
+            self._send_limit_reached_notice(
+                event,
+                plan_key,
+                limit,
+                period_key=period_key,
+                period_end=period_end,
+            )
+        except Exception:
+            self._release_limit_notice(event.group_id or "", period_key, plan_key)
+            raise
+        self._log_quota_notice_sent(event.group_id or "", plan_key, period_key, limit)
 
+    def _claim_limit_notice(self, group_id: str, period_key: str, plan_key: str) -> bool:
+        """通知の送信権を原子的に取る。同時メッセージでも True は1回だけ。"""
+
+        claim = getattr(self._repo, "claim_limit_notice_plan", None)
+        if callable(claim):
+            return bool(claim(group_id, period_key, plan_key))
+
+        previous_plan = getattr(self._repo, "get_limit_notice_plan", lambda *_: None)(group_id, period_key)
+        if previous_plan == plan_key:
+            return False
         setter = getattr(self._repo, "set_limit_notice_plan", None)
-        if setter:
-            setter(event.group_id, period_key, plan_key)
+        if not callable(setter):
+            return False
+        setter(group_id, period_key, plan_key)
+        return True
+
+    def _release_limit_notice(self, group_id: str, period_key: str, plan_key: str) -> None:
+        """送信失敗時に claim を戻す。次のブロックメッセージが再送できる。"""
+
+        release = getattr(self._repo, "release_limit_notice_plan", None)
+        if not callable(release):
+            return
+        try:
+            release(group_id, period_key, plan_key)
+        except Exception:
+            logger.warning(
+                "Failed to release quota limit notice claim",
+                extra={"group_id": group_id, "period_key": period_key, "plan": plan_key},
+                exc_info=True,
+            )
+
+    def _log_quota_notice_sent(self, group_id: str, plan_key: str, period_key: str, limit: int) -> None:
+        logger.info(
+            "Quota limit notice sent | group=%s plan=%s period=%s limit=%s",
+            group_id,
+            plan_key,
+            period_key,
+            limit,
+        )
 
     def _send_limit_reached_notice(
         self,
