@@ -12,7 +12,11 @@ from src.domain import models
 from src.domain.models import TranslationRuntimeState
 from src.domain.services.quota_service import QuotaDecision, quota_should_notify
 from src.infra.neon_repositories import NeonMessageRepository
-from src.presentation.free_limit_notice import FREE_LIMIT_BUTTON_LABEL, FREE_LIMIT_HEADLINE
+from src.presentation.free_limit_notice import (
+    static_notice_body,
+    static_notice_button,
+    static_notice_headline,
+)
 
 
 PLAN_URL = "https://plans.example/pro.html?st=token"
@@ -376,7 +380,8 @@ def test_flex_failure_falls_back_to_text_without_releasing_claim():
 
     assert repo.notice_plan == "free"
     assert line.batches[0][0]["type"] == "text"
-    assert FREE_NOTICE_LINE in line.batches[0][0]["text"]
+    assert "This month's 50 free messages are used up." in line.batches[0][0]["text"]
+    assert "Free quota" not in line.batches[0][0]["text"]
     assert line.batches[0][1]["text"] == f"{PLAN_URL}&group=group"
 
 
@@ -487,24 +492,27 @@ def test_limit_notice_renders_for_group_languages(languages):
     assert action["uri"] not in flex["altText"]
     assert "Unable to generate purchase link" not in flex["altText"]
 
-    non_english = [code.lower() for code in languages if code.lower() != "en"]
-    if not non_english:
-        # 英語と、言語が1つも無いグループはベース英文をそのまま使う
-        assert any("This month's 50 free messages are used up." in text for text in texts)
-        assert "2026-12-01" in "\n".join(texts)
+    rendered = "\n".join(texts + [action["label"], flex["altText"]])
+    first = (languages[0] if languages else "en").lower()
+    fixed_body = static_notice_body(first, 50, "2026-12-01")
+    if fixed_body:
         assert ui.calls == []
-        assert "LANG:" not in "\n".join(texts)
-        assert action["label"] == "View plans"
+        assert static_notice_headline(first) in texts
+        assert fixed_body in texts
+        assert action["label"] == static_notice_button(first)
+        assert " / " not in action["label"]
+        assert "LANG:" not in rendered
         return
 
-    translated_bases = [call[0] for call in ui.calls]
-    assert FREE_LIMIT_HEADLINE in translated_bases
-    assert any(base.startswith("This month's 50 free messages are used up.") for base in translated_bases)
-    assert FREE_LIMIT_BUTTON_LABEL in translated_bases
-    assert ui.calls[0][1] == non_english
-    rendered = "\n".join(texts + [action["label"], flex["altText"]])
-    for code in non_english:
-        assert f"LANG:{code}:" in rendered
+    # 固定訳が無い言語は翻訳するが、文字体系が違えば英語に戻す。
+    assert ui.calls
+    assert ui.calls[0][1] == [first]
+    if first == "not-a-language":
+        assert f"LANG:{first}:" in rendered
+        return
+    assert "This month's 50 free messages are used up." in rendered
+    assert "LANG:" not in rendered
+    assert action["label"] == "View plans"
 
 
 @pytest.mark.parametrize("text", ["Hello こんにちは", "😀🔥", "20261115", "１２３"])
@@ -523,8 +531,9 @@ def test_stop_notice_ignores_user_text_shape(text):
     rendered = "\n".join(_flex_texts(flex) + [flex["altText"], flex["contents"]["footer"]["contents"][0]["action"]["label"]])
     assert text not in rendered
     assert "This month's 50 free messages are used up." in rendered
-    assert "LANG:ja:" in rendered
-    assert ui.calls[0][0] == FREE_LIMIT_HEADLINE
+    assert "今月の無料メッセージ50件を使い切りました。" in rendered
+    assert ui.calls == []
+    assert flex["contents"]["footer"]["contents"][0]["action"]["label"] == "プランを見る"
     assert flex["contents"]["footer"]["contents"][0]["action"]["uri"].startswith(PLAN_URL)
 
 
