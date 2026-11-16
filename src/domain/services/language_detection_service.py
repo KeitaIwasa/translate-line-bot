@@ -325,7 +325,7 @@ class LanguageDetectionService:
 
     detect() は langdetect の生の結果を返す。返信言語は resolve_instruction_language() を使い、
     文字数の多い文字体系を選んでからグループ言語と制限した langdetect で決める。
-    グループに言語があるときは、返信言語をその中だけに限る。
+    登録言語だけに限るのは、プランメニューと上限通知が restrict_to_registered を渡したときだけ。
     """
 
     def detect(self, text: str) -> str:
@@ -375,14 +375,15 @@ class LanguageDetectionService:
         preferred: str = "",
         group_languages: Sequence[str] = (),
         detected: str | None = None,
+        restrict_to_registered: bool = False,
     ) -> str:
-        """返信に使う言語コードを返す。
+        """返信に使う言語コードを返す。判定できないときはグループ言語、それも無ければ空。
 
-        グループ言語があるときは、その登録言語だけから選ぶ。
-        検出結果が登録言語に含まれ、文字体系にも合うときはそれを使う。
-        登録外、または短い語で登録言語に収まらないときは、登録言語だけに再判定し、
-        それでも決まらなければ先頭の登録言語を使う。
-        言語が未登録のときは、従来どおり文字体系と langdetect の結果を返す。
+        ヘルプや使い方など通常のメンション返信は、登録外の言語でもそのまま返す。
+        restrict_to_registered はプランメニューと、無料枠・利用上限の通知だけが使う。
+        そのとき検出言語が登録外なら、登録言語だけに絞って再判定し、決まらなければ先頭の登録言語を使う。
+        言語が未登録のグループは、フラグがあっても従来どおり文字体系と langdetect の結果を返す。
+        短い単語だけの特別扱いはしない。Dio作成
         """
 
         analyzed = _strip_urls_and_mentions(text or "")
@@ -412,11 +413,10 @@ class LanguageDetectionService:
             else:
                 resolved = _resolve_script(family, analyzed, signals, group, detected)
 
-        if not group:
+        if not restrict_to_registered or not group:
             return resolved
         if resolved and _code_in(resolved, group):
             return _canonical_in_group(resolved, group)
-        # subscription のように、短いラテン語が登録外（ro など）へぶれたときはここへ来る
         within = _resolve_within_registered(analyzed, signals, group)
         return within or group[0]
 
