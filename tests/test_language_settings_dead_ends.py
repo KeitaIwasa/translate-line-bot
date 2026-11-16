@@ -157,8 +157,9 @@ def test_concatenated_languages_are_a_selection_not_the_generic_menu():
     handler._handle_command(_event(text), text)
 
     reply = handler._line.last_text or ""
-    assert "最大3つまでだよ" in reply
-    for name in ("日本語", "英語", "韓国語", "中国語", "タイ語"):
+    # 本文は日本語でも、登録言語が en だけなので英語の固定文
+    assert "You can set up to 3 translation languages. Which ones should I use?" in reply
+    for name in ("Japanese", "English", "Korean", "Chinese", "Thai"):
         assert name in reply
     assert "Change language settings" not in reply
     assert "言語設定の変更" not in reply
@@ -250,7 +251,8 @@ def test_completion_names_the_resulting_languages():
     handler._handle_command(_event("日本語を追加して"), "日本語を追加して")
 
     assert repo.languages == ["en", "ja"]
-    assert handler._line.last_text == "英語・日本語になったよ"
+    # 追加前の登録言語は英語だけなので、完了文は英語
+    assert handler._line.last_text == "English and Japanese have been set as the translation languages."
 
 
 def test_what_languages_do_you_know_returns_the_catalog():
@@ -286,8 +288,9 @@ def test_supported_language_plus_unknown_keeps_the_warning():
     handler._handle_command(_event("英語と太陽語"), "英語と太陽語")
 
     reply = handler._line.last_text or ""
-    assert "太陽語は対応していないよ" in reply
-    assert "英語" in reply
+    # 登録言語は韓国語だけなので、未対応の案内は韓国語
+    assert "太陽語는 지원하지 않아" in reply
+    assert "English" in reply
     assert repo.languages == ["en"]
 
 

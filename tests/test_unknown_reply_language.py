@@ -141,15 +141,16 @@ def test_resolve_follows_message_language_or_group_language():
     assert detector.resolve_instruction_language("Please confirm 明日の予定", group_languages=GROUP) == "en"
     assert detector.resolve_instruction_language("Add English と 日本語", group_languages=GROUP) == "en"
     assert detector.resolve_instruction_language("Hello こんにちは、元気？", group_languages=GROUP) == "ja"
-    # 本文がハングルなら、グループに無くても韓国語
-    assert detector.resolve_instruction_language("지금 뭐해?", group_languages=GROUP) == "ko"
+    # 登録言語に無いハングルは、グループの先頭言語にする
+    assert detector.resolve_instruction_language("지금 뭐해?", group_languages=GROUP) == "ja"
     # 文字が無いときはグループ言語。無関係な言語にはしない
     assert detector.resolve_instruction_language("👍😂🎉", group_languages=GROUP) == "ja"
     assert detector.resolve_instruction_language("12345 678", group_languages=GROUP) == "ja"
     assert detector.resolve_instruction_language("👍😂🎉", group_languages=["en", "ja"]) == "en"
     assert detector.resolve_instruction_language("12345 678", group_languages=["en", "ja"]) == "en"
     assert detector.resolve_instruction_language("\uFFFD\u0296\uFFFD", group_languages=GROUP) == "ja"
-    assert detector.resolve_instruction_language("Bonjour, comment allez-vous aujourd'hui?", group_languages=GROUP) == "fr"
+    # 登録言語に無いフランス語は、同じ文字体系の登録言語（en）へ落とす
+    assert detector.resolve_instruction_language("Bonjour, comment allez-vous aujourd'hui?", group_languages=GROUP) == "en"
     assert detector.resolve_instruction_language("言語設定", group_languages=["zh-tw", "en"]) == "zh-tw"
 
 
@@ -164,7 +165,7 @@ def test_unknown_mentions_reply_in_the_message_language():
         ("👍😂🎉", "ja"),
         ("12345 678", "ja"),
         (f"\uFFFD\u0296\uFFFDAI 開始時間は何?", "ja"),
-        ("지금 뭐해?", "ko"),
+        ("지금 뭐해?", "ja"),
     ]
     for text, expected in cases:
         assert not is_current_languages_question(text)
@@ -269,29 +270,29 @@ def test_shared_script_prefers_group_language_then_restricted_detection():
     assert detector.resolve_instruction_language(russian, group_languages=["ru", "en"]) == "ru"
     assert detector.resolve_instruction_language(spanish, group_languages=["es", "en"]) == "es"
     assert detector.resolve_instruction_language(english, group_languages=["es", "en"]) == "en"
-    # グループにその文字体系が無いときは、集合に限った langdetect を使う（既定の ar にしない）
+    # 登録言語にその文字体系が無いときは、先頭の登録言語にする
     assert detector.resolve_instruction_language(
         "سلام، حال شما چطور است؟ لطفا زبان ترجمه را به من بگویید.",
         group_languages=["ja", "en"],
-    ) == "fa"
+    ) == "ja"
     # 短いラテン文は誤検知よりグループ言語を優先する
     assert detector.resolve_instruction_language("Hola", group_languages=["es", "ja"]) == "es"
     hindi = "नमस्ते, आप कैसे हैं? कृपया वर्तमान अनुवाद भाषाएँ बताएं।"
     marathi = "नमस्कार, तुम्ही कसे आहात? कृपया सध्याच्या भाषांतर भाषा सांगा."
     assert detector.resolve_instruction_language(hindi, group_languages=["hi", "mr"]) == "hi"
     assert detector.resolve_instruction_language(marathi, group_languages=["hi", "mr"]) == "mr"
-    # かなとハングルは従来どおり一意
-    assert detector.resolve_instruction_language("こんにちは", group_languages=["fa", "ar"]) == "ja"
-    assert detector.resolve_instruction_language("안녕하세요", group_languages=["fa", "ar"]) == "ko"
-    # ベンガル文字・タミル文字・ヘブライ文字はグループ先頭の ja に落とさない
+    # 登録言語にかな・ハングルが無いときは先頭の登録言語
+    assert detector.resolve_instruction_language("こんにちは", group_languages=["fa", "ar"]) == "fa"
+    assert detector.resolve_instruction_language("안녕하세요", group_languages=["fa", "ar"]) == "fa"
+    # 登録済みのベンガル語はそのまま。未登録のタミル語・ヘブライ語は先頭の ja
     bengali = "আপনি কেমন আছেন? অনুগ্রহ করে বাংলা যোগ করুন।"
     tamil = "வணக்கம், தமிழ் மொழியை சேர்க்கவும்."
     hebrew = "שלום, איך מאפסים את כל השפות?"
     assert detector.resolve_instruction_language(bengali, group_languages=["ja", "en", "bn"]) == "bn"
-    assert detector.resolve_instruction_language(tamil, group_languages=["ja", "en"]) == "ta"
-    assert detector.resolve_instruction_language(hebrew, group_languages=["ja", "en"]) == "he"
-    # 未分類の文字体系は group[0] ではなく生の langdetect を使う
-    assert detector.resolve_instruction_language("ᎣᏏᏲ", group_languages=["ja", "en"], detected="chr") == "chr"
+    assert detector.resolve_instruction_language(tamil, group_languages=["ja", "en"]) == "ja"
+    assert detector.resolve_instruction_language(hebrew, group_languages=["ja", "en"]) == "ja"
+    # 未分類の文字体系でも、登録外なら先頭の登録言語
+    assert detector.resolve_instruction_language("ᎣᏏᏲ", group_languages=["ja", "en"], detected="chr") == "ja"
 
 
 class _ResetRouter:
@@ -466,6 +467,50 @@ def test_distinct_language_sets_do_not_grow_the_factory_cache():
     assert seen > svc._FACTORY_CACHE_LIMIT
     assert len(svc._RESTRICTED_FACTORIES) <= svc._FACTORY_CACHE_LIMIT
     assert detector_factory._factory.word_lang_prob_map is shared_map
+
+
+def test_subscription_word_uses_registered_language_not_romanian():
+    """subscription は langdetect が ro になる。登録が en/th なら英語を選ぶ。"""
+
+    detector = LanguageDetectionService()
+    assert detector.detect("subscription") == "ro"
+    assert detector.resolve_instruction_language(
+        "subscription",
+        preferred="ro",
+        group_languages=["en", "th"],
+    ) == "en"
+    # 先頭がタイ語でも、ラテン文字なので登録言語の中の en を使う
+    assert detector.resolve_instruction_language(
+        "subscription",
+        group_languages=["th", "en"],
+    ) == "en"
+
+
+def test_detected_language_outside_group_falls_back_to_registered_set():
+    detector = LanguageDetectionService()
+    french = "Bonjour, comment allez-vous aujourd'hui?"
+    assert detector.resolve_instruction_language(french, preferred="fr", group_languages=["ja", "en"]) == "en"
+    assert detector.resolve_instruction_language("지금 뭐해?", preferred="ko", group_languages=["en", "th"]) == "en"
+    # 文字体系が登録言語に無いときは先頭の登録言語
+    assert detector.resolve_instruction_language("こんにちは", group_languages=["th", "en"]) == "th"
+
+
+def test_detected_language_inside_group_is_kept():
+    detector = LanguageDetectionService()
+    spanish = "Hola, ¿cómo estás? Por favor dime los idiomas de traducción actuales."
+    thai = "สวัสดีครับ ช่วยบอกวิธีใช้งานของบอทนี้หน่อยได้ไหม"
+    assert detector.resolve_instruction_language(spanish, preferred="es", group_languages=["es", "en"]) == "es"
+    assert detector.resolve_instruction_language(thai, preferred="th", group_languages=["en", "th"]) == "th"
+    assert detector.resolve_instruction_language("how do I use this bot?", preferred="en", group_languages=["en", "th"]) == "en"
+
+
+def test_group_without_languages_keeps_raw_detection():
+    """言語未登録のグループは、登録言語への丸めをしない。"""
+
+    detector = LanguageDetectionService()
+    assert detector.resolve_instruction_language("subscription") == "ro"
+    assert detector.resolve_instruction_language("hello") == "fi"
+    assert detector.resolve_instruction_language("Bonjour, comment allez-vous aujourd'hui?") == "fr"
 
 
 def test_status_set_question_lists_group_languages():
