@@ -326,7 +326,7 @@ def test_fresh_free_group_notifies_once_when_translation_stops():
     assert flex["type"] == "flex"
     action = flex["contents"]["footer"]["contents"][0]["action"]
     assert action["type"] == "uri"
-    assert action["label"] == "View plans"
+    assert action["label"] == "Remove limit"
     assert action["uri"] == f"{PLAN_URL}&group=group"
     body = "\n".join(_flex_texts(flex))
     assert "This month's 50 free messages are used up." in body
@@ -512,7 +512,7 @@ def test_limit_notice_renders_for_group_languages(languages):
         return
     assert "This month's 50 free messages are used up." in rendered
     assert "LANG:" not in rendered
-    assert action["label"] == "View plans"
+    assert action["label"] == "Remove limit"
 
 
 @pytest.mark.parametrize("text", ["Hello こんにちは", "😀🔥", "20261115", "１２３"])
@@ -533,7 +533,7 @@ def test_stop_notice_ignores_user_text_shape(text):
     assert "This month's 50 free messages are used up." in rendered
     assert "今月の無料メッセージ50件を使い切りました。" in rendered
     assert ui.calls == []
-    assert flex["contents"]["footer"]["contents"][0]["action"]["label"] == "プランを見る"
+    assert flex["contents"]["footer"]["contents"][0]["action"]["label"] == "上限を解除する"
     assert flex["contents"]["footer"]["contents"][0]["action"]["uri"].startswith(PLAN_URL)
 
 

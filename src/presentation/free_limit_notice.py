@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 # 英語をベース原文にする。固定訳が無い言語のフォールバックもこの英文。
 FREE_LIMIT_HEADLINE = "Free limit reached"
-FREE_LIMIT_BUTTON_LABEL = "View plans"
+FREE_LIMIT_BUTTON_LABEL = "Remove limit"
 
 # LINE Flex の上限。ボタンラベルは 40、altText は 400、URI は 1000。
 # 本文は API 上限より短く保ち、言語が増えてもバブルが縦に伸びすぎないようにする。
@@ -75,77 +75,77 @@ _STATIC_COPY: dict[str, _NoticeCopy] = {
     ),
     "ja": _copy(
         "無料枠の上限です",
-        "プランを見る",
+        "上限を解除する",
         "今月の無料メッセージ{limit}件を使い切りました。",
         "{date} UTC に翻訳が再開します。",
         "月間の上限がリセットされると翻訳が再開します。",
     ),
     "ko": _copy(
         "무료 한도에 도달했습니다",
-        "요금제 보기",
+        "한도 해제하기",
         "이번 달 무료 메시지 {limit}건을 모두 사용했습니다.",
         "{date} UTC에 번역이 다시 시작됩니다.",
         "월간 한도가 초기화되면 번역이 다시 시작됩니다.",
     ),
     "zh": _copy(
         "已达到免费上限",
-        "查看方案",
+        "解除上限",
         "本月 {limit} 条免费消息已用完。",
         "翻译将于 {date} UTC 恢复。",
         "每月额度重置后将恢复翻译。",
     ),
     "zh-tw": _copy(
         "已達到免費上限",
-        "查看方案",
+        "解除上限",
         "本月 {limit} 則免費訊息已用完。",
         "翻譯將於 {date} UTC 恢復。",
         "每月額度重置後將恢復翻譯。",
     ),
     "th": _copy(
         "ถึงโควตาฟรีแล้ว",
-        "ดูแพ็กเกจ",
+        "ยกเลิกขีดจำกัด",
         "ใช้ข้อความฟรีเดือนนี้ครบ {limit} ข้อความแล้ว",
         "การแปลจะเริ่มอีกครั้งในวันที่ {date} UTC",
         "การแปลจะเริ่มอีกครั้งเมื่อโควต้ารายเดือนถูกรีเซ็ต",
     ),
     "vi": _copy(
         "Đã hết hạn mức miễn phí",
-        "Xem gói",
+        "Gỡ giới hạn",
         "Đã dùng hết {limit} tin miễn phí trong tháng này.",
         "Bản dịch sẽ tiếp tục vào {date} UTC.",
         "Bản dịch sẽ tiếp tục khi hạn mức tháng được đặt lại.",
     ),
     "id": _copy(
         "Kuota gratis habis",
-        "Lihat paket",
+        "Hapus batas",
         "{limit} pesan gratis bulan ini sudah habis.",
         "Terjemahan dilanjutkan pada {date} UTC.",
         "Terjemahan dilanjutkan saat kuota bulanan direset.",
     ),
     "es": _copy(
         "Límite gratis alcanzado",
-        "Ver planes",
+        "Quitar límite",
         "Se usaron los {limit} mensajes gratis de este mes.",
         "La traducción vuelve el {date} UTC.",
         "La traducción vuelve cuando se reinicie la cuota mensual.",
     ),
     "fr": _copy(
         "Limite gratuite atteinte",
-        "Voir les offres",
+        "Lever la limite",
         "Les {limit} messages gratuits de ce mois sont épuisés.",
         "La traduction reprend le {date} UTC.",
         "La traduction reprend au renouvellement du quota mensuel.",
     ),
     "pt": _copy(
         "Limite grátis atingido",
-        "Ver planos",
+        "Remover limite",
         "As {limit} mensagens grátis deste mês acabaram.",
         "A tradução volta em {date} UTC.",
         "A tradução volta quando a cota mensal for renovada.",
     ),
     "de": _copy(
         "Gratislimit erreicht",
-        "Pläne ansehen",
+        "Limit aufheben",
         "Die {limit} Gratisanachrichten dieses Monats sind aufgebraucht.",
         "Die Übersetzung geht am {date} UTC weiter.",
         "Die Übersetzung geht weiter, wenn das Monatslimit zurückgesetzt wird.",

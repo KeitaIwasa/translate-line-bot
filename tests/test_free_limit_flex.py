@@ -103,7 +103,7 @@ def test_flex_json_for_en_ja_ko_and_ja_en_ko():
                         "type": "button",
                         "style": "primary",
                         "height": "sm",
-                        "action": {"type": "uri", "label": "View plans", "uri": PLAN_URL},
+                        "action": {"type": "uri", "label": "Remove limit", "uri": PLAN_URL},
                     }
                 ],
             },
@@ -116,7 +116,7 @@ def test_flex_json_for_en_ja_ko_and_ja_en_ko():
         en_body,
         ko_body,
     ]
-    assert _action(ja_first)["label"] == "プランを見る"
+    assert _action(ja_first)["label"] == "上限を解除する"
     assert _action(ja_first)["uri"] == PLAN_URL
     assert " / " not in _action(en_first)["label"]
     assert " / " not in _action(ja_first)["label"]
@@ -170,7 +170,7 @@ def test_many_languages_stay_within_the_bubble_cap_and_skip_duplicate_english():
     message = build_free_limit_flex_message(
         headline=FREE_LIMIT_HEADLINE,
         bodies=bodies,
-        button_label="View plans",
+        button_label=FREE_LIMIT_BUTTON_LABEL,
         url=PLAN_URL,
     )
 
@@ -185,7 +185,7 @@ def test_identical_translations_are_not_repeated():
     message = build_free_limit_flex_message(
         headline=FREE_LIMIT_HEADLINE,
         bodies=[BODY_EN, BODY_EN],
-        button_label="View plans",
+        button_label=FREE_LIMIT_BUTTON_LABEL,
         url=PLAN_URL,
     )
 
@@ -198,7 +198,7 @@ def test_body_is_kept_to_two_short_lines():
     message = build_free_limit_flex_message(
         headline="Free limit reached",
         bodies=[long_body],
-        button_label="View plans",
+        button_label=FREE_LIMIT_BUTTON_LABEL,
         url=PLAN_URL,
     )
 
@@ -223,7 +223,7 @@ def test_alt_text_stays_within_the_line_limit():
     message = build_free_limit_flex_message(
         headline="H" * 200,
         bodies=["B" * 200],
-        button_label="View plans",
+        button_label=FREE_LIMIT_BUTTON_LABEL,
         url=PLAN_URL,
     )
 
@@ -282,7 +282,7 @@ class _UI:
         results = []
         for lang in languages:
             if lang == "my" and base_text == FREE_LIMIT_BUTTON_LABEL:
-                text = "ကြည့်ရန်"
+                text = "ကန့်သတ်ချက်ဖယ်ရှားရန်"
             elif lang == "my":
                 text = "ဒီလ အခမဲ့စာ ၅၀ ပြီးပါပြီ။"
             else:
@@ -349,7 +349,7 @@ def test_handler_uses_static_copy_for_en_ja_ko_without_calling_the_translator():
     handler._send_limit_reached_notice(_event(), "free", 50, period_key="2026-11-01")
     assert ui.calls == []
     assert line.batches[0][0] == _flex_for(["ja", "en", "ko"])
-    assert _action(line.batches[0][0])["label"] == "プランを見る"
+    assert _action(line.batches[0][0])["label"] == "上限を解除する"
 
 
 def test_unlisted_language_drops_wrong_script_and_keeps_a_matching_script():
@@ -362,7 +362,7 @@ def test_unlisted_language_drops_wrong_script_and_keeps_a_matching_script():
     rendered = "\n".join(_texts(flex))
     assert "LANG:" not in rendered
     assert "ဒီလ အခမဲ့စာ" in rendered
-    assert _action(flex)["label"] == "ကြည့်ရန်"
+    assert _action(flex)["label"] == "ကန့်သတ်ချက်ဖယ်ရှားရန်"
 
 
 def test_missing_plan_url_keeps_the_plain_text_notice():
