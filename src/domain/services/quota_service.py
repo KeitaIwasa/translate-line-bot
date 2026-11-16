@@ -22,6 +22,35 @@ class QuotaDecision:
     plan_key: str
 
 
+def quota_should_notify(
+    *,
+    allowed: bool,
+    usage: int,
+    limit: int,
+    notice_plan: Optional[str],
+    plan_key: str,
+    stop_translation_on_limit: bool,
+) -> bool:
+    """上限通知を出すべきかを返す。
+
+    無料プラン（上限で翻訳を止める）は、翻訳が実際に止まるブロック時だけ通知する。
+    上限ちょうどの成功翻訳ではまだ訳すので、ここでは通知しない。
+    そこでフラグを先に立てると、停止メッセージ側の should_notify が False になり、
+    アップグレード案内が出ない。
+
+    有料プランは従来どおり、上限到達の成功翻訳と、未記録のままブロックされたときに通知する。
+    同一プランで記録済みなら再送しない。
+    """
+
+    if notice_plan == plan_key:
+        return False
+    if usage < limit:
+        return False
+    if stop_translation_on_limit:
+        return not allowed
+    return (not allowed) or usage == limit
+
+
 class QuotaService:
     """課金状態と利用上限の判定を担当するサービス。"""
 
@@ -68,7 +97,7 @@ class QuotaService:
 
         MessageHandler の既存ロジックをそのまま集約し、戻り値で意図を伝える。
         - allowed: True の場合のみ翻訳を実行する
-        - should_notify: 上限到達を通知すべき場合（allowed=True なら翻訳後に通知）
+        - should_notify: 上限通知を出すべき場合。無料は翻訳停止時、有料は上限到達時
         - stop_translation: free プランで上限超過時に翻訳を停止すべきか
         """
 
@@ -122,41 +151,22 @@ class QuotaService:
         current_usage = self._repo.get_usage(group_id, period_key)
         notice_plan = self._repo.get_limit_notice_plan(group_id, period_key)
         if current_usage >= limit:
-            return QuotaDecision(
-                allowed=False,
-                should_notify=notice_plan != plan_key,
-                stop_translation=stop_translation_on_limit,
-                usage=current_usage,
-                limit=limit,
-                period_key=period_key,
-                plan_key=plan_key,
-            )
-
-        usage_after = self._repo.increment_usage(group_id, period_key, increment)
-        if usage_after > limit:
-            return QuotaDecision(
-                allowed=False,
-                should_notify=notice_plan != plan_key,
-                stop_translation=stop_translation_on_limit,
-                usage=usage_after,
-                limit=limit,
-                period_key=period_key,
-                plan_key=plan_key,
-            )
-        if usage_after == limit:
-            return QuotaDecision(
-                allowed=True,
-                should_notify=notice_plan != plan_key,
-                stop_translation=False,
-                usage=usage_after,
-                limit=limit,
-                period_key=period_key,
-                plan_key=plan_key,
-            )
+            usage_after = current_usage
+            allowed = False
+        else:
+            usage_after = self._repo.increment_usage(group_id, period_key, increment)
+            allowed = usage_after <= limit
         return QuotaDecision(
-            allowed=True,
-            should_notify=False,
-            stop_translation=False,
+            allowed=allowed,
+            should_notify=quota_should_notify(
+                allowed=allowed,
+                usage=usage_after,
+                limit=limit,
+                notice_plan=notice_plan,
+                plan_key=plan_key,
+                stop_translation_on_limit=stop_translation_on_limit,
+            ),
+            stop_translation=stop_translation_on_limit and not allowed,
             usage=usage_after,
             limit=limit,
             period_key=period_key,
