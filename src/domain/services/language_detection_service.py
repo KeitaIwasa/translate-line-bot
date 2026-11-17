@@ -325,6 +325,7 @@ class LanguageDetectionService:
 
     detect() は langdetect の生の結果を返す。返信言語は resolve_instruction_language() を使い、
     文字数の多い文字体系を選んでからグループ言語と制限した langdetect で決める。
+    登録言語だけに限るのは、プランメニューと上限通知が restrict_to_registered を渡したときだけ。
     """
 
     def detect(self, text: str) -> str:
@@ -374,34 +375,50 @@ class LanguageDetectionService:
         preferred: str = "",
         group_languages: Sequence[str] = (),
         detected: str | None = None,
+        restrict_to_registered: bool = False,
     ) -> str:
-        """返信に使う言語コードを返す。判定できないときはグループ言語、それも無ければ空。"""
+        """返信に使う言語コードを返す。判定できないときはグループ言語、それも無ければ空。
+
+        ヘルプや使い方など通常のメンション返信は、登録外の言語でもそのまま返す。
+        restrict_to_registered はプランメニューと、無料枠・利用上限の通知だけが使う。
+        そのとき検出言語が登録外なら、登録言語だけに絞って再判定し、決まらなければ先頭の登録言語を使う。
+        言語が未登録のグループは、フラグがあっても従来どおり文字体系と langdetect の結果を返す。
+        短い単語だけの特別扱いはしない。Dio作成
+        """
 
         analyzed = _strip_urls_and_mentions(text or "")
         signals = _script_signals(analyzed)
         group = _normalize_group(group_languages)
         preferred_code = _normalize_code(preferred)
+        resolved = ""
         # ルーターが付けた言語は、主要文字体系に合い、同じ文字体系のグループ言語と矛盾しないときだけ使う
         if (
             preferred_code
             and _language_fits(preferred_code, signals)
             and _preferred_agrees_with_group(preferred_code, group)
         ):
-            return preferred_code
+            resolved = preferred_code
+        else:
+            family = _dominant_family(signals)
+            if family == "kana":
+                # かながハングル以上の文は日本語。漢字だけの文を ko と誤検知してもここには来ない
+                resolved = "ja"
+            elif family == "hangul":
+                resolved = "ko"
+            elif family == "other":
+                raw = _normalize_code(self.detect(analyzed) if detected is None else detected)
+                resolved = raw or (group[0] if group else "")
+            elif not family:
+                resolved = group[0] if group else ""
+            else:
+                resolved = _resolve_script(family, analyzed, signals, group, detected)
 
-        family = _dominant_family(signals)
-        if family == "kana":
-            # かながハングル以上の文は日本語。漢字だけの文を ko と誤検知してもここには来ない
-            return "ja"
-        if family == "hangul":
-            return "ko"
-        if family == "other":
-            raw = _normalize_code(self.detect(analyzed) if detected is None else detected)
-            if raw:
-                return raw
-        if not family or family == "other":
-            return group[0] if group else ""
-        return _resolve_script(family, analyzed, signals, group, detected)
+        if not restrict_to_registered or not group:
+            return resolved
+        if resolved and _code_in(resolved, group):
+            return _canonical_in_group(resolved, group)
+        within = _resolve_within_registered(analyzed, signals, group)
+        return within or group[0]
 
 
 def _script_groups(text: str) -> set[str]:
@@ -811,6 +828,40 @@ def _same_code(left: str, right: str) -> bool:
 
 def _code_in(code: str, pool: Sequence[str]) -> bool:
     return any(_same_code(code, item) for item in pool)
+
+
+def _canonical_in_group(code: str, group: Sequence[str]) -> str:
+    """登録言語の表記（zh-tw など）を返す。無ければ空。"""
+
+    for item in group:
+        if _same_code(code, item):
+            return item
+    return ""
+
+
+def _resolve_within_registered(
+    text: str,
+    signals: Mapping[str, int],
+    group: Sequence[str],
+) -> str:
+    """登録言語だけを候補にして返信言語を決める。決まらなければ空。"""
+
+    family = _dominant_family(signals)
+    if family == "kana":
+        return _canonical_in_group("ja", group)
+    if family == "hangul":
+        return _canonical_in_group("ko", group)
+    if not family or family == "other":
+        return ""
+    matches = _group_matches(group, family)
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) < 2:
+        return ""
+    found = _restricted_detect(text, matches)
+    if found and _code_in(found, matches):
+        return _canonical_in_group(found, matches)
+    return ""
 
 
 def _preferred_agrees_with_group(code: str, group: Sequence[str]) -> bool:
