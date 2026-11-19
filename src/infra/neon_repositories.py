@@ -196,21 +196,11 @@ class NeonMessageRepository(MessageRepositoryPort):
         return GroupMessagePrefetch(runtime=runtime, display_name=display_name, cache_hit=False)
 
     def _fetch_prefetch_row(self, group_id: str, user_id: str):
-        last_error: Optional[Exception] = None
-        for attempt in (1, 2):
-            try:
-                with self._client.cursor() as cur:
-                    cur.execute(_PREFETCH_SQL, (group_id, user_id))
-                    return cur.fetchone()
-            except errors.OperationalError as exc:
-                last_error = exc
-                logger.warning(
-                    "DB step failed | step=prefetch attempt=%s group=%s",
-                    attempt,
-                    group_id,
-                )
-        assert last_error is not None
-        raise last_error
+        # 切れた接続の捨て方と再試行は NeonClient にまとめる。ここで繰り返すと
+        # 読み取り以外の処理と方針が分かれ、同じ死んだ接続を引き直す。
+        with self._client.cursor() as cur:
+            cur.execute(_PREFETCH_SQL, (group_id, user_id))
+            return cur.fetchone()
 
     def _runtime_from_prefetch_row(self, group_id: str, row) -> tuple[TranslationRuntimeState, Optional[str]]:
         if not row:

@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 class TranslationFlowResult:
     decision: QuotaDecision
     reply_text: str | None = None
+    # 返信が無い理由。本文は入れない。
+    empty_reason: str = ""
 
 
 class TranslationFlowService:
@@ -107,16 +109,26 @@ class TranslationFlowService:
 
         if not translations:
             self._rollback_usage(group_id=group_id, period_key=decision.period_key, increment=increment)
+            reason = getattr(self._translation, "last_empty_reason", "") or "empty_provider_result"
             logger.warning(
-                "Translation returned no candidates | group=%s user=%s languages=%s plan=%s",
+                "Translation returned no candidates | group=%s user=%s languages=%s plan=%s reason=%s",
                 event.group_id,
                 event.user_id,
                 list(candidate_languages),
                 plan_key,
+                reason,
             )
-            return TranslationFlowResult(decision=decision, reply_text=None)
+            return TranslationFlowResult(decision=decision, reply_text=None, empty_reason=reason)
 
         reply_text = build_translation_reply(event.text, translations)
+        if not reply_text:
+            logger.warning(
+                "Translation reply text empty after formatting | group=%s languages=%s plan=%s",
+                event.group_id,
+                list(candidate_languages),
+                plan_key,
+            )
+            return TranslationFlowResult(decision=decision, reply_text=None, empty_reason="empty_reply")
         return TranslationFlowResult(decision=decision, reply_text=reply_text)
 
     def _resolve_context_messages(self, group_id: str, prefetched_messages):
