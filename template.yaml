@@ -68,9 +68,28 @@ Parameters:
     Default: ""
     AllowedPattern: "^$|^/kotori/.+"
     Description: SSM SecureString name under /kotori/<StageName>/ (e.g. /kotori/stg/typesafe-api-key). The execution role can GetParameter and kms:Decrypt only that prefix. Empty disables the SSM lookup
+  # 空のままでもデプロイできる。通知先は後から足せる。stg / prod で別の値にする。
+  AlertEmail:
+    Type: String
+    Default: ""
+    AllowedPattern: '^$|^[^\s@]+@[^\s@]+\.[^\s@]+$'
+    Description: Operator email for translation and Lambda alarms. Empty skips the email subscription.
+  AlertWebhookUrl:
+    Type: String
+    Default: ""
+    AllowedPattern: '^$|^https://.+'
+    Description: HTTPS endpoint for the same alarms (SNS subscription). Empty skips it. The endpoint must confirm the subscription.
+  ProviderFailureAlarmThreshold:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    MaxValue: 1000
+    Description: ProviderFailure count in 15 minutes that raises the sustained-failure alarm
 
 Conditions:
   UseStripe: !Equals [!Ref EnableStripe, "true"]
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
+  HasAlertWebhook: !Not [!Equals [!Ref AlertWebhookUrl, ""]]
 
 Globals:
   Function:
@@ -92,6 +111,8 @@ Globals:
         TRANSLATION_RETRY: !Ref TranslationRetry
         BOT_MENTION_NAME: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:BOT_MENTION_NAME}}"
         DEPLOY_NONCE: !Ref DeployNonce
+        # 失敗メトリクスの Stage。stg と prod を同じアカウントに置いてもアラームが混ざらない。
+        KOTORI_STAGE: !Ref StageName
         STRIPE_SECRET_KEY: !If
           - UseStripe
           - !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:STRIPE_SECRET_KEY}}"
@@ -300,6 +321,116 @@ Resources:
             Description: Delete encrypted messages older than 7 days (00:00 UTC daily)
             Schedule: cron(0 0 * * ? *)
 
+  # 翻訳が止まっても Lambda は 200 を返すため、Errors だけでは 402 を検知できない。
+  OperatorAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "kotori-${StageName}-operator-alerts"
+
+  OperatorAlertTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref OperatorAlertTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudWatchAlarms
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref OperatorAlertTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  OperatorAlertEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref OperatorAlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  OperatorAlertWebhookSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertWebhook
+    Properties:
+      TopicArn: !Ref OperatorAlertTopic
+      Protocol: https
+      Endpoint: !Ref AlertWebhookUrl
+
+  TranslationProviderFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "kotori-${StageName}-provider-failures"
+      AlarmDescription: !Sub "KOTORI ${StageName}: 15分で翻訳経路の外部依存失敗が${ProviderFailureAlarmThreshold}件以上（Gemini / LINE / Neon）"
+      Namespace: KOTORI/Translation
+      MetricName: ProviderFailure
+      Dimensions:
+        - Name: Stage
+          Value: !Ref StageName
+        - Name: Signal
+          Value: provider_failure
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: !Ref ProviderFailureAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref OperatorAlertTopic
+      OKActions:
+        - !Ref OperatorAlertTopic
+
+  TranslationNonRetryableProviderAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "kotori-${StageName}-provider-non-retryable"
+      AlarmDescription: !Sub "KOTORI ${StageName}: Gemini または LINE の認証・請求・権限エラー（HTTP 401/402/403）。再試行では回復しない"
+      Namespace: KOTORI/Translation
+      MetricName: ProviderFailure
+      Dimensions:
+        - Name: Stage
+          Value: !Ref StageName
+        - Name: ErrorClass
+          Value: non_retryable
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref OperatorAlertTopic
+      OKActions:
+        - !Ref OperatorAlertTopic
+
+  WebhookLambdaErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "kotori-${StageName}-webhook-lambda-errors"
+      AlarmDescription: !Sub "KOTORI ${StageName}: LineWebhookFunction の Lambda Errors"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LineWebhookFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref OperatorAlertTopic
+      OKActions:
+        - !Ref OperatorAlertTopic
+
 Outputs:
   FunctionArn:
     Description: ARN of the LINE webhook Lambda function
@@ -307,3 +438,6 @@ Outputs:
   HttpApiEndpoint:
     Description: Invoke URL for the HTTP API stage
     Value: !Sub "https://${LineWebhookApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+  OperatorAlertTopicArn:
+    Description: SNS topic for translation provider failures and Lambda errors
+    Value: !Ref OperatorAlertTopic

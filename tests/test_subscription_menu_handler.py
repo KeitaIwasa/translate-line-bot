@@ -1,5 +1,6 @@
 from src.app.handlers.message_handler import MessageHandler
 from src.domain import models
+from src.domain.services.language_detection_service import LanguageDetectionService
 
 
 class _Line:
@@ -178,6 +179,107 @@ def test_free_plan_menu_batches_five_strings_once():
     assert labels == ["お支払い管理", "Proにアップグレード"]
     assert line.messages[0]["template"]["title"] == "プラン"
     assert line.messages[0]["template"]["text"].startswith("ja:Plan: Free")
+
+
+class _LanguageRepo(_FreeRepo):
+    def __init__(self, languages):
+        self.languages = list(languages)
+
+    def fetch_group_languages(self, _group_id):
+        return list(self.languages)
+
+    def fetch_translation_runtime_state(self, _group_id):
+        return models.TranslationRuntimeState(
+            translation_enabled=True,
+            group_languages=list(self.languages),
+            subscription_status=None,
+            period_start=None,
+            period_end=None,
+            period_key="2026-11",
+            usage=0,
+            limit_notice_plan=None,
+        )
+
+
+class _MenuRouter:
+    def __init__(self, instruction_language):
+        self.instruction_language = instruction_language
+
+    def decide(self, _payload):
+        return models.CommandDecision(
+            action="subscription_menu",
+            instruction_language=self.instruction_language,
+            ack_text="",
+        )
+
+
+def _mention_menu_handler(line, interface, languages, instruction_language):
+    return MessageHandler(
+        line_client=line,
+        translation_service=_Dummy(),
+        interface_translation=interface,
+        language_detector=LanguageDetectionService(),
+        language_pref_service=_Dummy(),
+        command_router=_MenuRouter(instruction_language),
+        repo=_LanguageRepo(languages),
+        max_context_messages=1,
+        max_group_languages=5,
+        translation_retry=1,
+        bot_mention_name="通訳AI",
+        subscription_service=_SubscriptionService(),
+    )
+
+
+def _command_event(text):
+    return models.MessageEvent(
+        event_type="message",
+        reply_token="token",
+        group_id="G",
+        user_id="U",
+        sender_type="group",
+        text=text,
+    )
+
+
+def test_subscription_mention_uses_english_menu_for_en_th_group():
+    """登録 en/th で subscription が ro と検出されても、メニューは英語。"""
+
+    line = _Line()
+    interface = _BatchInterface()
+    handler = _mention_menu_handler(line, interface, ["en", "th"], "ro")
+
+    assert handler._handle_command(_command_event("subscription"), "subscription") is True
+
+    assert interface.calls == []
+    template = line.messages[0]["template"]
+    assert template["title"] == "Subscription"
+    assert template["text"] == "Plan: Free (no subscription)"
+    assert [action["label"] for action in template["actions"]] == ["Manage billing", "Upgrade to Pro"]
+
+
+def test_subscription_menu_keeps_registered_instruction_language():
+    line = _Line()
+    interface = _BatchInterface()
+    handler = _mention_menu_handler(line, interface, ["es", "en"], "es")
+    text = "Hola, ¿cómo estás? Por favor dime los idiomas de traducción actuales."
+
+    assert handler._handle_command(_command_event(text), text) is True
+
+    assert [lang for _texts, lang in interface.calls] == ["es"]
+    assert line.messages[0]["template"]["title"] == "es:Subscription"
+
+
+def test_subscription_menu_falls_back_when_detected_language_is_not_registered():
+    line = _Line()
+    interface = _BatchInterface()
+    handler = _mention_menu_handler(line, interface, ["ja", "en"], "fr")
+    text = "Bonjour, comment allez-vous aujourd'hui?"
+
+    assert handler._handle_command(_command_event(text), text) is True
+
+    # フランス語は未登録。ラテン文字の登録言語は英語なので翻訳しない
+    assert interface.calls == []
+    assert line.messages[0]["template"]["title"] == "Subscription"
 
 
 def test_free_plan_menu_keeps_english_when_batch_translation_fails():

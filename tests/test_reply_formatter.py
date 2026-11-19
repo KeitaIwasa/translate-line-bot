@@ -3,6 +3,7 @@ from src.presentation.reply_formatter import (
     build_translation_reply,
     format_translations,
     strip_source_echo,
+    strip_spurious_boundary_cjk,
     _wrap_bidi_isolate,
 )
 
@@ -26,6 +27,39 @@ def test_build_translation_reply_wraps_bidi_isolates():
     # LTR 行は LRM + LRE/PDF + LRM
     assert lines[1].startswith("\u200E\u202A") and lines[1].endswith("\u200E")
     assert lines[2].startswith("\u200E\u202A") and lines[2].endswith("\u200E")
+
+
+def test_strip_spurious_boundary_cjk_drops_yao_line_and_keeps_translation():
+    """言語設定の訳に、原文に無い「耀耀」の行が付いても落とす。"""
+
+    assert strip_spurious_boundary_cjk("言語設定", "Language settings\n耀耀") == "Language settings"
+    assert strip_spurious_boundary_cjk("言語設定", "Language settings耀") == "Language settings"
+    assert strip_spurious_boundary_cjk("言語設定", "语言设置\n耀耀") == "语言设置"
+    assert "语言设置" in strip_spurious_boundary_cjk("言語設定", "语言设置")
+
+
+def test_repeated_kanji_translation_is_kept_when_it_is_the_whole_reply():
+    """谢谢・哈哈・嗯嗯は訳そのものなので、空にしない。"""
+
+    assert strip_spurious_boundary_cjk("Thank you", "谢谢") == "谢谢"
+    assert strip_spurious_boundary_cjk("That is funny", "哈哈") == "哈哈"
+    assert strip_spurious_boundary_cjk("Hmm", "嗯嗯") == "嗯嗯"
+
+
+def test_repeated_kanji_is_noise_only_with_an_extra_signal():
+    """別の訳の次の行、またはラテン文字が主の訳の末尾だけを落とす。"""
+
+    assert strip_spurious_boundary_cjk("Thank you", "Thanks\n谢谢") == "Thanks"
+    assert strip_spurious_boundary_cjk("Thank you", "Thanks谢谢") == "Thanks"
+
+
+def test_build_translation_reply_drops_trailing_yao_line():
+    reply = build_translation_reply(
+        "言語設定",
+        [TranslationResult(lang="en", text="Language settings\n耀耀")],
+    )
+    assert "Language settings" in reply
+    assert "耀" not in reply
 
 
 def test_strip_source_echo_variations():
@@ -68,6 +102,22 @@ def test_format_translations_skips_empty_and_trims():
     assert len(formatted) == 2
     assert formatted[0].endswith("Hi\u202C\u200E")
     assert formatted[1].endswith("こんにちは\u202C\u200E")
+
+
+def test_build_translation_reply_keeps_dashes_unless_source_has_line_breaks():
+    sentence = "来週は Tokyo - Osaka - Kyoto を回る。予算は 10 - 20 万円。"
+    plain = build_translation_reply(
+        "来週は東京 - 大阪 - 京都を回る。",
+        [TranslationResult(lang="en", text=sentence)],
+    )
+    assert "Tokyo - Osaka - Kyoto" in plain
+    assert "\n- Osaka" not in plain
+
+    restored = build_translation_reply(
+        "1. Add a friend.\n2. Invite the bot.",
+        [TranslationResult(lang="ja", text="1. 友だち追加 2. グループに招待")],
+    )
+    assert "1. 友だち追加\n2. グループに招待" in restored
 
 
 def test_build_translation_reply_drops_echo_and_preserves_others():

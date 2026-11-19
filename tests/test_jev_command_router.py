@@ -125,11 +125,23 @@ def test_six_way_routing():
     assert follow_up.calls == []
 
 
-def test_language_and_howto_keep_jev_action_and_call_gemini_once():
+def test_language_and_howto_keep_jev_action_and_call_follow_up_once():
     for action in ["language_settings", "howto"]:
         router, follow_up = _router(_FakeSession(_answer(action)))
         router.decide(ROUTER_INPUT)
         assert follow_up.calls == [(action, ROUTER_INPUT)]
+
+
+def test_show_languages_skips_gemini_even_at_low_confidence():
+    router, follow_up = _router(_FakeSession(_answer("show_languages", 0.99)))
+    assert router.decide(ROUTER_INPUT).action == "show_languages"
+    assert follow_up.calls == []
+
+    router, follow_up = _router(_FakeSession(_answer("show_languages", 0.60)), min_confidence=0.8)
+    decision = router.decide(json.dumps({"user_message": "今の翻訳言語は何?"}, ensure_ascii=False))
+    assert decision.action == "show_languages"
+    assert decision.instruction_language == ""
+    assert follow_up.calls == []
 
 
 def test_low_confidence_is_unknown_without_gemini():

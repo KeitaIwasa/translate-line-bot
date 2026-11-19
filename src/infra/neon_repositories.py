@@ -19,7 +19,7 @@ from ..domain.models import (
 )
 from ..domain.ports import MessageRepositoryPort
 from ..domain.services.plan_policy import FREE_PLAN, PRO_PLAN, resolve_effective_plan
-from ..domain.services.quota_service import QuotaDecision
+from ..domain.services.quota_service import QuotaDecision, quota_should_notify
 from .message_crypto import decrypt_text, encrypt_text
 from .neon_client import NeonClient
 from .runtime_cache import MISS, TtlCache
@@ -28,6 +28,24 @@ BOT_JOIN_MARKER = "__bot_join__"
 GROUP_LANG_MARKER = "__group_lang__"
 PRIVATE_ASSISTANT_MARKER = "__assistant__"
 logger = logging.getLogger(__name__)
+
+# 言語行の追加。ON CONFLICT は名前の更新だけに使う
+_UPSERT_GROUP_LANGUAGE_SQL = """
+INSERT INTO group_languages (group_id, lang_code, lang_name)
+VALUES (%s, %s, %s)
+ON CONFLICT (group_id, lang_code) DO UPDATE SET lang_name = EXCLUDED.lang_name
+"""
+
+# 置き換えのとき、言語の入れ替えと同じトランザクションで翻訳をオンにする
+_TRANSLATION_ENABLED_SQL = """
+INSERT INTO group_settings (group_id, translation_enabled, translation_paused_reason)
+VALUES (%s, %s, NULL)
+ON CONFLICT (group_id)
+DO UPDATE SET
+    translation_enabled = EXCLUDED.translation_enabled,
+    translation_paused_reason = NULL,
+    updated_at = NOW()
+"""
 
 # 表示名が DB に無いとき、LINE 取得に失敗し続けても毎リクエスト SQL しないための短い TTL。
 _DISPLAY_NAME_MISS_TTL_SECONDS = 60.0
@@ -412,6 +430,31 @@ class NeonMessageRepository(MessageRepositoryPort):
             rows = cur.fetchall()
         return [row[0] for row in rows]
 
+    def fetch_group_language_records(self, group_id: str) -> List[Tuple[str, str]]:
+        """group_languages の lang_code と lang_name を、言語コード順で返す。"""
+
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT lang_code, lang_name
+                    FROM group_languages
+                    WHERE group_id = %s
+                    ORDER BY lang_code
+                    """,
+                    (group_id,),
+                )
+                rows = cur.fetchall()
+        except errors.UndefinedColumn:
+            return [(code, "") for code in self.fetch_group_languages(group_id)]
+        records: List[Tuple[str, str]] = []
+        for row in rows:
+            if not row or not row[0]:
+                continue
+            name = row[1] if len(row) > 1 and row[1] else ""
+            records.append((row[0], name))
+        return records
+
     def fetch_recent_messages(self, group_id: str, limit: int) -> List[ContextMessage]:
         started = time.perf_counter()
         try:
@@ -691,13 +734,64 @@ class NeonMessageRepository(MessageRepositoryPort):
         # 複数行の INSERT を一つのトランザクションにまとめる
         with self._client.connection() as conn, conn.cursor() as cur:
             cur.executemany(
-                """
-                INSERT INTO group_languages (group_id, lang_code, lang_name)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (group_id, lang_code) DO UPDATE SET lang_name = EXCLUDED.lang_name
-                """,
+                _UPSERT_GROUP_LANGUAGE_SQL,
                 [(group_id, code, name) for code, name in limited],
             )
+        self._invalidate_group_runtime(group_id)
+
+    def replace_group_languages(self, group_id: str, languages: Sequence[Tuple[str, str]]) -> None:
+        """グループの言語を指定の集合だけにし、翻訳はオンのままにする。
+
+        削除と挿入を別々に確定すると、挿入の一時失敗で言語が空になる。
+        翻訳オンの更新も同じトランザクションに含め、失敗時は言語も翻訳状態も戻す。
+        """
+        normalized = self._normalize_languages(languages)
+        with self._client.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM group_languages WHERE group_id = %s", (group_id,))
+                    if normalized:
+                        cur.executemany(
+                            _UPSERT_GROUP_LANGUAGE_SQL,
+                            [(group_id, code, name) for code, name in normalized],
+                        )
+                    cur.execute(_TRANSLATION_ENABLED_SQL, (group_id, True))
+        self._invalidate_group_runtime(group_id)
+
+    def apply_language_changes(
+        self,
+        group_id: str,
+        add: Sequence[Tuple[str, str]],
+        remove: Sequence[str],
+    ) -> None:
+        """追加と削除を一つのトランザクションで適用する。
+
+        削除だけ確定したあとに追加が失敗すると、外した言語が戻らない。
+        """
+        remove_codes: List[str] = []
+        seen: set[str] = set()
+        for code in remove:
+            lowered = (code or "").lower()
+            if not lowered or lowered in seen:
+                continue
+            seen.add(lowered)
+            remove_codes.append(lowered)
+        normalized_add = self._normalize_languages(add)
+        if not remove_codes and not normalized_add:
+            return
+        with self._client.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    if remove_codes:
+                        cur.execute(
+                            "DELETE FROM group_languages WHERE group_id = %s AND lang_code = ANY(%s)",
+                            (group_id, remove_codes),
+                        )
+                    if normalized_add:
+                        cur.executemany(
+                            _UPSERT_GROUP_LANGUAGE_SQL,
+                            [(group_id, code, name) for code, name in normalized_add],
+                        )
         self._invalidate_group_runtime(group_id)
 
     def remove_group_languages(self, group_id: str, lang_codes: Sequence[str]) -> None:
@@ -741,18 +835,7 @@ class NeonMessageRepository(MessageRepositoryPort):
     def set_translation_enabled(self, group_id: str, enabled: bool) -> None:
         try:
             with self._client.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO group_settings (group_id, translation_enabled, translation_paused_reason)
-                    VALUES (%s, %s, NULL)
-                    ON CONFLICT (group_id)
-                    DO UPDATE SET
-                        translation_enabled = EXCLUDED.translation_enabled,
-                        translation_paused_reason = NULL,
-                        updated_at = NOW()
-                    """,
-                    (group_id, enabled),
-                )
+                cur.execute(_TRANSLATION_ENABLED_SQL, (group_id, enabled))
         except errors.UndefinedColumn:
             with self._client.cursor() as cur:
                 cur.execute(
@@ -963,44 +1046,89 @@ class NeonMessageRepository(MessageRepositoryPort):
                 notice_plan = row[1] if row else None
 
                 if current_usage >= limit:
-                    return QuotaDecision(
-                        allowed=False,
-                        should_notify=notice_plan != plan_key,
-                        stop_translation=stop_translation_on_limit,
-                        usage=current_usage,
-                        limit=limit,
-                        period_key=period_key,
-                        plan_key=plan_key,
+                    usage_after = current_usage
+                    allowed = False
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO group_usage_counters (group_id, period_key, translation_count, created_at, updated_at)
+                        VALUES (%s, %s, %s, NOW(), NOW())
+                        ON CONFLICT (group_id, period_key)
+                        DO UPDATE SET
+                            translation_count = group_usage_counters.translation_count + EXCLUDED.translation_count,
+                            updated_at = NOW()
+                        RETURNING translation_count
+                        """,
+                        (group_id, period_key, increment),
                     )
+                    usage_after_row = cur.fetchone()
+                    usage_after = int(usage_after_row[0]) if usage_after_row else current_usage
+                    allowed = usage_after <= limit
 
+                # 通知フラグの確定は送信直前の claim に任せる。
+                # ここで先に書くと、送信前に記録され、停止メッセージが notify=False になる。
+                return QuotaDecision(
+                    allowed=allowed,
+                    should_notify=quota_should_notify(
+                        allowed=allowed,
+                        usage=usage_after,
+                        limit=limit,
+                        notice_plan=notice_plan,
+                        plan_key=plan_key,
+                        stop_translation_on_limit=stop_translation_on_limit,
+                    ),
+                    stop_translation=stop_translation_on_limit and not allowed,
+                    usage=usage_after,
+                    limit=limit,
+                    period_key=period_key,
+                    plan_key=plan_key,
+                )
+
+    def claim_limit_notice_plan(self, group_id: str, period_key: str, plan: str) -> bool:
+        """未記録のときだけ上限通知の権利を取る。同時実行でも成功は1件。"""
+
+        try:
+            with self._client.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO group_usage_counters (group_id, period_key, translation_count, created_at, updated_at)
-                    VALUES (%s, %s, %s, NOW(), NOW())
+                    INSERT INTO group_usage_counters (
+                        group_id, period_key, translation_count, limit_notice_plan, created_at, updated_at
+                    )
+                    VALUES (%s, %s, 0, %s, NOW(), NOW())
                     ON CONFLICT (group_id, period_key)
                     DO UPDATE SET
-                        translation_count = group_usage_counters.translation_count + EXCLUDED.translation_count,
+                        limit_notice_plan = EXCLUDED.limit_notice_plan,
                         updated_at = NOW()
-                    RETURNING translation_count
+                    WHERE group_usage_counters.limit_notice_plan IS DISTINCT FROM EXCLUDED.limit_notice_plan
+                    RETURNING limit_notice_plan
                     """,
-                    (group_id, period_key, increment),
+                    (group_id, period_key, plan),
                 )
-                usage_after_row = cur.fetchone()
-                usage_after = int(usage_after_row[0]) if usage_after_row else current_usage
+                return cur.fetchone() is not None
+        except errors.UndefinedColumn:
+            logger.warning("limit_notice_plan column missing; skip claiming notice", extra={"group_id": group_id})
+            return False
+        except errors.UndefinedTable:
+            logger.warning("group_usage_counters table missing; skip claiming notice", extra={"group_id": group_id})
+            return False
 
-        if usage_after > limit:
-            return QuotaDecision(
-                False,
-                notice_plan != plan_key,
-                stop_translation_on_limit,
-                usage_after,
-                limit,
-                period_key,
-                plan_key,
-            )
-        if usage_after == limit:
-            return QuotaDecision(True, notice_plan != plan_key, False, usage_after, limit, period_key, plan_key)
-        return QuotaDecision(True, False, False, usage_after, limit, period_key, plan_key)
+    def release_limit_notice_plan(self, group_id: str, period_key: str, plan: str) -> None:
+        """送信に失敗した claim だけを戻し、次のメッセージで再通知できるようにする。"""
+
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE group_usage_counters
+                    SET limit_notice_plan = NULL, updated_at = NOW()
+                    WHERE group_id = %s AND period_key = %s AND limit_notice_plan = %s
+                    """,
+                    (group_id, period_key, plan),
+                )
+        except errors.UndefinedColumn:
+            logger.warning("limit_notice_plan column missing; skip releasing notice", extra={"group_id": group_id})
+        except errors.UndefinedTable:
+            logger.warning("group_usage_counters table missing; skip releasing notice", extra={"group_id": group_id})
 
     def set_limit_notice_plan(self, group_id: str, period_key: str, plan: str) -> None:
         try:

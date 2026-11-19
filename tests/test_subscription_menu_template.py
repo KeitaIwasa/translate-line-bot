@@ -120,6 +120,35 @@ def test_subscription_menu_keeps_fixed_labels_when_summary_translation_fails():
     assert msg["template"]["actions"][1]["label"] == "Proにアップグレード"
 
 
+def test_unprepared_language_translates_fixed_menu_strings():
+    seen = []
+
+    def translate_batch(texts):
+        seen.append(list(texts))
+        return [f"es:{text}" for text in texts]
+
+    msg = build_subscription_menu_message(
+        group_id="G",
+        instruction_lang="es",
+        status=None,
+        effective_plan="free",
+        period_end=None,
+        portal_url="https://example.com/portal",
+        upgrade_url="https://example.com/upgrade",
+        include_upgrade=True,
+        include_cancel=False,
+        translate=lambda text: text,
+        truncate=_truncate,
+        normalize_text=_normalize,
+        translate_batch=translate_batch,
+    )
+
+    assert len(seen) == 1
+    assert "Subscription" in seen[0]
+    assert msg["template"]["title"] == "es:Subscription"
+    assert msg["template"]["actions"][0]["label"] == "es:Manage billing"
+
+
 def test_subscription_cancel_confirm_uses_fixed_labels():
     msg = build_subscription_cancel_confirm(
         group_id="G",

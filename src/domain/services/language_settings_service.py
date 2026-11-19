@@ -5,6 +5,8 @@ from typing import Dict, List, Sequence, Tuple
 from .. import models
 from ..ports import LanguagePreferencePort, MessageRepositoryPort
 from .interface_translation_service import InterfaceTranslationService
+from .language_mention import selection_prompt, ui_family, unsupported_prompt
+from ...presentation.list_layout import normalize_inline_lists
 from ...presentation.reply_formatter import RTL_LANG_PREFIXES, _wrap_bidi_isolate, strip_source_echo
 
 
@@ -35,10 +37,15 @@ class LanguageSettingsService:
 
         supported = result.supported
         unsupported = result.unsupported
+        family = ui_family(result.primary_language)
 
-        detected_total = len(supported) + len(unsupported)
-        if detected_total > limit:
-            message = self._build_language_limit_message(result.primary_language, max_languages=limit)
+        # 未対応言語は上限に数えない。対応言語が上限を超えたら選ばせて、設定は消さない
+        if len(supported) > limit:
+            labels = [lang.name or lang.code for lang in supported if lang.code]
+            message = selection_prompt(labels, family=family, limit=limit)
+            if unsupported:
+                notice = self._format_unsupported_message(unsupported, result.primary_language)
+                message = f"{notice}\n{message}"
             self._repo.set_translation_enabled(event.group_id, False)
             return models.ReplyBundle(texts=[message[:5000]])
 
@@ -47,7 +54,8 @@ class LanguageSettingsService:
         if unsupported:
             messages.append({"type": "text", "text": self._format_unsupported_message(unsupported, result.primary_language)})
         if dropped:
-            notice = self._build_language_limit_message(result.primary_language, max_languages=limit)
+            labels = [lang.name or lang.code for lang in supported if lang.code]
+            notice = selection_prompt(labels, family=family, limit=limit)
             messages.append({"type": "text", "text": notice})
             self._repo.set_translation_enabled(event.group_id, False)
             if messages:
@@ -110,7 +118,9 @@ class LanguageSettingsService:
         limit = self._resolved_limit(max_languages)
         tuples = self._dedup_languages(languages)
         if len(tuples) > limit:
-            warning = limit_text or self._build_language_limit_message(primary_language, max_languages=limit)
+            family = ui_family(primary_language)
+            labels = [name or code for code, name in tuples if code]
+            warning = limit_text or selection_prompt(labels, family=family, limit=limit)
             return models.ReplyBundle(texts=[warning])
 
         completed = self._repo.try_complete_group_languages(group_id, tuples)
@@ -157,9 +167,7 @@ class LanguageSettingsService:
     ) -> str:
         names = [lang.name or lang.code for lang in unsupported if lang.code]
         filtered = [name for name in names if name]
-        base = "The following languages are not supported: " + ", ".join(filtered)
-        translated = self._translate_template(base, instruction_lang, force=True)
-        return translated or base
+        return unsupported_prompt(filtered, ui_family(instruction_lang))
 
     def _build_language_limit_message(self, instruction_lang: str, *, max_languages: int | None = None) -> str:
         limit = self._resolved_limit(max_languages)
@@ -268,13 +276,15 @@ class LanguageSettingsService:
 
         target_langs = [lang for lang in deduped if not lang.startswith("en")]
         if not self._interface_translation or not target_langs:
-            return base_text if include_en else "\n\n".join([base_text.strip()] if include_en else [])
+            readable = normalize_inline_lists(base_text) if include_en else base_text
+            return readable if include_en else "\n\n".join([base_text.strip()] if include_en else [])
 
         translations = []
         try:
             translations = self._interface_translation.translate(base_text, target_langs)
         except Exception:  # pylint: disable=broad-except
-            return base_text if include_en else "\n\n".join([base_text.strip()] if include_en else [])
+            readable = normalize_inline_lists(base_text) if include_en else base_text
+            return readable if include_en else "\n\n".join([base_text.strip()] if include_en else [])
 
         text_by_lang = {}
         for item in translations or []:
@@ -282,7 +292,7 @@ class LanguageSettingsService:
             if not lowered or lowered in text_by_lang:
                 continue
             cleaned = strip_source_echo(base_text, item.text)
-            text_by_lang[lowered] = (cleaned or item.text or base_text).strip()
+            text_by_lang[lowered] = normalize_inline_lists((cleaned or item.text or base_text).strip())
 
         def _maybe_wrap_bidi(text: str, lang: str) -> str:
             if (lang or "").lower().startswith(RTL_LANG_PREFIXES):
@@ -292,7 +302,7 @@ class LanguageSettingsService:
         lines: List[str] = []
         seen_texts = set()
         if include_en:
-            base_line = base_text.strip()
+            base_line = normalize_inline_lists(base_text.strip())
             if base_line:
                 lines.append(base_line)
                 seen_texts.add(base_line)
@@ -389,7 +399,7 @@ class LanguageSettingsService:
 
     @staticmethod
     def _normalize_template_text(text: str) -> str:
-        return text.replace("\n\n", "\n").strip()
+        return normalize_inline_lists(text.replace("\n\n", "\n").strip())
 
     @staticmethod
     def _dedup_languages(languages: Sequence[Tuple[str, str]]) -> List[Tuple[str, str]]:

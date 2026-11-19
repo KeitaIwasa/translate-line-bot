@@ -147,6 +147,18 @@ _STRINGS: Dict[str, Mapping[str, str]] = {
 UI_LANGUAGE_CODES = ("en", "ja", "zh-TW", "zh-CN", "th")
 
 
+def has_prepared_ui_language(lang: str | None) -> bool:
+    """固定文言テーブルに訳がある言語か。空と英語は英語の原文を使う。"""
+
+    raw = (lang or "").strip().replace("_", "-")
+    if not raw:
+        return True
+    lowered = raw.lower()
+    if lowered == "en" or lowered.startswith("en-"):
+        return True
+    return normalize_ui_language(raw) != "en"
+
+
 def normalize_ui_language(lang: str | None) -> str:
     """言語コードを固定文言テーブルのキーへ寄せる。未対応は en。"""
 

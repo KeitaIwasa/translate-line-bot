@@ -103,8 +103,32 @@ def test_howto_uses_ack_text_without_forcing_resume():
 
     handler._handle_command(event, "使い方を教えて")
 
-    assert handler._line.last_text == "使い方はこの通りです。"
+    assert "Add Thai" in (handler._line.last_text or "")
+    assert "使い方を教えてと送って" not in (handler._line.last_text or "")
     assert repo.translation_enabled_calls == []
+
+
+def test_howto_reply_puts_each_numbered_step_on_its_own_line():
+    class _Router:
+        def decide(self, _text):
+            return models.CommandDecision(
+                action="howto",
+                instruction_language="en",
+                ack_text=(
+                    "1. Add KOTORI as a friend on LINE. "
+                    "2. Invite KOTORI to the LINE group you want to use. "
+                    "3. Enter the languages you want to translate in the group."
+                ),
+            )
+
+    handler = _build_handler(_Router())
+    handler._handle_command(_event(), "how do I use this bot?")
+
+    assert handler._line.last_text == (
+        "1. Add KOTORI as a friend on LINE.\n"
+        "2. Invite KOTORI to the LINE group you want to use.\n"
+        "3. Enter the languages you want to translate in the group."
+    )
 
 
 def test_pause_uses_single_language_ack_text():
@@ -176,7 +200,8 @@ def test_command_logs_decision_timing_and_text_reply_metadata_without_body(caplo
     caplog.set_level(logging.INFO, logger="src.app.handlers.message_handler")
     handler = _build_handler(_Router())
 
-    handler._handle_command(_event(), "使い方")
+    # 「使い方」単体はルーターより前に即答する。判定ログはルーター経路で残す
+    handler._handle_command(_event(), "このボットの詳しい説明を聞かせて")
 
     logs = "\n".join(record.getMessage() for record in caplog.records)
     assert "Command decision | action=howto instruction_lang=ja" in logs

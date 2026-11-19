@@ -14,6 +14,7 @@ except Exception:  # pylint: disable=broad-except
 
 from .app.bootstrap import build_dispatcher
 from .config import get_settings
+from .infra.provider_failure import record_provider_failure
 from .presentation.line_webhook_parser import (
     SignatureVerificationError,
     parse_events,
@@ -50,7 +51,15 @@ def lambda_handler(event, _context):
         try:
             dispatcher.dispatch(evt)
         except Exception as exc:  # pylint: disable=broad-except
-            logger.exception("Failed to process event: %s", exc)
+            # ハンドラが握りつぶす前に落ちた Neon 障害なども、ここで1回だけ数える
+            failure = record_provider_failure(exc)
+            logger.exception(
+                "Failed to process event: %s | error_class=%s dependency=%s status=%s",
+                exc,
+                failure.error_class,
+                failure.dependency,
+                failure.status,
+            )
 
     return {"statusCode": 200, "body": json.dumps({"status": "ok"})}
 

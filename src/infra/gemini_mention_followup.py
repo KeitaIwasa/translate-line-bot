@@ -7,14 +7,15 @@ from pathlib import Path
 from typing import Any, List, Optional, Sequence
 
 import requests
-from requests import HTTPError
-
 from ..domain.models import CommandDecision, LanguageChoice
+from ..presentation.list_layout import normalize_inline_lists
+from ..domain.services.explicit_language_reset import allows_language_reset
 from .gemini_generation_config import build_generation_config
+from .provider_failure import post_gemini
 
 logger = logging.getLogger(__name__)
 
-# Jev が言語設定と判定したあとに、追加・削除する言語だけを取り出す
+# 言語設定の詳細。本番では Jev が先に読み、ここは失敗時のフォールバック。
 LANGUAGE_SYSTEM_PROMPT = """
 You extract language-setting details for a LINE multilingual translation bot.
 The user's intent is already classified as language_settings. Do not reclassify it.
@@ -22,12 +23,17 @@ The user's intent is already classified as language_settings. Do not reclassify 
 Input is a JSON object. Use user_message and current_languages.
 
 Return:
-- operation: "reset_all" (clear languages and ask again), "add", "remove", or "add_and_remove"
-- languages_to_add / languages_to_remove: languages named in the message. Prefer ISO 639-1 codes.
+- operation: "show" (list the current translation languages, or ask which language to add, without changing them), "reset_all" (clear languages and ask again), "add", "remove", or "add_and_remove"
+- languages_to_add / languages_to_remove: languages named in the message. Prefer ISO 639-1 codes. Leave both empty for "show" and "reset_all".
 - instruction_language: BCP-47 or ISO 639-1 of the user message
-- ack_text: a short confirmation in the same language as the user message, without Markdown and without the bot mention
+- ack_text: a short confirmation in the same language as the user message, without Markdown and without the bot mention. For "show", leave ack_text empty.
+- explicit_reset: true only when the user explicitly asks to clear, reset, delete, or set the translation languages again from scratch. This is language-neutral. False when they ask which languages are currently set. False when they only add or remove named languages. False for 「Xだけにして」 or "only X", which keeps X and is not a reset. False for a message such as "言語を追加したい", which does not ask to reset: use operation "show" so the bot lists the current languages or asks which language to add.
+- If ack_text lists more than one item, put each item on its own line. Keep those line breaks.
 
-If the user asks to reset or does not name languages, use operation "reset_all" and empty language lists.
+If the user is only asking which translation languages are currently set, use operation "show" and explicit_reset false.
+Use operation "reset_all" only together with explicit_reset true.
+Do not use "reset_all" for a question about the current languages.
+「Xだけにして」 and "only X" mean replace: add X and remove the other current languages. Use operation "add_and_remove", not "reset_all". Put X in languages_to_add and the other current languages in languages_to_remove. explicit_reset stays false.
 """.strip()
 
 # グループで使えなかったときの定型文。英語をベース原文にし、英語以外のときだけ翻訳させる
@@ -40,7 +46,13 @@ The answer is posted as a reply in the LINE group where the user mentioned KOTOR
 
 Write ack_text in the same language as the user message. This applies to every answer, including the fallback below.
 Use plain text only. Do not use Markdown.
+Format ack_text for a narrow chat bubble.
+Put each numbered step and each bullet on its own line, using a newline before every item.
+Do not join steps into one paragraph such as "1. ... 2. ...".
+Keep blank lines between paragraphs.
 Answer from the support guide: summarize the relevant features and steps briefly. Keep it short.
+If the user asks how to use the bot, answer immediately. Do not tell them to send another message such as "使い方を教えて".
+Include a short example of changing languages by mentioning the bot, for example "英語と日本語にして" or "Add Thai".
 If the guide does not support a reliable answer, use this English base sentence for ack_text.
 If the user message is in English, use it exactly as is. Otherwise, translate it into the user's language and keep the URL unchanged.
 Base sentence: {HOWTO_FALLBACK_TEXT}
@@ -55,7 +67,7 @@ _LANGUAGE_SCHEMA = {
     "properties": {
         "operation": {
             "type": "string",
-            "enum": ["reset_all", "add", "remove", "add_and_remove"],
+            "enum": ["show", "reset_all", "add", "remove", "add_and_remove"],
         },
         "languages_to_add": {
             "type": "array",
@@ -81,8 +93,9 @@ _LANGUAGE_SCHEMA = {
         },
         "instruction_language": {"type": "string"},
         "ack_text": {"type": "string"},
+        "explicit_reset": {"type": "boolean"},
     },
-    "required": ["operation", "instruction_language", "ack_text"],
+    "required": ["operation", "instruction_language", "ack_text", "explicit_reset"],
 }
 
 _HOWTO_SCHEMA = {
@@ -94,11 +107,11 @@ _HOWTO_SCHEMA = {
     "required": ["instruction_language", "ack_text"],
 }
 
-_VALID_OPERATIONS = {"reset_all", "add", "remove", "add_and_remove"}
+_VALID_OPERATIONS = {"show", "reset_all", "add", "remove", "add_and_remove"}
 
 
 class GeminiMentionFollowUp:
-    """言語設定の抽出と使い方回答だけを、既存の Gemini モデルへ1回ずつ聞く。"""
+    """使い方の回答と、言語設定抽出のフォールバックを Gemini に聞く。"""
 
     def __init__(
         self,
@@ -129,16 +142,27 @@ class GeminiMentionFollowUp:
 
     def _language_settings(self, router_input: str) -> CommandDecision:
         data = self._generate(LANGUAGE_SYSTEM_PROMPT, _LANGUAGE_SCHEMA, router_input)
-        operation = str(data.get("operation") or "reset_all").strip()
+        operation = str(data.get("operation") or "").strip()
         if operation not in _VALID_OPERATIONS:
-            operation = "reset_all"
+            operation = "show"
+        user_message = _user_message(router_input)
+        # モデルの言語非依存フラグ。英語・日本語の明示表現は追加の肯定信号
+        explicit_reset = allows_language_reset(
+            explicit_reset=_as_bool(data.get("explicit_reset")),
+            text=user_message,
+        )
+        if operation == "reset_all" and not explicit_reset:
+            operation = "show"
+        if operation != "reset_all":
+            explicit_reset = False
         return CommandDecision(
             action="language_settings",
             operation=operation,
             languages_to_add=_parse_language_list(data.get("languages_to_add")),
             languages_to_remove=_parse_language_list(data.get("languages_to_remove")),
             instruction_language=str(data.get("instruction_language") or "").strip(),
-            ack_text=str(data.get("ack_text") or "").strip(),
+            ack_text=_readable_ack(data.get("ack_text")),
+            explicit_reset=explicit_reset,
         )
 
     def _howto(self, router_input: str) -> CommandDecision:
@@ -149,7 +173,7 @@ class GeminiMentionFollowUp:
         return CommandDecision(
             action="howto",
             instruction_language=str(data.get("instruction_language") or "").strip(),
-            ack_text=str(data.get("ack_text") or "").strip(),
+            ack_text=_readable_ack(data.get("ack_text")),
         )
 
     def _generate(self, system_prompt: str, schema: dict, router_input: str) -> dict:
@@ -163,16 +187,14 @@ class GeminiMentionFollowUp:
             ],
             "generationConfig": build_generation_config(self._model, schema),
         }
-        response = self._session.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent",
+        response = post_gemini(
+            self._session,
+            model=self._model,
+            url=f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent",
             params={"key": self._api_key},
-            json=payload,
+            payload=payload,
             timeout=self._timeout,
         )
-        try:
-            response.raise_for_status()
-        except HTTPError as exc:
-            raise RuntimeError(f"gemini_http_{response.status_code}") from exc
         body = response.json()
         try:
             part_text = body["candidates"][0]["content"]["parts"][0]["text"]
@@ -182,6 +204,12 @@ class GeminiMentionFollowUp:
         if not isinstance(data, dict):
             raise ValueError("gemini follow-up JSON was not an object")
         return data
+
+
+def _readable_ack(value: object) -> str:
+    """生成文のインライン箇条書きを、送信前に1項目1行へ戻す。"""
+
+    return normalize_inline_lists(str(value or "").strip())
 
 
 def _error_decision() -> CommandDecision:
@@ -212,6 +240,26 @@ def _parse_language_list(items: Any) -> List[LanguageChoice]:
         if code:
             parsed.append(LanguageChoice(code=code, name=name or code))
     return parsed
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "yes", "1"}
+    return False
+
+
+def _user_message(router_input: str) -> str:
+    """ルーター入力の JSON から user_message を取り出す。JSON でなければ原文を返す。"""
+
+    try:
+        data = json.loads(router_input)
+    except Exception:
+        return router_input
+    if isinstance(data, dict) and isinstance(data.get("user_message"), str):
+        return data["user_message"]
+    return router_input
 
 
 def _load_text(path: str) -> str:

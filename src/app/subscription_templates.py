@@ -14,12 +14,32 @@ from .subscription_texts import (
     SUBS_VIEW_LABEL,
     SUBS_YES_LABEL,
 )
-from .ui_strings import ui_text
+from .ui_strings import has_prepared_ui_language, ui_text
 from ..domain.services.subscription_service import SubscriptionService
 
 TranslateFn = Callable[[str], str]
 TruncateFn = Callable[[str, int], str]
 NormalizeFn = Callable[[str], str]
+
+
+def _resolve_menu_texts(
+    ordered: Sequence[str],
+    translate: TranslateFn,
+    translate_batch: Optional[Callable[[Sequence[str]], Sequence[str]]],
+) -> list[str]:
+    """一括翻訳を優先し、件数や中身が欠けた項目は原文（または個別翻訳）に戻す。"""
+
+    if translate_batch is not None:
+        try:
+            batched = list(translate_batch(ordered))
+        except Exception:
+            batched = []
+        if len(batched) == len(ordered):
+            return [
+                item.strip() if isinstance(item, str) and item.strip() else original
+                for item, original in zip(batched, ordered)
+            ]
+    return [(translate(text) or text) for text in ordered]
 
 
 def _translate_summary(
@@ -60,6 +80,21 @@ def build_subscription_menu_message(
         period_end,
         plan_key=effective_plan,
     )
+    # テーブルに無い登録言語は、main と同じく固定文言も一括翻訳する。
+    if not has_prepared_ui_language(instruction_lang):
+        return _menu_from_runtime_translation(
+            group_id=group_id,
+            instruction_lang=instruction_lang,
+            summary=summary,
+            portal_url=portal_url,
+            upgrade_url=upgrade_url,
+            include_upgrade=include_upgrade,
+            include_cancel=include_cancel,
+            translate=translate,
+            truncate=truncate,
+            normalize_text=normalize_text,
+            translate_batch=translate_batch,
+        )
     translated_summary = _translate_summary(summary, translate, translate_batch)
     title = ui_text(SUBS_MENU_TITLE, instruction_lang)
     alt_text = ui_text(SUBS_MENU_TEXT, instruction_lang)
@@ -81,6 +116,75 @@ def build_subscription_menu_message(
 
     if include_upgrade and upgrade_url:
         label = ui_text(SUBS_UPGRADE_LABEL, instruction_lang)
+        actions.append({"type": "uri", "label": truncate(label, 20), "uri": upgrade_url})
+
+    if not actions:
+        return None
+
+    return {
+        "type": "template",
+        "altText": truncate(alt_text, 400),
+        "template": {
+            "type": "buttons",
+            "title": truncate(title, 40),
+            "text": body_text,
+            "actions": actions,
+        },
+    }
+
+
+def _menu_from_runtime_translation(
+    *,
+    group_id: str,
+    instruction_lang: str,
+    summary: str,
+    portal_url: Optional[str],
+    upgrade_url: Optional[str],
+    include_upgrade: bool,
+    include_cancel: bool,
+    translate: TranslateFn,
+    truncate: TruncateFn,
+    normalize_text: NormalizeFn,
+    translate_batch: Optional[Callable[[Sequence[str]], Sequence[str]]],
+) -> Optional[Dict]:
+    """用意した訳が無い言語では、タイトルとボタンも翻訳する。"""
+
+    ordered = [summary, SUBS_MENU_TITLE, SUBS_MENU_TEXT]
+    if portal_url:
+        ordered.append(SUBS_VIEW_LABEL)
+    if include_cancel:
+        ordered.append(SUBS_CANCEL_LABEL)
+    if include_upgrade and upgrade_url:
+        ordered.append(SUBS_UPGRADE_LABEL)
+    resolved = _resolve_menu_texts(ordered, translate, translate_batch)
+
+    cursor = 0
+    translated_summary = resolved[cursor]
+    cursor += 1
+    title = resolved[cursor]
+    cursor += 1
+    alt_text = resolved[cursor]
+    cursor += 1
+    body_text = truncate(normalize_text(translated_summary), 120)
+
+    actions = []
+    if portal_url:
+        label = resolved[cursor]
+        cursor += 1
+        actions.append({"type": "uri", "label": truncate(label, 20), "uri": portal_url})
+
+    if include_cancel:
+        label = resolved[cursor]
+        cursor += 1
+        payload = encode_subscription_payload({
+            "kind": "cancel",
+            "group_id": group_id,
+            "instruction_lang": instruction_lang,
+        })
+        actions.append({"type": "postback", "label": truncate(label, 20), "data": payload})
+
+    if include_upgrade and upgrade_url:
+        label = resolved[cursor]
         actions.append({"type": "uri", "label": truncate(label, 20), "uri": upgrade_url})
 
     if not actions:

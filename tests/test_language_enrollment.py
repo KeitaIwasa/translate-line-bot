@@ -308,7 +308,8 @@ def test_language_enrollment_rejects_over_five():
     messages = line.sent["messages"]
     assert len(messages) == 1
     assert messages[0]["type"] == "text"
-    assert "You can set up to 5 translation languages" in messages[0]["text"]
+    assert "最大5つまでだよ" in messages[0]["text"]
+    assert "English" in messages[0]["text"]
 
 
 def test_language_enrollment_rejects_when_total_detected_exceeds_even_with_unsupported():
@@ -360,9 +361,12 @@ def test_language_enrollment_rejects_when_total_detected_exceeds_even_with_unsup
     handler._attempt_language_enrollment(event)
 
     messages = line.sent["messages"]
-    assert len(messages) == 1
     assert messages[0]["type"] == "text"
-    assert "You can set up to 5 translation languages" in messages[0]["text"]
+    assert "Traditional Chinese" in messages[0]["text"]
+    template = messages[-1]["template"]
+    assert template["type"] == "confirm"
+    langs = [item["code"] for item in _decode_payload(template["actions"][0]["data"])["languages"]]
+    assert langs == ["ja", "ru", "zh-hans", "th"]
 
 
 class RecordingRepo(DummyRepo):
@@ -370,6 +374,9 @@ class RecordingRepo(DummyRepo):
         super().__init__()
         self.languages = list(initial)
         self.translation_enabled = True
+        self.replace_called = False
+        self.apply_called = False
+        self.reset_called = False
 
     def fetch_group_languages(self, *_args, **_kwargs):
         return list(self.languages)
@@ -385,6 +392,19 @@ class RecordingRepo(DummyRepo):
 
     def set_translation_enabled(self, _group_id, enabled: bool):
         self.translation_enabled = enabled
+
+    def replace_group_languages(self, _group_id, languages):
+        self.replace_called = True
+        self.languages = [code for code, _name in languages if code]
+        self.translation_enabled = True
+
+    def apply_language_changes(self, _group_id, languages_to_add, languages_to_remove):
+        self.apply_called = True
+        lowered = {(code or "").lower() for code in languages_to_remove if code}
+        self.languages = [lang for lang in self.languages if lang.lower() not in lowered]
+        for code, _name in languages_to_add:
+            if code and code not in self.languages:
+                self.languages.append(code)
 
 
 class RecordingLineClient(DummyLineClient):
@@ -437,7 +457,343 @@ def test_language_settings_add_rejects_when_exceeding_limit():
     handler._handle_language_settings(event, decision, event.text)
 
     assert repo.languages == ["en", "ja", "fr", "de", "th"]
+    assert "最大5つまで" in (line.last_text or "")
+    assert "どれを外す" in (line.last_text or "")
+    assert "英語" in (line.last_text or "")
+
+
+def test_language_settings_ack_without_static_text_uses_translation_path():
+    class RecordingTranslation(DummyTranslationService):
+        def __init__(self):
+            self.texts = []
+
+        def translate(
+            self,
+            sender_name,
+            message_text,
+            timestamp,
+            context_messages,
+            candidate_languages,
+            allow_same_language=False,
+        ):
+            self.texts.append((message_text, list(candidate_languages)))
+            return [models.TranslationResult(lang=candidate_languages[0], text="Paramètres de langue mis à jour.")]
+
+    line = RecordingLineClient()
+    repo = RecordingRepo(initial=["ja"])
+    translation = RecordingTranslation()
+    handler = MessageHandler(
+        line_client=line,
+        translation_service=translation,
+        interface_translation=DummyInterfaceTranslation(),
+        language_detector=LanguageDetectionService(),
+        language_pref_service=DummyLangPrefService(models.LanguagePreference(supported=[])),
+        command_router=DummyCommandRouter(),
+        repo=repo,
+        max_context_messages=1,
+        max_group_languages=5,
+        translation_retry=1,
+        bot_mention_name="bot",
+    )
+    decision = models.CommandDecision(
+        action="language_settings",
+        operation="add",
+        languages_to_add=[models.LanguageChoice(code="fr", name="French")],
+        instruction_language="fr",
+        ack_text="",
+    )
+    event = models.MessageEvent(
+        event_type="message",
+        reply_token="token",
+        timestamp=0,
+        text="@bot ajoute le français",
+        user_id="U",
+        group_id="G",
+        sender_type="group",
+    )
+
+    assert handler._handle_language_settings(event, decision, event.text) is True
+    assert translation.texts
+    assert translation.texts[0][1] == ["fr"]
+    assert "Japanese and French have been set as the translation languages." in translation.texts[0][0]
+    assert line.last_text == "Paramètres de langue mis à jour."
+    assert "fr" in repo.languages
+
+
+def test_spanish_instruction_translates_selection_limit_and_unsupported_replies():
+    """固定文が無い言語は、英語の原文を指示言語へ翻訳する。"""
+
+    class RecordingTranslation(DummyTranslationService):
+        def __init__(self):
+            self.texts = []
+
+        def translate(
+            self,
+            sender_name,
+            message_text,
+            timestamp,
+            context_messages,
+            candidate_languages,
+            allow_same_language=False,
+        ):
+            self.texts.append((message_text, list(candidate_languages)))
+            return [models.TranslationResult(lang=candidate_languages[0], text=f"ES:{message_text}")]
+
+    line = RecordingLineClient()
+    repo = RecordingRepo(initial=["en", "ja", "ko", "th", "fr"])
+    translation = RecordingTranslation()
+    handler = MessageHandler(
+        line_client=line,
+        translation_service=translation,
+        interface_translation=DummyInterfaceTranslation(),
+        language_detector=LanguageDetectionService(),
+        language_pref_service=DummyLangPrefService(models.LanguagePreference(supported=[])),
+        command_router=DummyCommandRouter(),
+        repo=repo,
+        max_context_messages=1,
+        max_group_languages=5,
+        translation_retry=1,
+        bot_mention_name="bot",
+    )
+
+    selection = models.CommandDecision(
+        action="language_settings",
+        operation="reset_all",
+        instruction_language="es",
+        explicit_reset=True,
+    )
+    assert handler._handle_language_settings(_settings_event("all languages"), selection, "all languages") is True
+    assert repo.reset_called is False
+    assert translation.texts[-1][1] == ["es"]
+    assert "Which ones should I use?" in translation.texts[-1][0]
+    assert line.last_text.startswith("ES:")
+
+    limit = models.CommandDecision(
+        action="language_settings",
+        operation="add",
+        languages_to_add=[models.LanguageChoice(code="vi", name="Vietnamese")],
+        instruction_language="es",
+    )
+    assert handler._handle_language_settings(_settings_event("add Vietnamese"), limit, "add Vietnamese") is True
+    assert repo.languages == ["en", "ja", "ko", "th", "fr"]
+    assert "swap out" in translation.texts[-1][0]
+    assert translation.texts[-1][1] == ["es"]
+    assert line.last_text.startswith("ES:")
+
+    unsupported = models.CommandDecision(
+        action="language_settings",
+        operation="add",
+        instruction_language="es",
+    )
+    assert handler._handle_language_settings(_settings_event("エルヴ語"), unsupported, "エルヴ語") is True
+    assert "isn't supported" in translation.texts[-1][0]
+    assert translation.texts[-1][1] == ["es"]
+    assert line.last_text.startswith("ES:")
+
+
+def test_english_instruction_keeps_the_fixed_reply_without_translation():
+    class RecordingTranslation(DummyTranslationService):
+        def translate(self, *args, **kwargs):
+            raise AssertionError("English fixed text should not be translated")
+
+    line = RecordingLineClient()
+    repo = RecordingRepo(initial=["ja"])
+    handler = MessageHandler(
+        line_client=line,
+        translation_service=RecordingTranslation(),
+        interface_translation=DummyInterfaceTranslation(),
+        language_detector=LanguageDetectionService(),
+        language_pref_service=DummyLangPrefService(models.LanguagePreference(supported=[])),
+        command_router=DummyCommandRouter(),
+        repo=repo,
+        max_context_messages=1,
+        max_group_languages=5,
+        translation_retry=1,
+        bot_mention_name="bot",
+    )
+    decision = models.CommandDecision(
+        action="language_settings",
+        operation="add",
+        languages_to_add=[models.LanguageChoice(code="fr", name="French")],
+        instruction_language="en",
+    )
+    assert handler._handle_language_settings(_settings_event("add French"), decision, "add French") is True
+    assert line.last_text == "Japanese and French have been set as the translation languages."
+
+
+def _settings_event(text: str) -> models.MessageEvent:
+    return models.MessageEvent(
+        event_type="message",
+        reply_token="token",
+        timestamp=0,
+        text=text,
+        user_id="U",
+        group_id="G",
+        sender_type="group",
+    )
+
+
+def _settings_handler(repo, line):
+    return MessageHandler(
+        line_client=line,
+        translation_service=DummyTranslationService(),
+        interface_translation=DummyInterfaceTranslation(),
+        language_detector=LanguageDetectionService(),
+        language_pref_service=DummyLangPrefService(models.LanguagePreference(supported=[])),
+        command_router=DummyCommandRouter(),
+        repo=repo,
+        max_context_messages=1,
+        max_group_languages=5,
+        translation_retry=1,
+        bot_mention_name="bot",
+    )
+
+
+class _ClearingRepo(RecordingRepo):
+    def reset_group_language_settings(self, *_args, **_kwargs):
+        self.languages = []
+        self.reset_called = True
+
+
+def test_reset_all_with_add_list_replaces_languages_and_keeps_translation():
+    """Gemini が reset_all と英語の追加を返しても、全消去して翻訳停止にはしない。"""
+
+    line = RecordingLineClient()
+    repo = _ClearingRepo(initial=["ja", "th"])
+    repo.translation_enabled = False
+    repo.reset_called = False
+    handler = _settings_handler(repo, line)
+    decision = models.CommandDecision(
+        action="language_settings",
+        operation="reset_all",
+        languages_to_add=[models.LanguageChoice(code="en", name="English")],
+        languages_to_remove=[models.LanguageChoice(code="ja", name="Japanese")],
+        instruction_language="en",
+        ack_text="Your language settings have been reset. Please tell us all the languages you would like to translate.",
+        explicit_reset=True,
+    )
+
+    assert handler._handle_language_settings(
+        _settings_event("@bot 英語だけにして"),
+        decision,
+        "英語だけにして",
+    ) is True
+    assert repo.reset_called is False
+    assert repo.replace_called is True
+    assert repo.languages == ["en"]
+    assert repo.translation_enabled is True
+    assert line.last_text == "English has been set as the translation language."
+    assert "reset" not in (line.last_text or "").lower()
+
+
+def test_reset_all_with_several_languages_sets_exactly_that_list():
+    """置き換え後の言語は追加リストと一致し、確認文は新しい言語を並べる。"""
+
+    line = RecordingLineClient()
+    repo = _ClearingRepo(initial=["th", "fr", "ja"])
+    handler = _settings_handler(repo, line)
+    decision = models.CommandDecision(
+        action="language_settings",
+        operation="reset_all",
+        languages_to_add=[
+            models.LanguageChoice(code="en", name="English"),
+            models.LanguageChoice(code="ja", name="Japanese"),
+        ],
+        instruction_language="en",
+        ack_text="リセットしました",
+        explicit_reset=True,
+    )
+
+    assert handler._handle_language_settings(_settings_event("@bot 英語と日本語だけにして"), decision, "英語と日本語だけにして") is True
+    assert repo.languages == ["en", "ja"]
+    assert repo.translation_enabled is True
+    assert line.last_text == "English and Japanese have been set as the translation languages."
+    assert "reset" not in (line.last_text or "").lower()
+
+
+def test_replace_over_the_language_limit_does_not_clear_current_languages():
+    line = RecordingLineClient()
+    repo = _ClearingRepo(initial=["ja", "en"])
+    repo.reset_called = False
+    handler = _settings_handler(repo, line)
+    decision = models.CommandDecision(
+        action="language_settings",
+        operation="reset_all",
+        languages_to_add=[
+            models.LanguageChoice(code=code, name=code.upper())
+            for code in ["en", "ja", "fr", "de", "th", "es"]
+        ],
+        instruction_language="en",
+        explicit_reset=True,
+    )
+
+    assert handler._handle_language_settings(
+        _settings_event("@bot 言語を6つにして"),
+        decision,
+        "言語を6つにして",
+    ) is True
+    assert repo.reset_called is False
+    assert repo.languages == ["ja", "en"]
     assert "You can set up to 5 translation languages" in (line.last_text or "")
+
+
+def test_plain_reset_all_still_clears_languages_and_stops_translation():
+    line = RecordingLineClient()
+    repo = _ClearingRepo(initial=["ja", "en"])
+    handler = _settings_handler(repo, line)
+    decision = models.CommandDecision(
+        action="language_settings",
+        operation="reset_all",
+        instruction_language="en",
+        ack_text="リセットしました",
+        explicit_reset=True,
+    )
+
+    assert handler._handle_language_settings(_settings_event("@bot 言語設定をリセットして"), decision, "言語設定をリセットして") is True
+    assert repo.languages == []
+    assert repo.translation_enabled is False
+    assert "have been reset" in (line.last_text or "")
+
+
+def test_language_settings_static_ack_is_not_translated_again():
+    class RecordingTranslation(DummyTranslationService):
+        def translate(self, *args, **kwargs):
+            raise AssertionError("static ack should be used as-is")
+
+    line = RecordingLineClient()
+    repo = RecordingRepo(initial=["en"])
+    handler = MessageHandler(
+        line_client=line,
+        translation_service=RecordingTranslation(),
+        interface_translation=DummyInterfaceTranslation(),
+        language_detector=LanguageDetectionService(),
+        language_pref_service=DummyLangPrefService(models.LanguagePreference(supported=[])),
+        command_router=DummyCommandRouter(),
+        repo=repo,
+        max_context_messages=1,
+        max_group_languages=5,
+        translation_retry=1,
+        bot_mention_name="bot",
+    )
+    decision = models.CommandDecision(
+        action="language_settings",
+        operation="add",
+        languages_to_add=[models.LanguageChoice(code="ja", name="Japanese")],
+        instruction_language="ja",
+        ack_text="言語設定を更新しました。",
+    )
+    event = models.MessageEvent(
+        event_type="message",
+        reply_token="token",
+        timestamp=0,
+        text="@bot 日本語を追加",
+        user_id="U",
+        group_id="G",
+        sender_type="group",
+    )
+
+    assert handler._handle_language_settings(event, decision, event.text) is True
+    assert line.last_text == "英語・日本語になったよ"
 
 
 def test_postback_rejects_over_limit():
@@ -485,7 +841,7 @@ def test_postback_rejects_over_limit():
     handler.handle(event)
 
     assert repo.saved is False
-    assert line.last and "You can set up to 5 translation languages" in line.last
+    assert line.last and "最大5つまでだよ" in line.last
 
 
 def test_postback_sends_multilingual_completion():

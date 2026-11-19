@@ -11,9 +11,11 @@ import requests
 
 from src.domain.models import TranslationRequest, TranslationResult
 from src.domain.ports import TranslationPort
-from src.infra.gemini_errors import GeminiRateLimitError, GeminiRequestError
+from src.infra.gemini_errors import GeminiRateLimitError
 from src.infra.gemini_generation_config import build_generation_config
+from src.infra.provider_failure import post_gemini
 from src.infra.translation_schema import TRANSLATION_SCHEMA
+from src.presentation.reply_formatter import strip_spurious_boundary_cjk
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +24,8 @@ You translate short UI strings for a LINE bot subscription menu.
 The user message is JSON with target_language and items[{id, text}].
 Return JSON {"items":[{"id","text"}]} using the same ids, one translation each, in target_language.
 Keep the meaning. Preserve numbers, dates, the plan names Free, Standard and Pro, and URLs.
+Preserve line breaks inside each text. Keep one numbered or bulleted item per line.
+Do not join list items into a single paragraph.
 Do not add explanations or extra items.
 """.strip()
 
@@ -59,9 +63,30 @@ Requirements:
 * Produce natural interpretations that match each user's tone and the conversational context.
 * If the source message mixes languages, write each target as one complete, natural sentence entirely in that target language. Translate every part, including words already written in the target language.
 * Do not copy, quote, or directly reproduce the source_message.text in the translation output; return only the translated text for each target language.
+* Preserve every line break in source_message.text. When the source is a numbered or bulleted list, keep one item per line in every translation. Do not merge list items into a single paragraph, and do not drop blank lines between paragraphs.
 * Output only a JSON object that conforms to the specified JSON Schema.
 * Do NOT include context_messages or target_languages in the output JSON.
 """.strip()
+
+
+def _visible_response_text(body: dict) -> str:
+    """思考パートを飛ばし、翻訳本文のパートを返す。"""
+
+    parts = body["candidates"][0]["content"]["parts"]
+    visible: list[str] = []
+    for part in parts:
+        if not isinstance(part, dict) or part.get("thought") is True:
+            continue
+        text = part.get("text")
+        if isinstance(text, str) and text.strip():
+            visible.append(text)
+    if not visible:
+        raise IndexError("no visible gemini text")
+    for text in visible:
+        stripped = text.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            return text
+    return visible[-1]
 
 
 @dataclass(frozen=True)
@@ -113,10 +138,12 @@ class GeminiTranslationAdapter(TranslationPort):
 
         started = time.perf_counter()
         try:
-            response = self._session.post(
-                url,
+            response = post_gemini(
+                self._session,
+                model=self._model,
+                url=url,
                 params={"key": self._api_key},
-                json=payload,
+                payload=payload,
                 timeout=self._timeout,
             )
         finally:
@@ -126,24 +153,11 @@ class GeminiTranslationAdapter(TranslationPort):
                 (time.perf_counter() - started) * 1000,
                 len(request.candidate_languages),
             )
-        try:
-            response.raise_for_status()
-        except requests.HTTPError:
-            status_code = response.status_code
-            logger.error(
-                "Gemini request failed | model=%s status=%s",
-                self._model,
-                status_code,
-            )
-            if status_code == 429:
-                raise GeminiRateLimitError(self._model) from None
-            raise GeminiRequestError(self._model, status_code) from None
 
         body = response.json()
         try:
-            candidate = body["candidates"][0]
-            part_text = candidate["content"]["parts"][0]["text"]
-        except (KeyError, IndexError) as exc:
+            part_text = _visible_response_text(body)
+        except (KeyError, IndexError, TypeError) as exc:
             logger.error("Gemini response format invalid | model=%s", self._model)
             raise ValueError("Unexpected Gemini response format") from exc
 
@@ -152,7 +166,10 @@ class GeminiTranslationAdapter(TranslationPort):
         translations = data.get("translations", [])
         allowed = {lang.lower() for lang in request.candidate_languages}
         results = [
-            TranslationResult(lang=item["lang"], text=item["text"])
+            TranslationResult(
+                lang=item["lang"],
+                text=strip_spurious_boundary_cjk(request.message_text, item["text"]),
+            )
             for item in translations
             if item.get("lang") and item.get("text") and item["lang"].lower() in allowed
         ]
@@ -199,10 +216,12 @@ class GeminiTranslationAdapter(TranslationPort):
         }
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent"
         started = time.perf_counter()
-        response = self._session.post(
-            url,
+        response = post_gemini(
+            self._session,
+            model=self._model,
+            url=url,
             params={"key": self._api_key},
-            json=payload,
+            payload=payload,
             timeout=self._timeout,
         )
         logger.info(
@@ -211,9 +230,8 @@ class GeminiTranslationAdapter(TranslationPort):
             (time.perf_counter() - started) * 1000,
             len(originals),
         )
-        response.raise_for_status()
         body = response.json()
-        part_text = body["candidates"][0]["content"]["parts"][0]["text"]
+        part_text = _visible_response_text(body)
         data = json.loads(part_text)
         translated_items = data.get("items") if isinstance(data, dict) else None
         if not isinstance(translated_items, list):
@@ -225,7 +243,8 @@ class GeminiTranslationAdapter(TranslationPort):
             item_id = str(item.get("id") or "")
             text = item.get("text")
             if item_id and isinstance(text, str) and text.strip():
-                by_id[item_id] = text.strip()
+                source = originals[int(item_id)] if item_id.isdigit() and int(item_id) < len(originals) else ""
+                by_id[item_id] = strip_spurious_boundary_cjk(source, text.strip())
         if not by_id:
             raise ValueError("UI batch response had no translations")
         return [by_id.get(str(index), originals[index]) for index in range(len(originals))]
