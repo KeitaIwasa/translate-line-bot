@@ -104,6 +104,8 @@ Globals:
         LINE_CHANNEL_ACCESS_TOKEN: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:LINE_CHANNEL_ACCESS_TOKEN}}"
         GEMINI_API_KEY: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:GEMINI_API_KEY}}"
         NEON_DATABASE_URL: !Sub "{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:NEON_DATABASE_URL}}"
+        # *.neon.tech で -pooler が無いホストだけ、先頭ラベルに -pooler を付けて接続する。false で直接接続のまま。
+        NEON_USE_POOLER: "true"
         GEMINI_MODEL: !Ref GeminiModel
         COMMAND_MODEL: !Ref GeminiModel
         MAX_CONTEXT_MESSAGES: !Ref MaxContextMessages

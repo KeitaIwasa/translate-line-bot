@@ -276,6 +276,27 @@ aws sesv2 get-email-identity \
   - `CONTACT_IP_HASH_SALT`
 - `.env` にはローカル検証用の `NEON_DATABASE_URL` / `GEMINI_API_KEY` を入れてテスト可能
 
+### Neon の pooled 接続（STG / PRD）
+
+Lambda はアイドル中に Neon へ生存確認を送りません。compute の scale-to-zero（約5分）はそのままです。
+
+`template.yaml` の `NEON_USE_POOLER=true` により、次回デプロイから Lambda は `NEON_DATABASE_URL` のホストを次のときだけ書き換えます。
+
+- ホストが `*.neon.tech` で、先頭ラベルが `-pooler` で終わっていない
+- 例: `ep-xxxx.ap-southeast-1.aws.neon.tech` → `ep-xxxx-pooler.ap-southeast-1.aws.neon.tech`
+
+ユーザー名、パスワード、データベース名、ポートは変えません。すでに `-pooler` が付いているホストも変えません。
+
+STG / PRD で必要な作業:
+
+1. 秘密のホストが上記の Neon 標準形式なら、`stg/line-translate-bot-secrets` と `prod/line-translate-bot-secrets` の `NEON_DATABASE_URL` は変更しない。デプロイした Lambda が pooler ホストへ接続する。
+2. 直接接続のままにしたい Lambda だけ、環境変数 `NEON_USE_POOLER` を `false` にする。
+3. ホストが `*.neon.tech` でない場合は、Neon コンソールの Connection details で Pooled connection を選び、その文字列を両ステージの `NEON_DATABASE_URL` に入れる。コードは `-pooler` 付きホストをそのまま使う。
+
+`scripts/deploy.sh` のマイグレーションは秘密の URL をそのまま使います。Lambda の書き換え対象にはしません。
+
+プールした接続は、約4分より長く使っていなければ捨ててから開き直します。ソケットが閉じている場合もクエリの前に捨てます。それでも SSL 切断などで失敗し、その接続で1文も成功していなければ、新しい接続で一度だけやり直します。それでも失敗したときは、利用者に英語で再送を頼み、既存の ProviderFailure アラームの対象にします。
+
 ### 1. 依存パッケージの準備
 
 ```bash
