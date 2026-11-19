@@ -220,7 +220,28 @@ def _handler(repo: _Repo, line: _Line, translator: _Translator, ui: _UI | None =
 
 
 def _notice_batches(line: _Line) -> list[list[dict]]:
-    return [batch for batch in line.batches if any(FREE_NOTICE_LINE in (item.get("text") or "") or "LANG:" in (item.get("text") or "") for item in batch)]
+    def _is_notice(item: dict) -> bool:
+        text = item.get("text") or ""
+        return (
+            "Translation stopped" in text
+            or "free messages" in text
+            or "LANG:" in text
+            or FREE_NOTICE_LINE in text
+        )
+
+    return [batch for batch in line.batches if any(_is_notice(item) for item in batch)]
+
+
+def _plan_urls(messages: list[dict]) -> list[str]:
+    urls: list[str] = []
+    for message in messages:
+        text = str(message.get("text") or "")
+        if message.get("type") == "text" and text.startswith("http"):
+            urls.append(text)
+        for action in (message.get("template") or {}).get("actions") or []:
+            if action.get("uri"):
+                urls.append(str(action["uri"]))
+    return urls
 
 
 def test_quota_should_notify_free_only_when_translation_stops():
@@ -293,9 +314,12 @@ def test_fresh_free_group_notifies_once_when_translation_stops():
     assert repo.notice_plan == "free"
     notices = _notice_batches(line)
     assert len(notices) == 1
-    assert FREE_NOTICE_LINE in notices[0][0]["text"]
-    assert notices[0][1]["text"] == f"{PLAN_URL}&group=group"
-    assert FREE_NOTICE_LINE not in notices[0][1]["text"]
+    body = notices[0][0]["text"]
+    plan_url = f"{PLAN_URL}&group=group"
+    assert "Translation stopped" in body
+    assert "free messages" in body
+    assert plan_url in _plan_urls(notices[0])
+    assert plan_url not in body
 
     before = len(line.batches)
     handled = handler._handle_translation_flow(_event("another"), sender_name="user")
@@ -433,24 +457,25 @@ def test_limit_notice_renders_for_group_languages(languages):
 
     assert len(line.batches) == 1
     body = line.batches[0][0]["text"]
-    url = line.batches[0][1]["text"]
-    assert url == f"{PLAN_URL}&group=group"
-    assert url not in body
+    plan_url = f"{PLAN_URL}&group=group"
+    assert plan_url in _plan_urls(line.batches[0])
+    assert plan_url not in body
     assert "Unable to generate purchase link" not in body
 
     non_english = [code.lower() for code in languages if code.lower() != "en"]
     if not non_english:
         # 英語と、言語が1つも無いグループはベース英文をそのまま使う
-        assert FREE_NOTICE_LINE in body
+        assert "Translation stopped" in body
+        assert "free messages" in body
         assert ui.calls == []
         assert "LANG:" not in body
         return
 
     assert ui.calls
     assert ui.calls[0][1] == non_english
-    assert FREE_NOTICE_LINE in ui.calls[0][0]
+    assert "Translation stopped" in ui.calls[0][0]
     for code in non_english:
-        assert f"LANG:{code}:{FREE_NOTICE_LINE}" in body
+        assert f"LANG:{code}:Translation stopped" in body
 
 
 def test_limit_notice_stays_on_registered_languages_when_text_looks_romanian():
@@ -465,7 +490,7 @@ def test_limit_notice_stays_on_registered_languages_when_text_looks_romanian():
 
     assert len(_notice_batches(line)) == 1
     body = line.batches[0][0]["text"]
-    assert FREE_NOTICE_LINE in body
+    assert "Translation stopped" in body
     assert "LANG:th:" in body
     assert "ro" not in [lang for _text, langs in ui.calls for lang in langs]
     assert ui.calls[0][1] == ["th"]
@@ -485,10 +510,10 @@ def test_stop_notice_ignores_user_text_shape(text):
     assert len(_notice_batches(line)) == 1
     body = line.batches[0][0]["text"]
     assert text not in body
-    assert FREE_NOTICE_LINE in body
+    assert "Translation stopped" in body
     assert "LANG:ja:" in body
-    assert ui.calls[0][0].startswith("Free quota")
-    assert line.batches[0][1]["text"].startswith(PLAN_URL)
+    assert "Translation stopped" in ui.calls[0][0]
+    assert any(uri.startswith(PLAN_URL) for uri in _plan_urls(line.batches[0]))
 
 
 class _MemoryCursor:

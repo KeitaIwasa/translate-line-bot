@@ -4,7 +4,12 @@ import pytest
 from psycopg import errors
 
 from src.infra.neon_client import NeonClient
-from src.infra.neon_repositories import NeonMessageRepository
+from src.infra.neon_repositories import (
+    NeonMessageRepository,
+    _LOCAL_QUOTA_CLAIMS,
+    _claim_local,
+    _release_local,
+)
 from src.infra.runtime_cache import MISS
 
 
@@ -265,6 +270,49 @@ def test_neon_client_connection_rolls_back_when_the_second_statement_fails(monke
         "UPDATE group_members",
         "rollback",
     ]
+
+
+def test_release_approaching_notice_sets_the_flag_false():
+    client = _BoundaryClient()
+    repo = _repo(client)
+
+    repo.release_approaching_notice("g1", "2026-10-01")
+
+    statement = client.committed[-1]
+    assert "approaching_notice_sent = FALSE" in statement
+    assert "WHERE group_id = %s AND period_key = %s" in statement
+
+
+def test_release_quota_mention_reminder_clears_only_that_date():
+    client = _BoundaryClient()
+    repo = _repo(client)
+
+    repo.release_quota_mention_reminder("g1", "2026-10-01", "2026-10-22")
+
+    statement = client.committed[-1]
+    assert "quota_mention_reminder_on = NULL" in statement
+    assert "quota_mention_reminder_on = %s" in statement
+
+
+def test_release_falls_back_to_dropping_the_local_claim_when_the_column_is_missing():
+    _LOCAL_QUOTA_CLAIMS.clear()
+    approaching = ("approaching", "g1", "2026-10-01")
+    mention = ("mention", "g1", "2026-10-01", "2026-10-22")
+    assert _claim_local(approaching) is True
+    assert _claim_local(mention) is True
+    try:
+        approaching_repo = _repo(_BoundaryClient(undefined_sql="approaching_notice_sent"))
+        approaching_repo.release_approaching_notice("g1", "2026-10-01")
+        assert approaching not in _LOCAL_QUOTA_CLAIMS
+        assert mention in _LOCAL_QUOTA_CLAIMS
+
+        mention_repo = _repo(_BoundaryClient(undefined_sql="quota_mention_reminder_on"))
+        mention_repo.release_quota_mention_reminder("g1", "2026-10-01", "2026-10-22")
+        assert mention not in _LOCAL_QUOTA_CLAIMS
+        assert _claim_local(approaching) is True
+        assert _claim_local(mention) is True
+    finally:
+        _LOCAL_QUOTA_CLAIMS.clear()
 
 
 def test_neon_client_cursor_does_not_open_a_transaction(monkeypatch):
