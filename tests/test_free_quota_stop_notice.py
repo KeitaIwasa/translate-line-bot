@@ -12,6 +12,7 @@ from src.domain import models
 from src.domain.models import TranslationRuntimeState
 from src.domain.services.quota_service import QuotaDecision, quota_should_notify
 from src.infra.neon_repositories import NeonMessageRepository
+from src.presentation.rich_message import flex_body_text
 
 
 PLAN_URL = "https://plans.example/pro.html?st=token"
@@ -219,8 +220,41 @@ def _handler(repo: _Repo, line: _Line, translator: _Translator, ui: _UI | None =
     )
 
 
+def _visible_notice_text(message: dict) -> str:
+    """Flex の本文と代替テキスト、または平文をまとめて返す。"""
+
+    if message.get("type") == "flex":
+        return "\n".join(part for part in (flex_body_text(message), str(message.get("altText") or "")) if part)
+    return str(message.get("text") or "")
+
+
+def _message_uris(message: dict) -> list[str]:
+    found: list[str] = []
+    text = str(message.get("text") or "")
+    if message.get("type") == "text" and text.startswith("http"):
+        found.append(text)
+
+    def _walk(node) -> None:
+        if isinstance(node, dict):
+            action = node.get("action")
+            if isinstance(action, dict) and action.get("uri"):
+                found.append(str(action["uri"]))
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(message.get("contents"))
+    return found
+
+
 def _notice_batches(line: _Line) -> list[list[dict]]:
-    return [batch for batch in line.batches if any(FREE_NOTICE_LINE in (item.get("text") or "") or "LANG:" in (item.get("text") or "") for item in batch)]
+    def _is_notice(item: dict) -> bool:
+        text = _visible_notice_text(item)
+        return FREE_NOTICE_LINE in text or "LANG:" in text
+
+    return [batch for batch in line.batches if any(_is_notice(item) for item in batch)]
 
 
 def test_quota_should_notify_free_only_when_translation_stops():
@@ -293,9 +327,11 @@ def test_fresh_free_group_notifies_once_when_translation_stops():
     assert repo.notice_plan == "free"
     notices = _notice_batches(line)
     assert len(notices) == 1
-    assert FREE_NOTICE_LINE in notices[0][0]["text"]
-    assert notices[0][1]["text"] == f"{PLAN_URL}&group=group"
-    assert FREE_NOTICE_LINE not in notices[0][1]["text"]
+    body = _visible_notice_text(notices[0][0])
+    plan_url = f"{PLAN_URL}&group=group"
+    assert FREE_NOTICE_LINE in body
+    assert plan_url in [uri for item in notices[0] for uri in _message_uris(item)]
+    assert plan_url not in (flex_body_text(notices[0][0]) if notices[0][0].get("type") == "flex" else body)
 
     before = len(line.batches)
     handled = handler._handle_translation_flow(_event("another"), sender_name="user")
@@ -337,7 +373,8 @@ def test_paused_group_with_null_notice_self_heals_once():
 
 def test_failed_notice_release_is_retried_on_next_blocked_message():
     repo = _Repo(usage=50, languages=["en"], notice_plan=None)
-    line = _Line(fail_times=1)
+    # Flex と平文の両方が失敗したときだけ claim を戻す。
+    line = _Line(fail_times=2)
     translator = _Translator()
     handler = _handler(repo, line, translator)
 
@@ -350,6 +387,19 @@ def test_failed_notice_release_is_retried_on_next_blocked_message():
     handler._handle_translation_flow(_event("retry"), sender_name="user")
     assert repo.notice_plan == "free"
     assert len(_notice_batches(line)) == 1
+
+
+def test_flex_failure_falls_back_to_plain_text_and_keeps_claim():
+    repo = _Repo(usage=50, languages=["en"], notice_plan=None)
+    line = _Line(fail_times=1)
+    handler = _handler(repo, line, _Translator())
+
+    handler._handle_translation_flow(_event("first block"), sender_name="user")
+
+    assert repo.notice_plan == "free"
+    assert len(_notice_batches(line)) == 1
+    assert line.batches[-1][0]["type"] == "text"
+    assert FREE_NOTICE_LINE in line.batches[-1][0]["text"]
 
 
 def test_concurrent_messages_at_limit_send_one_notice():
@@ -432,10 +482,12 @@ def test_limit_notice_renders_for_group_languages(languages):
     handler._send_limit_reached_notice(_event("ignored"), "free", 50, period_key="2026-11-01")
 
     assert len(line.batches) == 1
-    body = line.batches[0][0]["text"]
-    url = line.batches[0][1]["text"]
-    assert url == f"{PLAN_URL}&group=group"
-    assert url not in body
+    message = line.batches[0][0]
+    body = _visible_notice_text(message)
+    plan_url = f"{PLAN_URL}&group=group"
+    assert plan_url in [uri for item in line.batches[0] for uri in _message_uris(item)]
+    notice_body = flex_body_text(message) if message.get("type") == "flex" else body
+    assert plan_url not in notice_body
     assert "Unable to generate purchase link" not in body
 
     non_english = [code.lower() for code in languages if code.lower() != "en"]
@@ -464,7 +516,7 @@ def test_limit_notice_stays_on_registered_languages_when_text_looks_romanian():
     handler._handle_translation_flow(_event("subscription"), sender_name="user")
 
     assert len(_notice_batches(line)) == 1
-    body = line.batches[0][0]["text"]
+    body = _visible_notice_text(line.batches[0][0])
     assert FREE_NOTICE_LINE in body
     assert "LANG:th:" in body
     assert "ro" not in [lang for _text, langs in ui.calls for lang in langs]
@@ -483,12 +535,12 @@ def test_stop_notice_ignores_user_text_shape(text):
 
     assert translator.calls == 0
     assert len(_notice_batches(line)) == 1
-    body = line.batches[0][0]["text"]
+    body = _visible_notice_text(line.batches[0][0])
     assert text not in body
     assert FREE_NOTICE_LINE in body
     assert "LANG:ja:" in body
     assert ui.calls[0][0].startswith("Free quota")
-    assert line.batches[0][1]["text"].startswith(PLAN_URL)
+    assert any(uri.startswith(PLAN_URL) for item in line.batches[0] for uri in _message_uris(item))
 
 
 class _MemoryCursor:

@@ -1,17 +1,17 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from ...domain import models
 from ...domain.ports import LinePort, MessageRepositoryPort
+from ...presentation.guidance_cards import JOIN_GUIDANCE, join_card
+from ...presentation.rich_message import deliver_reply
 
-GROUP_PROMPT_MESSAGE = (
-    "I'm a multilingual translation bot. Please tell me the languages you want to translate to.\n\n"
-    "多言語翻訳ボットです。翻訳したい言語を教えてください。\n\n"
-    "我是一个多语言翻译机器人。请告诉我你想要翻译成哪些语言。\n\n"
-    "ฉันเป็นบอทแปลหลายภาษา กรุณาบอกฉันว่าคุณต้องการแปลเป็นภาษาใดบ้าง\n\n"
-    "ex) English, 中文, 日本語, ไทย"
-)
+logger = logging.getLogger(__name__)
+
+# 参加案内の原文。Flex の本文と、送信失敗時の平文で同じ文字列を使う。
+GROUP_PROMPT_MESSAGE = JOIN_GUIDANCE
 
 
 class JoinHandler:
@@ -29,7 +29,7 @@ class JoinHandler:
             self._repo.upsert_group_name(event.group_id, group_name)
         self._repo.reset_group_language_settings(event.group_id)
         self._repo.set_translation_enabled(event.group_id, False)
-        self._line.reply_text(event.reply_token, GROUP_PROMPT_MESSAGE)
+        deliver_reply(self._line, event.reply_token, join_card(), logger=logger)
 
 
 def _event_timestamp(event: models.BaseEvent):
