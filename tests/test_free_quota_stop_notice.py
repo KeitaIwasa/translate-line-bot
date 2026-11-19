@@ -515,6 +515,27 @@ def test_limit_notice_renders_for_group_languages(languages):
     assert action["label"] == "Remove limit"
 
 
+def test_limit_notice_stays_on_registered_languages_when_text_looks_romanian():
+    """subscription は ro と検出される。上限通知の言語は en/th のまま。"""
+
+    repo = _Repo(usage=50, languages=["en", "th"], notice_plan=None)
+    line = _Line()
+    ui = _UI()
+    handler = _handler(repo, line, _Translator(), ui)
+
+    handler._handle_translation_flow(_event("subscription"), sender_name="user")
+
+    assert len(_notice_batches(line)) == 1
+    flex = line.batches[0][0]
+    assert flex["type"] == "flex"
+    rendered = "\n".join(_flex_texts(flex) + [flex["altText"]])
+    # en/th は固定訳。本文が ro に見えても通知言語へ足さない。
+    assert "This month's 50 free messages are used up." in rendered
+    assert "ใช้ข้อความฟรีเดือนนี้ครบ 50 ข้อความแล้ว" in rendered
+    assert "LANG:" not in rendered
+    assert ui.calls == []
+
+
 @pytest.mark.parametrize("text", ["Hello こんにちは", "😀🔥", "20261115", "１２３"])
 def test_stop_notice_ignores_user_text_shape(text):
     repo = _Repo(usage=50, languages=["ja", "en"], notice_plan=None)
