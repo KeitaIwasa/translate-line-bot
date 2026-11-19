@@ -19,7 +19,7 @@ from ..domain.models import (
 )
 from ..domain.ports import MessageRepositoryPort
 from ..domain.services.plan_policy import FREE_PLAN, PRO_PLAN, resolve_effective_plan
-from ..domain.services.quota_service import QuotaDecision
+from ..domain.services.quota_service import QuotaDecision, quota_should_notify
 from .message_crypto import decrypt_text, encrypt_text
 from .neon_client import NeonClient
 from .runtime_cache import MISS, TtlCache
@@ -1036,44 +1036,89 @@ class NeonMessageRepository(MessageRepositoryPort):
                 notice_plan = row[1] if row else None
 
                 if current_usage >= limit:
-                    return QuotaDecision(
-                        allowed=False,
-                        should_notify=notice_plan != plan_key,
-                        stop_translation=stop_translation_on_limit,
-                        usage=current_usage,
-                        limit=limit,
-                        period_key=period_key,
-                        plan_key=plan_key,
+                    usage_after = current_usage
+                    allowed = False
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO group_usage_counters (group_id, period_key, translation_count, created_at, updated_at)
+                        VALUES (%s, %s, %s, NOW(), NOW())
+                        ON CONFLICT (group_id, period_key)
+                        DO UPDATE SET
+                            translation_count = group_usage_counters.translation_count + EXCLUDED.translation_count,
+                            updated_at = NOW()
+                        RETURNING translation_count
+                        """,
+                        (group_id, period_key, increment),
                     )
+                    usage_after_row = cur.fetchone()
+                    usage_after = int(usage_after_row[0]) if usage_after_row else current_usage
+                    allowed = usage_after <= limit
 
+                # 通知フラグの確定は送信直前の claim に任せる。
+                # ここで先に書くと、送信前に記録され、停止メッセージが notify=False になる。
+                return QuotaDecision(
+                    allowed=allowed,
+                    should_notify=quota_should_notify(
+                        allowed=allowed,
+                        usage=usage_after,
+                        limit=limit,
+                        notice_plan=notice_plan,
+                        plan_key=plan_key,
+                        stop_translation_on_limit=stop_translation_on_limit,
+                    ),
+                    stop_translation=stop_translation_on_limit and not allowed,
+                    usage=usage_after,
+                    limit=limit,
+                    period_key=period_key,
+                    plan_key=plan_key,
+                )
+
+    def claim_limit_notice_plan(self, group_id: str, period_key: str, plan: str) -> bool:
+        """未記録のときだけ上限通知の権利を取る。同時実行でも成功は1件。"""
+
+        try:
+            with self._client.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO group_usage_counters (group_id, period_key, translation_count, created_at, updated_at)
-                    VALUES (%s, %s, %s, NOW(), NOW())
+                    INSERT INTO group_usage_counters (
+                        group_id, period_key, translation_count, limit_notice_plan, created_at, updated_at
+                    )
+                    VALUES (%s, %s, 0, %s, NOW(), NOW())
                     ON CONFLICT (group_id, period_key)
                     DO UPDATE SET
-                        translation_count = group_usage_counters.translation_count + EXCLUDED.translation_count,
+                        limit_notice_plan = EXCLUDED.limit_notice_plan,
                         updated_at = NOW()
-                    RETURNING translation_count
+                    WHERE group_usage_counters.limit_notice_plan IS DISTINCT FROM EXCLUDED.limit_notice_plan
+                    RETURNING limit_notice_plan
                     """,
-                    (group_id, period_key, increment),
+                    (group_id, period_key, plan),
                 )
-                usage_after_row = cur.fetchone()
-                usage_after = int(usage_after_row[0]) if usage_after_row else current_usage
+                return cur.fetchone() is not None
+        except errors.UndefinedColumn:
+            logger.warning("limit_notice_plan column missing; skip claiming notice", extra={"group_id": group_id})
+            return False
+        except errors.UndefinedTable:
+            logger.warning("group_usage_counters table missing; skip claiming notice", extra={"group_id": group_id})
+            return False
 
-        if usage_after > limit:
-            return QuotaDecision(
-                False,
-                notice_plan != plan_key,
-                stop_translation_on_limit,
-                usage_after,
-                limit,
-                period_key,
-                plan_key,
-            )
-        if usage_after == limit:
-            return QuotaDecision(True, notice_plan != plan_key, False, usage_after, limit, period_key, plan_key)
-        return QuotaDecision(True, False, False, usage_after, limit, period_key, plan_key)
+    def release_limit_notice_plan(self, group_id: str, period_key: str, plan: str) -> None:
+        """送信に失敗した claim だけを戻し、次のメッセージで再通知できるようにする。"""
+
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE group_usage_counters
+                    SET limit_notice_plan = NULL, updated_at = NOW()
+                    WHERE group_id = %s AND period_key = %s AND limit_notice_plan = %s
+                    """,
+                    (group_id, period_key, plan),
+                )
+        except errors.UndefinedColumn:
+            logger.warning("limit_notice_plan column missing; skip releasing notice", extra={"group_id": group_id})
+        except errors.UndefinedTable:
+            logger.warning("group_usage_counters table missing; skip releasing notice", extra={"group_id": group_id})
 
     def set_limit_notice_plan(self, group_id: str, period_key: str, plan: str) -> None:
         try:
