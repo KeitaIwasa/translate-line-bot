@@ -613,6 +613,13 @@ def test_free_50_translates_and_sends_stop_notice():
 
     assert repo.usage == 50
     assert translation.calls == 1
+    assert repo.notice_plan is None
+    assert repo.translation_enabled is True
+    assert "Translation stopped" not in "\n".join(line.sent_texts)
+
+    handler._handle_translation_flow(_build_event("blocked"), sender_name="user", translation_enabled=True)
+
+    assert translation.calls == 1
     assert repo.notice_plan == "free"
     joined = "\n".join(line.sent_texts)
     assert "Translation stopped" in joined
@@ -622,7 +629,7 @@ def test_free_50_translates_and_sends_stop_notice():
 
 
 def test_free_50_persists_quota_pause_before_the_next_message():
-    """50件目の停止案内と同時に quota 停止を残す。51件目を待たない。"""
+    """50件目は翻訳する。停止と案内は、翻訳が止まった次の投稿で残す。"""
 
     line = _CapturingLine()
     translation = RecordingTranslationService()
@@ -633,6 +640,11 @@ def test_free_50_persists_quota_pause_before_the_next_message():
 
     assert repo.usage == 50
     assert translation.calls == 1
+    assert repo.notice_plan is None
+    assert repo.translation_enabled is True
+
+    handler._handle_translation_flow(_build_event("blocked"), sender_name="user", translation_enabled=True)
+
     assert repo.notice_plan == "free"
     assert repo.translation_enabled is False
     assert repo.paused_reason == "quota"

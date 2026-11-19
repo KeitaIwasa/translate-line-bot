@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from src.app.handlers.message_handler import MessageHandler
 from src.domain import models
 from src.domain.models import TranslationRuntimeState
-from src.domain.services.quota_service import QuotaDecision
+from src.domain.services.quota_service import QuotaDecision, quota_should_notify
 
 
 class RecordingLineClient:
@@ -135,29 +135,40 @@ class ProQuotaRepo:
             return ("active", datetime(2025, 1, 1, tzinfo=timezone.utc), datetime(2025, 2, 1, tzinfo=timezone.utc))
         return (None, None, None)
 
-    def reserve_quota_slot(self, *, group_id, period_key, plan_key, paid, limit, increment):
-        notice_plan = self.notice_plan
-        current_usage = self.usage
+    def reserve_quota_slot(self, *, group_id, period_key, plan_key, stop_translation_on_limit, limit, increment):
+        if self.usage >= limit:
+            usage = self.usage
+            allowed = False
+        else:
+            self.usage += increment
+            usage = self.usage
+            allowed = usage <= limit
+        return QuotaDecision(
+            allowed=allowed,
+            should_notify=quota_should_notify(
+                allowed=allowed,
+                usage=usage,
+                limit=limit,
+                notice_plan=self.notice_plan,
+                plan_key=plan_key,
+                stop_translation_on_limit=stop_translation_on_limit,
+            ),
+            stop_translation=bool(stop_translation_on_limit and not allowed),
+            usage=usage,
+            limit=limit,
+            period_key=period_key,
+            plan_key=plan_key,
+        )
 
-        if not paid and notice_plan == plan_key:
-            return QuotaDecision(False, False, False, current_usage, limit, period_key, plan_key)
-        if current_usage >= limit:
-            return QuotaDecision(False, notice_plan != plan_key, (not paid), current_usage, limit, period_key, plan_key)
+    def claim_limit_notice_plan(self, _group_id, _period_key, plan: str) -> bool:
+        if self.notice_plan == plan:
+            return False
+        self.notice_plan = plan
+        return True
 
-        self.usage += increment
-        usage_after = self.usage
-        if paid:
-            if usage_after > limit:
-                return QuotaDecision(False, notice_plan != plan_key, False, usage_after, limit, period_key, plan_key)
-            if usage_after == limit:
-                return QuotaDecision(True, notice_plan != plan_key, False, usage_after, limit, period_key, plan_key)
-            return QuotaDecision(True, False, False, usage_after, limit, period_key, plan_key)
-
-        if usage_after > limit:
-            return QuotaDecision(False, notice_plan != plan_key, True, usage_after, limit, period_key, plan_key)
-        if usage_after == limit:
-            return QuotaDecision(True, notice_plan != plan_key, False, usage_after, limit, period_key, plan_key)
-        return QuotaDecision(True, False, False, usage_after, limit, period_key, plan_key)
+    def release_limit_notice_plan(self, _group_id, _period_key, plan: str) -> None:
+        if self.notice_plan == plan:
+            self.notice_plan = None
 
     def fetch_translation_runtime_state(self, _group_id):
         status, period_start, period_end = self.get_subscription_period(_group_id)
@@ -342,7 +353,7 @@ def test_free_notice_blocks_processing_when_unpaid_and_non_command():
     assert line.sent_texts == []
 
 
-def test_free_plan_sends_notice_after_50th_translation():
+def test_free_plan_50th_translation_does_not_consume_stop_notice():
     line = RecordingLineClient()
     translation = RecordingTranslationService()
     repo = ProQuotaRepo(initial_usage=49, paid=False, notice_plan=None)
@@ -352,8 +363,18 @@ def test_free_plan_sends_notice_after_50th_translation():
 
     assert handled is True
     assert repo.usage == 50
-    assert translation.calls == 1  # 50通目は翻訳実行
-    assert repo.notice_plan == "free"  # 通知フラグ更新
+    assert translation.calls == 1  # 50通目はまだ翻訳する
+    assert repo.notice_plan is None  # 停止前に通知済みにしない
+    assert repo.translation_enabled is True
+    assert not any("free messages" in text for text in line.sent_texts)
+    assert not any("Free quota" in text for text in line.sent_texts)
+
+    handled = handler._handle_translation_flow(_build_event("blocked"), sender_name="user", translation_enabled=True)
+
+    assert handled is True
+    assert translation.calls == 1
+    assert repo.notice_plan == "free"
+    assert repo.translation_enabled is False
     assert any("free messages" in text for text in line.sent_texts)
     assert any("Translation stopped" in text for text in line.sent_texts)
 

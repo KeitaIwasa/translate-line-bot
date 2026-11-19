@@ -189,6 +189,14 @@ COMMAND_ROUTER_ERROR_BASE = "Sorry, I couldn't process that request right now. P
 LANGUAGE_LIMIT_MESSAGE_EN = "You can set up to {limit} translation languages. Please specify {limit} or fewer."
 PRIVATE_ASSISTANT_USER_ID = "__assistant__"
 PRIVATE_ASSISTANT_SENDER = "KOTORI Support"
+# 返信言語を登録言語に固定する操作。ヘルプや使い方は含めない。Dio作成
+_REGISTERED_LANGUAGE_ACTIONS = frozenset(
+    {
+        "subscription_menu",
+        "subscription_cancel",
+        "subscription_upgrade",
+    }
+)
 
 
 @dataclass
@@ -814,10 +822,13 @@ class MessageHandler:
             if (decision.action or "unknown") == "unknown" and is_current_languages_question(command_text):
                 logger.info("Current languages question | routed=show_languages")
                 decision = replace(decision, action="show_languages")
+            action = decision.action or "unknown"
+            # プランメニューだけ登録言語に固定する。ヘルプなどは検出した言語のまま。Dio作成
             instruction_lang = self._resolve_command_instruction_language(
                 command_text,
                 preferred=decision.instruction_language,
                 group_languages=runtime.group_languages,
+                restrict_to_registered=action in _REGISTERED_LANGUAGE_ACTIONS,
             )
             if instruction_lang != (decision.instruction_language or ""):
                 decision = replace(decision, instruction_language=instruction_lang)
@@ -827,7 +838,6 @@ class MessageHandler:
             trace.set_language_counts(decision)
             trace.log_decision(router_elapsed_ms)
 
-            action = decision.action or "unknown"
             action_started = time.perf_counter()
             try:
                 if action == "error":
@@ -1382,8 +1392,13 @@ class MessageHandler:
         *,
         preferred: str,
         group_languages: Sequence[str],
+        restrict_to_registered: bool = False,
     ) -> str:
-        """本文の文字種に合う言語を選ぶ。合わないコードはグループ言語へ落とす。"""
+        """本文の文字種に合う言語を選ぶ。
+
+        restrict_to_registered のときだけ、登録外の検出を登録言語へ戻す。
+        ヘルプや使い方は登録外の言語をそのまま使う。Dio作成
+        """
 
         detector = self._lang_detector
         resolver = getattr(detector, "resolve_instruction_language", None)
@@ -1393,6 +1408,7 @@ class MessageHandler:
                     command_text or "",
                     preferred=preferred or "",
                     group_languages=list(group_languages or []),
+                    restrict_to_registered=restrict_to_registered,
                 )
                 return resolved or ""
             except Exception:
@@ -1873,19 +1889,28 @@ class MessageHandler:
 
         approaching_claimed = False
         approaching_period_key = flow.decision.period_key
-        # 送信が成功するまで通知済みにしない。失敗した周期は次の投稿でやり直す。
-        limit_notice_period: str | None = None
-        if flow.decision.should_notify:
-            notice_text, notice_url = self._build_limit_reached_notice_text(
-                event.group_id,
-                flow.decision.plan_key,
-                limit,
-                period_key=flow.decision.period_key,
-                period_end=period_end,
-            )
-            messages.append({"type": "text", "text": notice_text})
-            self._append_plan_link(messages, notice_url, event.group_id)
-            limit_notice_period = flow.decision.period_key
+        # 有料プランは上限ちょうどを翻訳した返信に通知を足す。
+        # 無料は should_notify が翻訳停止時だけ真なので、50件目の成功翻訳には付けない。
+        claimed = False
+        if flow.decision.should_notify and self._claim_limit_notice(
+            event.group_id or "",
+            flow.decision.period_key,
+            plan_key,
+        ):
+            claimed = True
+            try:
+                notice_text, notice_url = self._build_limit_reached_notice_text(
+                    event.group_id,
+                    flow.decision.plan_key,
+                    limit,
+                    period_key=flow.decision.period_key,
+                    period_end=period_end,
+                )
+                messages.append({"type": "text", "text": notice_text})
+                self._append_plan_link(messages, notice_url, event.group_id)
+            except Exception:
+                self._release_limit_notice(event.group_id or "", flow.decision.period_key, plan_key)
+                raise
         elif self._should_send_approaching_notice(plan_key, limit, flow.decision.usage):
             group_id = event.group_id or ""
             if self._claim_approaching_notice(group_id, approaching_period_key):
@@ -1917,17 +1942,11 @@ class MessageHandler:
         except Exception:
             if approaching_claimed:
                 self._release_approaching_notice(event.group_id or "", approaching_period_key)
-            # quota の claim は _QuotaResetDelivery が未送信へ戻す。
+            if claimed:
+                self._release_limit_notice(event.group_id or "", flow.decision.period_key, plan_key)
             raise
-        if limit_notice_period is not None:
-            # 送信済みの案内を、記録の失敗で未送信扱いに戻さない。
-            try:
-                self._repo.set_limit_notice_plan(event.group_id, limit_notice_period, plan_key)
-            except Exception:
-                logger.warning(
-                    "Failed to record limit notice plan",
-                    extra={"group_id": event.group_id, "period_key": limit_notice_period},
-                )
+        if claimed:
+            self._log_quota_notice_sent(event.group_id or "", plan_key, flow.decision.period_key, limit)
 
     def _maybe_upsert_deferred_display_name(
         self,
@@ -2122,24 +2141,63 @@ class MessageHandler:
         period_key: str,
         period_end: Optional[datetime] = None,
     ) -> None:
-        """プラン別に月1回だけ上限通知を送る。"""
-        previous_plan = getattr(self._repo, "get_limit_notice_plan", lambda *_: None)(event.group_id, period_key)
-        if previous_plan == plan_key:
-            # 同一プランで既に通知済み
+        """プラン別に月1回だけ上限通知を送る。未記録なら停止中でも送る。"""
+        if not self._claim_limit_notice(event.group_id or "", period_key, plan_key):
             return
 
-        self._send_limit_reached_notice(
-            event,
-            plan_key,
-            limit,
-            period_key=period_key,
-            period_end=period_end,
-            reminder=False,
-        )
+        try:
+            self._send_limit_reached_notice(
+                event,
+                plan_key,
+                limit,
+                period_key=period_key,
+                period_end=period_end,
+                reminder=False,
+            )
+        except Exception:
+            self._release_limit_notice(event.group_id or "", period_key, plan_key)
+            raise
+        self._log_quota_notice_sent(event.group_id or "", plan_key, period_key, limit)
 
+    def _claim_limit_notice(self, group_id: str, period_key: str, plan_key: str) -> bool:
+        """通知の送信権を原子的に取る。同時メッセージでも True は1回だけ。"""
+
+        claim = getattr(self._repo, "claim_limit_notice_plan", None)
+        if callable(claim):
+            return bool(claim(group_id, period_key, plan_key))
+
+        previous_plan = getattr(self._repo, "get_limit_notice_plan", lambda *_: None)(group_id, period_key)
+        if previous_plan == plan_key:
+            return False
         setter = getattr(self._repo, "set_limit_notice_plan", None)
-        if setter:
-            setter(event.group_id, period_key, plan_key)
+        if not callable(setter):
+            return False
+        setter(group_id, period_key, plan_key)
+        return True
+
+    def _release_limit_notice(self, group_id: str, period_key: str, plan_key: str) -> None:
+        """送信失敗時に claim を戻す。次のブロックメッセージが再送できる。"""
+
+        release = getattr(self._repo, "release_limit_notice_plan", None)
+        if not callable(release):
+            return
+        try:
+            release(group_id, period_key, plan_key)
+        except Exception:
+            logger.warning(
+                "Failed to release quota limit notice claim",
+                extra={"group_id": group_id, "period_key": period_key, "plan": plan_key},
+                exc_info=True,
+            )
+
+    def _log_quota_notice_sent(self, group_id: str, plan_key: str, period_key: str, limit: int) -> None:
+        logger.info(
+            "Quota limit notice sent | group=%s plan=%s period=%s limit=%s",
+            group_id,
+            plan_key,
+            period_key,
+            limit,
+        )
 
     def _send_limit_reached_notice(
         self,
@@ -2151,7 +2209,7 @@ class MessageHandler:
         period_end: Optional[datetime] = None,
         reminder: bool = False,
     ) -> None:
-        """上限到達/超過時の統一通知。"""
+        """上限到達/超過時の統一通知。言語は登録言語だけ。Dio作成"""
         notice_text, url = self._build_limit_reached_notice_text(
             event.group_id,
             plan_key,
@@ -2209,6 +2267,7 @@ class MessageHandler:
             base = build_pro_limit_notice(limit=limit, reset_date=reset_date, reminder=reminder)
             url = None
 
+        # 無料枠・利用上限の通知は登録言語だけで出す。本文の検出言語が登録外でも足さない。Dio作成
         base = self._append_plan_link_sentence(base, url, include_link=normalized != PRO_PLAN)
         return self._build_multilingual_notice(
             base,

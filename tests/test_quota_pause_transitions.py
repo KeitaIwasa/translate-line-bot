@@ -115,6 +115,13 @@ def test_usage_grows_from_49_to_50_and_51_stays_quiet():
     line.sent_texts.clear()
     _run(handler, "fiftieth")
     assert repo.usage == 50
+    assert repo.translation_enabled is True
+    assert repo.paused_reason is None
+    assert repo.notice_plan is None
+    assert "Translation stopped" not in "\n".join(line.sent_texts)
+
+    line.sent_texts.clear()
+    _run(handler, "fifty-first")
     assert repo.translation_enabled is False
     assert repo.paused_reason == "quota"
     assert repo.notice_plan == "free"
@@ -122,7 +129,7 @@ def test_usage_grows_from_49_to_50_and_51_stays_quiet():
     assert _next_month(datetime.now(timezone.utc)) in "\n".join(line.sent_texts)
 
     line.sent_texts.clear()
-    _run(handler, "fifty-first")
+    _run(handler, "fifty-second")
     assert line.sent_texts == []
     assert repo.usage == 50
     assert repo.paused_reason == "quota"
@@ -157,6 +164,9 @@ def test_limit_notice_build_failure_keeps_the_quota_pause_and_retries():
 
     repo = ProQuotaRepo(initial_usage=49, paid=False)
     handler = _free_handler(repo, RecordingLineClient())
+    _run(handler, "fiftieth")
+    assert repo.translation_enabled is True
+    assert repo.notice_plan is None
 
     def boom(*_args, **_kwargs):
         assert repo.translation_enabled is False
@@ -166,7 +176,7 @@ def test_limit_notice_build_failure_keeps_the_quota_pause_and_retries():
     handler._build_limit_reached_notice_text = boom  # type: ignore[method-assign]
 
     with pytest.raises(RuntimeError, match="gemini down"):
-        _run(handler, "fiftieth")
+        _run(handler, "blocked")
 
     assert repo.usage == 50
     assert repo.notice_plan is None
@@ -181,10 +191,14 @@ def test_limit_notice_build_failure_keeps_the_quota_pause_and_retries():
 
 def test_limit_notice_send_failure_does_not_record_the_plan():
     repo = ProQuotaRepo(initial_usage=49, paid=False)
-    handler = _free_handler(repo, _FailingLine())
+    handler = _free_handler(repo, _CapturingLine())
+    _run(handler, "fiftieth")
+    assert repo.notice_plan is None
+    assert repo.translation_enabled is True
 
+    handler._line = _FailingLine()
     with pytest.raises(RuntimeError, match="line down"):
-        _run(handler, "fiftieth")
+        _run(handler, "blocked")
 
     assert repo.usage == 50
     assert repo.notice_plan is None
@@ -598,6 +612,7 @@ def test_limit_notice_for_group_languages_is_not_empty_and_has_plan_link(languag
     handler._interface_translation = InterfaceTranslationService(_MarkingPort())
 
     _run(handler, "fiftieth")
+    _run(handler, "blocked")
 
     notice = "\n".join(line.sent_texts).strip()
     assert notice
@@ -650,6 +665,7 @@ def test_plan_button_copy_follows_group_languages(languages):
     handler._interface_translation = InterfaceTranslationService(port)
 
     _run(handler, "fiftieth")
+    _run(handler, "blocked")
 
     button = _plan_button(line.payloads)
     assert button["template"]["actions"][0]["uri"] == "https://short.example.com/cs"
@@ -691,6 +707,7 @@ def test_plan_button_falls_back_to_english_when_translation_fails():
     handler._interface_translation = InterfaceTranslationService(_Port())
 
     _run(handler, "fiftieth")
+    _run(handler, "blocked")
 
     button = _plan_button(line.payloads)
     assert button["template"]["text"] == "Plans and prices"
@@ -714,6 +731,7 @@ def test_plan_button_label_over_the_line_limit_falls_back_to_english():
     handler._interface_translation = InterfaceTranslationService(_Port())
 
     _run(handler, "fiftieth")
+    _run(handler, "blocked")
 
     button = _plan_button(line.payloads)
     assert button["template"]["text"] == "[ja] Plans and prices"

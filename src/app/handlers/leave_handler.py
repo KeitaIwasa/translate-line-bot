@@ -30,6 +30,13 @@ class LeaveHandler:
                 exc_info=True,
             )
 
+        if not self._has_subscription_to_cancel(event.group_id):
+            logger.info(
+                "Skip auto cancel on leave; no subscription",
+                extra={"group_id": event.group_id},
+            )
+            return
+
         # サブスク解約は最大3回リトライする
         for attempt in range(3):
             result = self._subscription_service.cancel_subscription(event.group_id)
@@ -44,3 +51,20 @@ class LeaveHandler:
                 extra={"group_id": event.group_id, "attempt": attempt + 1},
             )
         logger.error("Auto cancel on leave gave up after retries", extra={"group_id": event.group_id})
+
+    def _has_subscription_to_cancel(self, group_id: str) -> bool:
+        """Stripe サブスク ID が無いグループは解約しない。読み取り失敗時は従来どおり試す。"""
+
+        getter = getattr(self._repo, "get_subscription_detail", None)
+        if not callable(getter):
+            return True
+        try:
+            _customer_id, subscription_id, _status = getter(group_id)
+        except Exception:
+            logger.warning(
+                "Failed to read subscription before auto cancel",
+                extra={"group_id": group_id},
+                exc_info=True,
+            )
+            return True
+        return bool(subscription_id)
