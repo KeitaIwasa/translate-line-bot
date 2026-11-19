@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from ...domain import models
 from ...domain.ports import LinePort, MessageRepositoryPort
+from ...domain.services.language_mention import join_settings_page_note
+
+logger = logging.getLogger(__name__)
 
 GROUP_PROMPT_MESSAGE = (
     "I'm a multilingual translation bot. Please tell me the languages you want to translate to.\n\n"
@@ -15,9 +19,10 @@ GROUP_PROMPT_MESSAGE = (
 
 
 class JoinHandler:
-    def __init__(self, line_client: LinePort, repo: MessageRepositoryPort) -> None:
+    def __init__(self, line_client: LinePort, repo: MessageRepositoryPort, language_page_url=None) -> None:
         self._line = line_client
         self._repo = repo
+        self._language_page_url = language_page_url
 
     def handle(self, event: models.JoinEvent) -> None:
         if not (event.group_id and event.reply_token):
@@ -29,7 +34,21 @@ class JoinHandler:
             self._repo.upsert_group_name(event.group_id, group_name)
         self._repo.reset_group_language_settings(event.group_id)
         self._repo.set_translation_enabled(event.group_id, False)
-        self._line.reply_text(event.reply_token, GROUP_PROMPT_MESSAGE)
+        self._line.reply_text(event.reply_token, _join_message(self._language_page_url, event.group_id))
+
+
+def _join_message(language_page_url, group_id: str) -> str:
+    if not language_page_url:
+        return GROUP_PROMPT_MESSAGE
+    try:
+        url = language_page_url(group_id) or ""
+    except Exception:
+        logger.debug("Failed to build language settings url", exc_info=True)
+        return GROUP_PROMPT_MESSAGE
+    note = join_settings_page_note(url)
+    if not note:
+        return GROUP_PROMPT_MESSAGE
+    return f"{GROUP_PROMPT_MESSAGE}\n\n{note}"
 
 
 def _event_timestamp(event: models.BaseEvent):

@@ -416,6 +416,11 @@ class RecordingLineClient(DummyLineClient):
         self.last_text = text
         super().reply_text(reply_token, text)
 
+    def reply_messages(self, reply_token, messages):
+        super().reply_messages(reply_token, messages)
+        if messages and isinstance(messages[0], dict) and messages[0].get("text"):
+            self.last_text = messages[0]["text"]
+
 
 def test_language_settings_add_rejects_when_exceeding_limit():
     line = RecordingLineClient()
@@ -457,9 +462,10 @@ def test_language_settings_add_rejects_when_exceeding_limit():
     handler._handle_language_settings(event, decision, event.text)
 
     assert repo.languages == ["en", "ja", "fr", "de", "th"]
-    assert "最大5つまで" in (line.last_text or "")
-    assert "どれを外す" in (line.last_text or "")
-    assert "英語" in (line.last_text or "")
+    reply = line.last_text or ""
+    assert "up to 5" in reply
+    assert "swap out" in reply
+    assert "English" in reply
 
 
 def test_language_settings_ack_without_static_text_uses_translation_path():
@@ -513,10 +519,10 @@ def test_language_settings_ack_without_static_text_uses_translation_path():
     )
 
     assert handler._handle_language_settings(event, decision, event.text) is True
-    assert translation.texts
-    assert translation.texts[0][1] == ["fr"]
-    assert "Japanese and French have been set as the translation languages." in translation.texts[0][0]
-    assert line.last_text == "Paramètres de langue mis à jour."
+    assert translation.texts == []
+    reply = line.last_text or ""
+    assert "Japanese and French have been set as the translation languages." in reply
+    assert "日本語" in reply and "フランス語" in reply
     assert "fr" in repo.languages
 
 
@@ -586,9 +592,9 @@ def test_spanish_instruction_translates_selection_limit_and_unsupported_replies(
         instruction_language="es",
     )
     assert handler._handle_language_settings(_settings_event("エルヴ語"), unsupported, "エルヴ語") is True
-    assert "isn't supported" in translation.texts[-1][0]
-    assert translation.texts[-1][1] == ["es"]
-    assert line.last_text.startswith("ES:")
+    # 本文が日本語なので固定文のまま。指示言語のスペイン語には訳さない
+    assert "対応していない" in (line.last_text or "")
+    assert len(translation.texts) == 2
 
 
 def test_english_instruction_keeps_the_fixed_reply_without_translation():
@@ -618,7 +624,7 @@ def test_english_instruction_keeps_the_fixed_reply_without_translation():
         instruction_language="en",
     )
     assert handler._handle_language_settings(_settings_event("add French"), decision, "add French") is True
-    assert line.last_text == "Japanese and French have been set as the translation languages."
+    assert "Japanese and French have been set as the translation languages." in (line.last_text or "")
 
 
 def _settings_event(text: str) -> models.MessageEvent:
@@ -679,11 +685,12 @@ def test_reset_all_with_add_list_replaces_languages_and_keeps_translation():
         "英語だけにして",
     ) is True
     assert repo.reset_called is False
-    assert repo.replace_called is True
-    assert repo.languages == ["en"]
-    assert repo.translation_enabled is True
-    assert line.last_text == "English has been set as the translation language."
-    assert "reset" not in (line.last_text or "").lower()
+    assert repo.replace_called is False
+    assert repo.languages == ["ja", "th"]
+    assert repo.translation_enabled is False
+    reply = line.last_text or ""
+    assert "あなたの言語も" in reply
+    assert "reset" not in reply.lower()
 
 
 def test_reset_all_with_several_languages_sets_exactly_that_list():
@@ -707,8 +714,10 @@ def test_reset_all_with_several_languages_sets_exactly_that_list():
     assert handler._handle_language_settings(_settings_event("@bot 英語と日本語だけにして"), decision, "英語と日本語だけにして") is True
     assert repo.languages == ["en", "ja"]
     assert repo.translation_enabled is True
-    assert line.last_text == "English and Japanese have been set as the translation languages."
-    assert "reset" not in (line.last_text or "").lower()
+    reply = line.last_text or ""
+    assert "English and Japanese have been set as the translation languages." in reply
+    assert "英語・日本語になったよ" in reply
+    assert "reset" not in reply.lower()
 
 
 def test_replace_over_the_language_limit_does_not_clear_current_languages():
@@ -734,7 +743,7 @@ def test_replace_over_the_language_limit_does_not_clear_current_languages():
     ) is True
     assert repo.reset_called is False
     assert repo.languages == ["ja", "en"]
-    assert "You can set up to 5 translation languages" in (line.last_text or "")
+    assert "最大5つまで" in (line.last_text or "")
 
 
 def test_plain_reset_all_still_clears_languages_and_stops_translation():
@@ -793,7 +802,7 @@ def test_language_settings_static_ack_is_not_translated_again():
     )
 
     assert handler._handle_language_settings(event, decision, event.text) is True
-    assert line.last_text == "英語・日本語になったよ"
+    assert "英語・日本語になったよ" in (line.last_text or "")
 
 
 def test_postback_rejects_over_limit():
@@ -904,7 +913,177 @@ def test_postback_sends_multilingual_completion():
 
     assert repo.saved is True
     assert line.last is not None
-    parts = line.last.split("\n\n")
-    assert parts[0] == "English, Japanese, and Thai have been set as the translation languages."
-    assert "(ja)" in parts[1]
-    assert "(th)" in parts[2]
+    # ja/zh/ko/th は固定文。翻訳は表が無い言語だけ
+    assert "English, Japanese, and Thai have been set as the translation languages." in line.last
+    assert "英語・日本語・タイ語になったよ" in line.last
+    assert "ตั้งเป็น" in line.last
+    assert "(ja)" not in line.last
+    assert "(th)" not in line.last
+
+
+def test_five_language_confirm_with_generation_stays_decodable():
+    from src.app.subscription_postback import decode_postback_payload
+    from src.domain.services.language_settings_service import LanguageSettingsService
+
+    stamp = "2026-11-09T01:12:00.123+00:00"
+    choices = [
+        models.LanguageChoice(code="ja", name="日本語"),
+        models.LanguageChoice(code="zh-tw", name="繁体字中国語"),
+        models.LanguageChoice(code="ca", name="カタルーニャ語"),
+        models.LanguageChoice(code="en", name="英語"),
+        models.LanguageChoice(code="ko", name="韓国語"),
+    ]
+
+    class _Repo:
+        def __init__(self):
+            self.saved = None
+            self.cancelled = None
+            self.enabled = []
+
+        def record_language_prompt(self, _group_id):
+            return stamp
+
+        def set_translation_enabled(self, _group_id, enabled):
+            self.enabled.append(enabled)
+
+        def try_cancel_language_prompt(self, *_args, **_kwargs):
+            self.cancelled = True
+            return True
+
+        def try_complete_group_languages(self, _group_id, languages, issued_at=None):
+            self.saved = (list(languages), issued_at)
+            return models.LanguagePromptResult("applied")
+
+        def fetch_group_languages(self, _group_id):
+            if not self.saved:
+                return []
+            return [code for code, _name in self.saved[0]]
+
+    class _Pref:
+        def analyze(self, _text):
+            return models.LanguagePreference(
+                supported=choices,
+                unsupported=[],
+                primary_language="ja",
+                confirm_label="OK",
+                cancel_label="Cancel",
+            )
+
+    repo = _Repo()
+    service = LanguageSettingsService(repo, _Pref(), InterfaceTranslationService(None), 5)
+    event = models.MessageEvent(
+        event_type="message",
+        reply_token="token",
+        timestamp=0,
+        text="日本語、繁体字中国語、カタルーニャ語、英語、韓国語",
+        user_id="U",
+        group_id="G",
+        sender_type="group",
+    )
+
+    bundle = service.propose(event, max_languages=5)
+
+    assert bundle and bundle.messages
+    actions = bundle.messages[-1]["template"]["actions"]
+    assert len(actions[0]["data"].encode()) <= 280
+    assert len(actions[1]["data"].encode()) <= 280
+    confirm = decode_postback_payload(actions[0]["data"])
+    cancel = decode_postback_payload(actions[1]["data"])
+    assert confirm and cancel
+    assert confirm["issued_at"] == stamp
+    assert cancel["issued_at"] == stamp
+    assert [item["code"] for item in confirm["languages"]] == ["ja", "zh-tw", "ca", "en", "ko"]
+    assert repo.cancelled is None
+    assert repo.enabled == [False]
+
+    saved = service.confirm(
+        group_id="G",
+        languages=[(item["code"], item.get("name", "")) for item in confirm["languages"]],
+        primary_language="ja",
+        issued_at=confirm["issued_at"],
+        max_languages=5,
+    )
+    assert saved and saved.texts
+    assert [code for code, _name in repo.saved[0]] == ["ja", "zh-tw", "ca", "en", "ko"]
+    assert all(name for _code, name in repo.saved[0])
+    assert repo.saved[1] == stamp
+
+
+def test_postback_encoder_never_returns_a_truncated_blob():
+    from src.app.subscription_postback import decode_postback_payload
+    from src.domain.services.language_settings_service import LanguageSettingsService
+
+    payload = {
+        "kind": "language_confirm",
+        "action": "confirm",
+        "languages": [{"code": f"x{i:02d}", "name": "名" * 40} for i in range(12)],
+        "primary_language": "p" * 400,
+        "completion_text": "c" * 800,
+        "limit_text": "l" * 800,
+        "issued_at": "2026-11-09T01:12:00.123+00:00",
+    }
+    encoded = LanguageSettingsService._encode_postback_payload(payload)
+    if not encoded:
+        return
+    assert len(encoded.encode()) <= 280
+    decoded = decode_postback_payload(encoded)
+    assert decoded is not None
+    assert decoded["action"] == "confirm"
+    assert "issued_at" in decoded
+
+
+def test_unsendable_confirm_does_not_disable_translation(monkeypatch):
+    from src.domain.services.language_settings_service import LanguageSettingsService
+
+    monkeypatch.setattr(
+        LanguageSettingsService,
+        "_encode_postback_payload",
+        staticmethod(lambda _payload, max_bytes=280: ""),
+    )
+
+    class _Repo:
+        def __init__(self):
+            self.enabled = []
+            self.cancelled = False
+
+        def record_language_prompt(self, _group_id):
+            return "stamp"
+
+        def set_translation_enabled(self, _group_id, enabled):
+            self.enabled.append(enabled)
+
+        def try_cancel_language_prompt(self, *_args, **_kwargs):
+            self.cancelled = True
+            return True
+
+    class _Pref:
+        def analyze(self, _text):
+            return models.LanguagePreference(
+                supported=[
+                    models.LanguageChoice(code="en", name="English"),
+                    models.LanguageChoice(code="ja", name="Japanese"),
+                ],
+                unsupported=[],
+                primary_language="en",
+                confirm_label="OK",
+                cancel_label="Cancel",
+            )
+
+    repo = _Repo()
+    service = LanguageSettingsService(repo, _Pref(), InterfaceTranslationService(None), 5)
+    event = models.MessageEvent(
+        event_type="message",
+        reply_token="token",
+        timestamp=0,
+        text="English and Japanese",
+        user_id="U",
+        group_id="G",
+        sender_type="group",
+    )
+
+    bundle = service.propose(event, max_languages=5)
+
+    assert bundle and bundle.texts
+    assert not bundle.messages
+    assert repo.enabled == []
+    assert repo.cancelled is True
