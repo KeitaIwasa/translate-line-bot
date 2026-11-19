@@ -11,8 +11,9 @@ import requests
 
 from src.domain.models import TranslationRequest, TranslationResult
 from src.domain.ports import TranslationPort
-from src.infra.gemini_errors import GeminiRateLimitError, GeminiRequestError
+from src.infra.gemini_errors import GeminiRateLimitError
 from src.infra.gemini_generation_config import build_generation_config
+from src.infra.provider_failure import post_gemini
 from src.infra.translation_schema import TRANSLATION_SCHEMA
 from src.presentation.reply_formatter import strip_spurious_boundary_cjk
 
@@ -137,10 +138,12 @@ class GeminiTranslationAdapter(TranslationPort):
 
         started = time.perf_counter()
         try:
-            response = self._session.post(
-                url,
+            response = post_gemini(
+                self._session,
+                model=self._model,
+                url=url,
                 params={"key": self._api_key},
-                json=payload,
+                payload=payload,
                 timeout=self._timeout,
             )
         finally:
@@ -150,18 +153,6 @@ class GeminiTranslationAdapter(TranslationPort):
                 (time.perf_counter() - started) * 1000,
                 len(request.candidate_languages),
             )
-        try:
-            response.raise_for_status()
-        except requests.HTTPError:
-            status_code = response.status_code
-            logger.error(
-                "Gemini request failed | model=%s status=%s",
-                self._model,
-                status_code,
-            )
-            if status_code == 429:
-                raise GeminiRateLimitError(self._model) from None
-            raise GeminiRequestError(self._model, status_code) from None
 
         body = response.json()
         try:
@@ -225,10 +216,12 @@ class GeminiTranslationAdapter(TranslationPort):
         }
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent"
         started = time.perf_counter()
-        response = self._session.post(
-            url,
+        response = post_gemini(
+            self._session,
+            model=self._model,
+            url=url,
             params={"key": self._api_key},
-            json=payload,
+            payload=payload,
             timeout=self._timeout,
         )
         logger.info(
@@ -237,7 +230,6 @@ class GeminiTranslationAdapter(TranslationPort):
             (time.perf_counter() - started) * 1000,
             len(originals),
         )
-        response.raise_for_status()
         body = response.json()
         part_text = _visible_response_text(body)
         data = json.loads(part_text)

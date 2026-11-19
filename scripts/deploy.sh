@@ -8,12 +8,15 @@ set -euo pipefail
 # STACK_NAME, PROFILE, REGION, STAGE, GEMINI_MODEL, FUNCTION_MEMORY_SIZE, FUNCTION_TIMEOUT,
 # MAX_CONTEXT_MESSAGES, TRANSLATION_RETRY, RUNTIME_SECRET_ARN, S3_BUCKET, PYTHON_BIN,
 # TYPESAFE_API_KEY_SSM_PARAMETER（既定は STAGE に対応する既存名。stg→/kotori/stg/...、prod→/kotori/prod/...）
+# ALERT_EMAIL, ALERT_WEBHOOK_URL, PROVIDER_FAILURE_ALARM_THRESHOLD
+# （通知先は未設定なら渡さない。既存スタックに設定済みの値は上書きしない）
 
 STACK_NAME="${STACK_NAME:-translate-line-bot-stg}"
 PROFILE="${PROFILE:-line-translate-bot}"
 REGION="${REGION:-ap-northeast-1}"
 STAGE="${STAGE:-stg}"
-GEMINI_MODEL="${GEMINI_MODEL:-gemini-flash-latest}"
+# gemini-flash-latest は 400 になる。本番で使っているモデルを既定にする。
+GEMINI_MODEL="${GEMINI_MODEL:-gemini-3.5-flash-lite}"
 FUNCTION_MEMORY_SIZE="${FUNCTION_MEMORY_SIZE:-512}"
 FUNCTION_TIMEOUT="${FUNCTION_TIMEOUT:-60}"
 MAX_CONTEXT_MESSAGES="${MAX_CONTEXT_MESSAGES:-8}"
@@ -100,6 +103,17 @@ deploy_args=(
     EnableStripe="$ENABLE_STRIPE"
     TypesafeApiKeySsmParameter="$TYPESAFE_API_KEY_SSM_PARAMETER"
 )
+
+# 未設定のときはパラメータを渡さない。空文字を渡すと、コンソールで足した通知先が消える。
+if [[ -n "${ALERT_EMAIL+x}" ]]; then
+  deploy_args+=(AlertEmail="$ALERT_EMAIL")
+fi
+if [[ -n "${ALERT_WEBHOOK_URL+x}" ]]; then
+  deploy_args+=(AlertWebhookUrl="$ALERT_WEBHOOK_URL")
+fi
+if [[ -n "${PROVIDER_FAILURE_ALARM_THRESHOLD+x}" ]]; then
+  deploy_args+=(ProviderFailureAlarmThreshold="$PROVIDER_FAILURE_ALARM_THRESHOLD")
+fi
 
 if [[ -n "$S3_BUCKET" ]]; then
   echo "Using provided S3 bucket: $S3_BUCKET"

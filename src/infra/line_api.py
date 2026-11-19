@@ -6,12 +6,22 @@ from typing import Optional
 import requests
 
 from ..domain.ports import LinePort
+from .gemini_errors import classify_http_status
+from .provider_failure import record_provider_failure
 
 logger = logging.getLogger(__name__)
 
 
 class LineApiError(RuntimeError):
-    pass
+    """LINE API の失敗。status_code があるときは Gemini と同じ区分で再試行する。"""
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        if isinstance(status_code, int):
+            self.error_class, self.retryable = classify_http_status(status_code)
+        else:
+            self.error_class, self.retryable = "unknown", True
 
 
 class LineApiAdapter(LinePort):
@@ -33,15 +43,26 @@ class LineApiAdapter(LinePort):
         url = f"{self.BASE_URL}/v2/bot/message/reply"
         sanitized = [self._sanitize_message(msg) for msg in messages[:5]]
         payload = {"replyToken": reply_token, "messages": sanitized}
-        response = self._session.post(url, json=payload, timeout=5)
+        try:
+            response = self._session.post(url, json=payload, timeout=5)
+        except requests.RequestException as exc:
+            record_provider_failure(exc, dependency="line")
+            raise
         if not response.ok:
+            error_class, _retryable = classify_http_status(response.status_code)
             logger.error(
-                "LINE reply failed: status=%s types=%s count=%s",
+                "LINE reply failed: status=%s error_class=%s types=%s count=%s",
                 response.status_code,
+                error_class,
                 [msg.get("type") for msg in sanitized],
                 len(sanitized),
             )
-            raise LineApiError(f"LINE reply failed with status {response.status_code}")
+            error = LineApiError(
+                f"LINE reply failed with status {response.status_code}",
+                status_code=response.status_code,
+            )
+            record_provider_failure(error, dependency="line")
+            raise error
 
     def push_text(self, to: str, text: str) -> None:
         url = f"{self.BASE_URL}/v2/bot/message/push"

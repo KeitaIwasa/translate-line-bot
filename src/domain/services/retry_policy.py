@@ -3,11 +3,13 @@ from __future__ import annotations
 import time
 from typing import Callable, TypeVar
 
+from ...infra.provider_failure import should_retry_provider_error
+
 T = TypeVar("T")
 
 
 class RetryPolicy:
-    """シンプルなリトライポリシー。エラーを呼び出し側に再送出する。"""
+    """外部依存向けのリトライ。回復しない失敗は待たずに呼び出し側へ返す。"""
 
     def __init__(self, retries: int, backoff_base: float = 0.5) -> None:
         self._retries = max(1, retries)
@@ -20,8 +22,11 @@ class RetryPolicy:
                 return func()
             except Exception as exc:  # pylint: disable=broad-except
                 last_error = exc
+                # 401/402/403 や 400 は繰り返さない。429 / 5xx / タイムアウトは続ける。
+                if not should_retry_provider_error(exc) or attempt >= self._retries - 1:
+                    break
                 sleep = self._backoff * (attempt + 1)
-                if attempt < self._retries - 1 and sleep:
+                if sleep:
                     time.sleep(sleep)
         if last_error:
             raise last_error

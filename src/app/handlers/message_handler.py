@@ -30,7 +30,8 @@ from ...domain.services.current_languages_question import (
     current_languages_localized_text,
     is_current_languages_question,
 )
-from ...infra.gemini_translation import GeminiRateLimitError
+from ...infra.gemini_errors import GeminiRateLimitError
+from ...infra.provider_failure import classify_provider_failure, record_provider_failure
 from ...presentation.guidance_cards import (
     catalog_card,
     howto_card,
@@ -112,6 +113,14 @@ COMMAND_ROUTER_ERROR_BASE = "Sorry, I couldn't process that request right now. P
 LANGUAGE_LIMIT_MESSAGE_EN = "You can set up to {limit} translation languages. Please specify {limit} or fewer."
 PRIVATE_ASSISTANT_USER_ID = "__assistant__"
 PRIVATE_ASSISTANT_SENDER = "KOTORI Support"
+# 返信言語を登録言語に固定する操作。ヘルプや使い方は含めない。Dio作成
+_REGISTERED_LANGUAGE_ACTIONS = frozenset(
+    {
+        "subscription_menu",
+        "subscription_cancel",
+        "subscription_upgrade",
+    }
+)
 
 
 @dataclass
@@ -358,11 +367,20 @@ class MessageHandler:
 
         try:
             self._process_group_message(event, start)
-        except GeminiRateLimitError:
+        except GeminiRateLimitError as exc:
+            # アダプタが記録済みならメトリクスは増えない。429 の利用者案内は従来どおり。
+            record_provider_failure(exc, dependency="gemini")
             logger.warning("Gemini rate limited; notifying user")
             self._send_rate_limit_notice(event)
-        except Exception:
-            logger.exception("Message handling failed")
+        except Exception as exc:
+            failure = record_provider_failure(exc)
+            # 再試行できない障害ではグループへ返信しない。案内文の翻訳も同じ依存先に当たる。
+            logger.exception(
+                "Message handling failed | error_class=%s dependency=%s status=%s",
+                failure.error_class,
+                failure.dependency,
+                failure.status,
+            )
         finally:
             if not start.legacy:
                 try:
@@ -767,10 +785,13 @@ class MessageHandler:
             if (decision.action or "unknown") == "unknown" and is_current_languages_question(command_text):
                 logger.info("Current languages question | routed=show_languages")
                 decision = replace(decision, action="show_languages")
+            action = decision.action or "unknown"
+            # プランメニューだけ登録言語に固定する。ヘルプなどは検出した言語のまま。Dio作成
             instruction_lang = self._resolve_command_instruction_language(
                 command_text,
                 preferred=decision.instruction_language,
                 group_languages=runtime.group_languages,
+                restrict_to_registered=action in _REGISTERED_LANGUAGE_ACTIONS,
             )
             if instruction_lang != (decision.instruction_language or ""):
                 decision = replace(decision, instruction_language=instruction_lang)
@@ -780,7 +801,6 @@ class MessageHandler:
             trace.set_language_counts(decision)
             trace.log_decision(router_elapsed_ms)
 
-            action = decision.action or "unknown"
             action_started = time.perf_counter()
             try:
                 if action == "error":
@@ -1316,8 +1336,13 @@ class MessageHandler:
         *,
         preferred: str,
         group_languages: Sequence[str],
+        restrict_to_registered: bool = False,
     ) -> str:
-        """本文の文字種に合う言語を選ぶ。合わないコードはグループ言語へ落とす。"""
+        """本文の文字種に合う言語を選ぶ。
+
+        restrict_to_registered のときだけ、登録外の検出を登録言語へ戻す。
+        ヘルプや使い方は登録外の言語をそのまま使う。Dio作成
+        """
 
         detector = self._lang_detector
         resolver = getattr(detector, "resolve_instruction_language", None)
@@ -1327,6 +1352,7 @@ class MessageHandler:
                     command_text or "",
                     preferred=preferred or "",
                     group_languages=list(group_languages or []),
+                    restrict_to_registered=restrict_to_registered,
                 )
                 return resolved or ""
             except Exception:
@@ -1585,23 +1611,40 @@ class MessageHandler:
 
         messages.append({"type": "text", "text": flow.reply_text})
 
-        if flow.decision.should_notify:
-            notice_text, notice_url = self._build_limit_reached_notice_text(
-                event.group_id,
-                flow.decision.plan_key,
-                limit,
-                period_key=flow.decision.period_key,
-                period_end=period_end,
-            )
-            self._repo.set_limit_notice_plan(event.group_id, flow.decision.period_key, plan_key)
-            messages.append({"type": "text", "text": notice_text})
-            if notice_url:
-                messages.append({"type": "text", "text": notice_url})
+        # 有料プランは上限ちょうどを翻訳した返信に通知を足す。無料はここでは通知しない。
+        claimed = False
+        if flow.decision.should_notify and self._claim_limit_notice(
+            event.group_id or "",
+            flow.decision.period_key,
+            plan_key,
+        ):
+            claimed = True
+            try:
+                notice_text, notice_url = self._build_limit_reached_notice_text(
+                    event.group_id,
+                    flow.decision.plan_key,
+                    limit,
+                    period_key=flow.decision.period_key,
+                    period_end=period_end,
+                )
+                messages.append({"type": "text", "text": notice_text})
+                if notice_url:
+                    messages.append({"type": "text", "text": notice_url})
+            except Exception:
+                self._release_limit_notice(event.group_id or "", flow.decision.period_key, plan_key)
+                raise
 
-        if len(messages) == 1 and messages[0].get("type") == "text":
-            self._reply_text(event, messages[0].get("text"), normalize_lists=False)
-            return
-        self._reply_messages(event, messages)
+        try:
+            if len(messages) == 1 and messages[0].get("type") == "text":
+                self._reply_text(event, messages[0].get("text"), normalize_lists=False)
+            else:
+                self._reply_messages(event, messages)
+        except Exception:
+            if claimed:
+                self._release_limit_notice(event.group_id or "", flow.decision.period_key, plan_key)
+            raise
+        if claimed:
+            self._log_quota_notice_sent(event.group_id or "", plan_key, flow.decision.period_key, limit)
 
     def _maybe_upsert_deferred_display_name(
         self,
@@ -1796,23 +1839,62 @@ class MessageHandler:
         period_key: str,
         period_end: Optional[datetime] = None,
     ) -> None:
-        """プラン別に月1回だけ上限通知を送る。"""
-        previous_plan = getattr(self._repo, "get_limit_notice_plan", lambda *_: None)(event.group_id, period_key)
-        if previous_plan == plan_key:
-            # 同一プランで既に通知済み
+        """プラン別に月1回だけ上限通知を送る。未記録なら停止中でも送る。"""
+        if not self._claim_limit_notice(event.group_id or "", period_key, plan_key):
             return
 
-        self._send_limit_reached_notice(
-            event,
-            plan_key,
-            limit,
-            period_key=period_key,
-            period_end=period_end,
-        )
+        try:
+            self._send_limit_reached_notice(
+                event,
+                plan_key,
+                limit,
+                period_key=period_key,
+                period_end=period_end,
+            )
+        except Exception:
+            self._release_limit_notice(event.group_id or "", period_key, plan_key)
+            raise
+        self._log_quota_notice_sent(event.group_id or "", plan_key, period_key, limit)
 
+    def _claim_limit_notice(self, group_id: str, period_key: str, plan_key: str) -> bool:
+        """通知の送信権を原子的に取る。同時メッセージでも True は1回だけ。"""
+
+        claim = getattr(self._repo, "claim_limit_notice_plan", None)
+        if callable(claim):
+            return bool(claim(group_id, period_key, plan_key))
+
+        previous_plan = getattr(self._repo, "get_limit_notice_plan", lambda *_: None)(group_id, period_key)
+        if previous_plan == plan_key:
+            return False
         setter = getattr(self._repo, "set_limit_notice_plan", None)
-        if setter:
-            setter(event.group_id, period_key, plan_key)
+        if not callable(setter):
+            return False
+        setter(group_id, period_key, plan_key)
+        return True
+
+    def _release_limit_notice(self, group_id: str, period_key: str, plan_key: str) -> None:
+        """送信失敗時に claim を戻す。次のブロックメッセージが再送できる。"""
+
+        release = getattr(self._repo, "release_limit_notice_plan", None)
+        if not callable(release):
+            return
+        try:
+            release(group_id, period_key, plan_key)
+        except Exception:
+            logger.warning(
+                "Failed to release quota limit notice claim",
+                extra={"group_id": group_id, "period_key": period_key, "plan": plan_key},
+                exc_info=True,
+            )
+
+    def _log_quota_notice_sent(self, group_id: str, plan_key: str, period_key: str, limit: int) -> None:
+        logger.info(
+            "Quota limit notice sent | group=%s plan=%s period=%s limit=%s",
+            group_id,
+            plan_key,
+            period_key,
+            limit,
+        )
 
     def _send_limit_reached_notice(
         self,
@@ -1823,7 +1905,7 @@ class MessageHandler:
         period_key: Optional[str] = None,
         period_end: Optional[datetime] = None,
     ) -> None:
-        """上限到達/超過時の統一通知。"""
+        """上限到達/超過時の統一通知。言語は登録言語だけ。Dio作成"""
         notice_text, url = self._build_limit_reached_notice_text(
             event.group_id,
             plan_key,
@@ -1891,6 +1973,7 @@ class MessageHandler:
             )
             url = None
 
+        # 無料枠・利用上限の通知は登録言語だけで出す。本文の検出言語が登録外でも足さない。Dio作成
         return self._build_multilingual_notice(
             base,
             group_id,
@@ -2286,8 +2369,9 @@ class MessageHandler:
         *,
         command_trace: _CommandTrace | None = None,
     ):
-        """翻訳系リトライ共通処理。"""
+        """翻訳系リトライ共通処理。認証・請求エラーは繰り返さない。"""
         last_error: Exception | None = None
+        last_failure = None
         for attempt in range(self._translation_retry):
             attempt_started = time.perf_counter()
             try:
@@ -2300,41 +2384,50 @@ class MessageHandler:
                         "success",
                     )
                 return result
-            except requests.exceptions.Timeout as exc:
-                if command_trace:
-                    command_trace.log_operation(
-                        label,
-                        attempt + 1,
-                        (time.perf_counter() - attempt_started) * 1000,
-                        "timeout",
-                    )
-                logger.warning(
-                    "%s timeout",
-                    label,
-                    extra={"attempt": attempt + 1, "timeout_seconds": timeout_seconds},
-                )
-                last_error = exc
             except Exception as exc:  # pylint: disable=broad-except
+                elapsed_ms = (time.perf_counter() - attempt_started) * 1000
+                failure = classify_provider_failure(exc, dependency="gemini")
+                last_failure = failure
+                outcome = "timeout" if isinstance(exc, requests.exceptions.Timeout) else "failed"
                 if command_trace:
-                    command_trace.log_operation(
+                    command_trace.log_operation(label, attempt + 1, elapsed_ms, outcome)
+                if isinstance(exc, requests.exceptions.Timeout):
+                    logger.warning(
+                        "%s timeout",
+                        label,
+                        extra={
+                            "attempt": attempt + 1,
+                            "timeout_seconds": timeout_seconds,
+                            "error_class": failure.error_class,
+                        },
+                    )
+                elif failure.retryable:
+                    logger.warning(
+                        "%s failed (attempt %s/%s) | error_class=%s status=%s",
                         label,
                         attempt + 1,
-                        (time.perf_counter() - attempt_started) * 1000,
-                        "failed",
+                        self._translation_retry,
+                        failure.error_class,
+                        failure.status,
                     )
-                if isinstance(exc, GeminiRateLimitError):
-                    last_error = exc
-                    break
-                logger.warning(
-                    "%s failed (attempt %s/%s)",
-                    label,
-                    attempt + 1,
-                    self._translation_retry,
-                )
+                else:
+                    logger.warning(
+                        "%s failed without retry | error_class=%s status=%s",
+                        label,
+                        failure.error_class,
+                        failure.status,
+                    )
                 last_error = exc
+                if not failure.retryable or attempt >= self._translation_retry - 1:
+                    break
             time.sleep(0.5 * (attempt + 1))
 
-        logger.error("%s failed after retries", label)
+        logger.error(
+            "%s failed after retries | error_class=%s status=%s",
+            label,
+            last_failure.error_class if last_failure else None,
+            last_failure.status if last_failure else None,
+        )
         if last_error:
             raise last_error
         return []
