@@ -6,6 +6,27 @@ from src.domain.models import TranslationRuntimeState
 from src.domain.services.quota_service import QuotaDecision, quota_should_notify
 
 
+def _visible_message_text(message: dict) -> str:
+    """テキストと Flex 本文を同じ検査に載せる。ボタンの URI は含めない。"""
+
+    if message.get("type") != "flex":
+        return str(message.get("text") or "")
+    found: list[str] = []
+
+    def _walk(node) -> None:
+        if isinstance(node, dict):
+            if node.get("type") == "text" and isinstance(node.get("text"), str):
+                found.append(node["text"])
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(message.get("contents"))
+    return "\n".join(found)
+
+
 class RecordingLineClient:
     def __init__(self):
         self.sent_texts = []
@@ -14,7 +35,7 @@ class RecordingLineClient:
         self.sent_texts.append(text)
 
     def reply_messages(self, _reply_token, messages):
-        texts = [msg.get("text", "") for msg in messages if isinstance(msg, dict)]
+        texts = [_visible_message_text(msg) for msg in messages if isinstance(msg, dict)]
         self.sent_texts.append("\n".join(texts))
 
     def get_display_name(self, *_args, **_kwargs):
@@ -375,8 +396,8 @@ def test_free_plan_50th_translation_does_not_consume_stop_notice():
     assert translation.calls == 1
     assert repo.notice_plan == "free"
     assert repo.translation_enabled is False
-    assert any("free messages" in text for text in line.sent_texts)
-    assert any("Translation stopped" in text for text in line.sent_texts)
+    assert any("free messages are used up" in text for text in line.sent_texts)
+    assert any("Translation resumes on" in text for text in line.sent_texts)
 
 
 def test_free_plan_under_limit_allows_translation_even_if_notice_flag_exists():

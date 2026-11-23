@@ -80,12 +80,26 @@ def _with_checkout(handler, line=None):
 
 def _uris(payloads) -> list[str]:
     found = []
+
+    def _walk(node) -> None:
+        if isinstance(node, dict):
+            action = node.get("action")
+            if isinstance(action, dict) and action.get("type") == "uri" and action.get("uri"):
+                found.append(str(action["uri"]))
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
     for messages in payloads:
         for message in messages:
             actions = (message.get("template") or {}).get("actions") or []
             for action in actions:
                 if action.get("uri"):
-                    found.append(action["uri"])
+                    found.append(str(action["uri"]))
+            if message.get("type") == "flex":
+                _walk(message.get("contents"))
     return found
 
 
@@ -622,8 +636,8 @@ def test_free_50_translates_and_sends_stop_notice():
     assert translation.calls == 1
     assert repo.notice_plan == "free"
     joined = "\n".join(line.sent_texts)
-    assert "Translation stopped" in joined
-    assert "used all 50 free messages" in joined
+    assert "free messages are used up" in joined
+    assert "Translation resumes on" in joined
     assert _next_month(datetime.now(timezone.utc)) in joined
     assert _uris(line.payloads) == ["https://short.example.com/cs"]
 
@@ -648,7 +662,7 @@ def test_free_50_persists_quota_pause_before_the_next_message():
     assert repo.notice_plan == "free"
     assert repo.translation_enabled is False
     assert repo.paused_reason == "quota"
-    assert "Translation stopped" in "\n".join(line.sent_texts)
+    assert "free messages are used up" in "\n".join(line.sent_texts)
 
     line.sent_texts.clear()
     line.payloads.clear()

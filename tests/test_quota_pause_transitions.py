@@ -125,7 +125,7 @@ def test_usage_grows_from_49_to_50_and_51_stays_quiet():
     assert repo.translation_enabled is False
     assert repo.paused_reason == "quota"
     assert repo.notice_plan == "free"
-    assert "Translation stopped" in "\n".join(line.sent_texts)
+    assert "free messages are used up" in "\n".join(line.sent_texts)
     assert _next_month(datetime.now(timezone.utc)) in "\n".join(line.sent_texts)
 
     line.sent_texts.clear()
@@ -173,7 +173,9 @@ def test_limit_notice_build_failure_keeps_the_quota_pause_and_retries():
         assert repo.paused_reason == "quota"
         raise RuntimeError("gemini down")
 
-    handler._build_limit_reached_notice_text = boom  # type: ignore[method-assign]
+    # 無料枠の初回停止は Flex。組み立て失敗はテキストへ戻るので、両方を落とす。
+    handler._build_free_limit_flex_message = boom  # type: ignore[method-assign]
+    handler._reply_free_limit_text = boom  # type: ignore[method-assign]
 
     with pytest.raises(RuntimeError, match="gemini down"):
         _run(handler, "blocked")
@@ -186,7 +188,7 @@ def test_limit_notice_build_failure_keeps_the_quota_pause_and_retries():
     retry = _free_handler(repo, line)
     _run(retry, "fifty-first")
     assert repo.notice_plan == "free"
-    assert "Translation stopped" in "\n".join(line.sent_texts)
+    assert "free messages are used up" in "\n".join(line.sent_texts)
 
 
 def test_limit_notice_send_failure_does_not_record_the_plan():
@@ -209,7 +211,7 @@ def test_limit_notice_send_failure_does_not_record_the_plan():
     retry = _free_handler(repo, line)
     _run(retry, "again")
     assert repo.notice_plan == "free"
-    assert "Translation stopped" in "\n".join(line.sent_texts)
+    assert "free messages are used up" in "\n".join(line.sent_texts)
     assert repo.paused_reason == "quota"
 
 
@@ -616,7 +618,7 @@ def test_limit_notice_for_group_languages_is_not_empty_and_has_plan_link(languag
 
     notice = "\n".join(line.sent_texts).strip()
     assert notice
-    assert "Translation stopped" in notice or any(f"[{lang}]" in notice for lang in languages)
+    assert _next_month(datetime.now(timezone.utc)) in notice
     assert _uris(line.payloads) == ["https://short.example.com/cs"]
     assert repo.paused_reason == "quota"
     assert repo.translation_enabled is False
@@ -664,8 +666,8 @@ def test_plan_button_copy_follows_group_languages(languages):
     handler = _with_checkout(_build_handler(repo, line, RecordingTranslationService()))
     handler._interface_translation = InterfaceTranslationService(port)
 
-    _run(handler, "fiftieth")
-    _run(handler, "blocked")
+    # 無料枠の停止そのものは Flex。ボタン文言の翻訳は有料の上限案内で確認する。
+    handler._send_limit_reached_notice(_build_event("plan"), "standard", 4000, period_key="2026-10-01")
 
     button = _plan_button(line.payloads)
     assert button["template"]["actions"][0]["uri"] == "https://short.example.com/cs"
@@ -706,8 +708,8 @@ def test_plan_button_falls_back_to_english_when_translation_fails():
     handler = _with_checkout(_build_handler(repo, line, RecordingTranslationService()))
     handler._interface_translation = InterfaceTranslationService(_Port())
 
-    _run(handler, "fiftieth")
-    _run(handler, "blocked")
+    # 無料枠の停止そのものは Flex。ボタン文言の翻訳は有料の上限案内で確認する。
+    handler._send_limit_reached_notice(_build_event("plan"), "standard", 4000, period_key="2026-10-01")
 
     button = _plan_button(line.payloads)
     assert button["template"]["text"] == "Plans and prices"
@@ -730,8 +732,8 @@ def test_plan_button_label_over_the_line_limit_falls_back_to_english():
     handler = _with_checkout(_build_handler(repo, line, RecordingTranslationService()))
     handler._interface_translation = InterfaceTranslationService(_Port())
 
-    _run(handler, "fiftieth")
-    _run(handler, "blocked")
+    # 無料枠の停止そのものは Flex。ボタン文言の翻訳は有料の上限案内で確認する。
+    handler._send_limit_reached_notice(_build_event("plan"), "standard", 4000, period_key="2026-10-01")
 
     button = _plan_button(line.payloads)
     assert button["template"]["text"] == "[ja] Plans and prices"
