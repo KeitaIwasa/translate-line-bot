@@ -417,7 +417,8 @@ class _NoticeLine:
         self.messages = messages
 
 
-def test_limit_notice_handler_sends_flex_button_for_each_paid_tier():
+def test_limit_notice_handler_keeps_the_free_flex_and_plain_paid_copy():
+    """無料枠の停止案内は main の Flex。有料プランは平文のまま。"""
     line = _NoticeLine()
     handler = MessageHandler(
         line_client=line,
@@ -454,24 +455,23 @@ def test_limit_notice_handler_sends_flex_button_for_each_paid_tier():
     flex = line.messages[0]
     body = flex_body_text(flex)
     assert flex["type"] == "flex"
-    assert "Free quota" in body
-    assert "تم استنفاد الحصة المجانية" in body
-    assert "日本語:" in body
+    assert "This month's 50 free messages are used up." in body
+    assert "今月の無料メッセージ50件を使い切りました。" in body
     assert "secret-token" not in body
-    assert flex["contents"]["body"]["contents"][1]["align"] == "end"
-    assert flex["contents"]["footer"]["contents"][0]["action"]["label"] == "عرض الخطط"
+    assert flex["contents"]["footer"]["contents"][0]["action"]["label"] == "Remove limit"
     assert flex["contents"]["footer"]["contents"][0]["action"]["uri"].endswith("st=secret-token")
 
     handler._send_limit_reached_notice(event, "standard", 4000)
-    assert "upgrade to the Pro plan" in flex_body_text(line.messages[0])
-    assert "secret-token" not in flex_body_text(line.messages[0])
+    assert line.messages[0]["type"] == "text"
+    assert "upgrade to the Pro plan" in line.messages[0]["text"]
+    assert line.messages[1]["text"].endswith("st=secret-token")
 
     handler._subscription_service.create_checkout_url = lambda _gid: None  # type: ignore[attr-defined]
     handler._send_limit_reached_notice(event, "pro", 40000)
     pro = line.messages[0]
-    assert "translation has stopped" in flex_body_text(pro)
-    assert "footer" not in pro["contents"]
-    assert "http" not in json.dumps(pro)
+    assert pro["type"] == "text"
+    assert "translation has stopped" in pro["text"]
+    assert len(line.messages) == 1
 
 
 class _CommandRepo:

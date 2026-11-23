@@ -4,7 +4,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +18,43 @@ class NeonEndpointSummary:
     host: str
     uses_pooler: bool
     region_hint: str
+
+
+_POOLER_OFF = frozenset({"0", "false", "no", "off"})
+
+
+def neon_pooler_enabled() -> bool:
+    """NEON_USE_POOLER が明示的に偽のときだけ直接接続にする。未設定は pooler を使う。"""
+
+    raw = os.environ.get("NEON_USE_POOLER", "")
+    if not isinstance(raw, str):
+        return True
+    return raw.strip().lower() not in _POOLER_OFF
+
+
+def pooler_host(host: str) -> str:
+    """Neon の直接接続ホストを pooled 接続のホストにする。対象外はそのまま返す。"""
+
+    if not host or not host.lower().endswith(".neon.tech"):
+        return host
+    labels = host.split(".")
+    if labels[0].lower().endswith("-pooler"):
+        return host
+    labels[0] = f"{labels[0]}-pooler"
+    return ".".join(labels)
+
+
+def resolve_neon_dsn(dsn: str, *, use_pooler: bool | None = None) -> str:
+    """pooler を使う設定なら、接続文字列のホストだけを pooled 接続に変える。
+
+    ユーザー名、パスワード、データベース名は変えない。localhost など Neon 以外も変えない。
+    """
+
+    if use_pooler is None:
+        use_pooler = neon_pooler_enabled()
+    if not use_pooler:
+        return dsn
+    return _rewrite_dsn_host(dsn, pooler_host)
 
 
 def summarize_neon_dsn(dsn: str) -> NeonEndpointSummary:
@@ -72,6 +109,30 @@ def log_neon_endpoint(summary: NeonEndpointSummary) -> None:
             lambda_region,
             summary.host,
         )
+
+
+def _rewrite_dsn_host(dsn: str, rewrite) -> str:
+    text = dsn.strip()
+    if "://" in text:
+        parsed = urlparse(text)
+        host = parsed.hostname or ""
+        new_host = rewrite(host)
+        if not host or new_host == host:
+            return dsn
+        userinfo, sep, _location = parsed.netloc.rpartition("@")
+        location = f"{new_host}:{parsed.port}" if parsed.port else new_host
+        netloc = f"{userinfo}{sep}{location}" if sep else location
+        return urlunparse(parsed._replace(netloc=netloc))
+
+    match = re.search(r"((?:^|\s)host=)(['\"]?)([^\s'\"]+)\2", text)
+    if not match:
+        return dsn
+    new_host = rewrite(match.group(3))
+    if new_host == match.group(3):
+        return dsn
+    quote = match.group(2)
+    replaced = f"{match.group(1)}{quote}{new_host}{quote}"
+    return f"{text[:match.start()]}{replaced}{text[match.end():]}"
 
 
 def _host_from_dsn(dsn: str) -> str:

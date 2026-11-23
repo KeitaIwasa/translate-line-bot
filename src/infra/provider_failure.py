@@ -224,6 +224,47 @@ def _is_transport_error(exc: BaseException) -> bool:
     return isinstance(exc, (requests.Timeout, requests.ConnectionError, TimeoutError))
 
 
+# サーバが SQLSTATE を付けて返す、接続が続かないエラー。
+_CONNECTION_SQLSTATES = frozenset({"57P01", "57P02", "57P03"})
+_POOL_FAILURES = frozenset({"PoolTimeout", "PoolClosed", "TooManyRequests"})
+
+
+def is_database_connection_failure(exc: BaseException) -> bool:
+    """接続がすでに切れている、または新しい接続を開けない失敗か。
+
+    SQL のキャンセルやロック待ちはここでは再接続しない。
+    """
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen and len(seen) < 5:
+        seen.add(id(current))
+        if _one_connection_failure(current):
+            return True
+        current = current.__cause__
+    return False
+
+
+def _one_connection_failure(exc: BaseException) -> bool:
+    module = type(exc).__module__ or ""
+    name = type(exc).__name__
+    if "psycopg_pool" in module and name in _POOL_FAILURES:
+        return True
+    if not module.startswith("psycopg"):
+        return False
+    names = {cls.__name__ for cls in type(exc).mro()}
+    if "InterfaceError" in names or "ConnectionTimeout" in names:
+        return True
+    if "OperationalError" not in names:
+        return False
+    sqlstate = getattr(exc, "sqlstate", None)
+    if sqlstate is None or sqlstate == "":
+        return True
+    if not isinstance(sqlstate, str):
+        return False
+    return sqlstate.startswith("08") or sqlstate in _CONNECTION_SQLSTATES
+
+
 def _neon_failure(exc: BaseException) -> tuple[str, bool] | None:
     module = type(exc).__module__ or ""
     if not module.startswith("psycopg"):
