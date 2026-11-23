@@ -3,6 +3,7 @@
 import pytest
 
 from src.app.handlers.message_handler import MessageHandler
+from src.presentation.rich_message import visible_reply_text
 from src.domain import models
 from src.domain.services.language_detection_service import LanguageDetectionService
 from src.domain.services.explicit_language_reset import is_explicit_language_reset
@@ -20,8 +21,11 @@ class _Line:
 
     def reply_messages(self, _token, messages, **_kwargs):
         self.last_messages = messages
-        if messages and isinstance(messages[0], dict):
-            self.last_text = messages[0].get("text") or self.last_text
+        shown = visible_reply_text(messages)
+        if shown:
+            self.last_text = shown
+        elif messages and isinstance(messages[0], dict) and messages[0].get("text"):
+            self.last_text = messages[0]["text"]
 
 
 class _Repo:

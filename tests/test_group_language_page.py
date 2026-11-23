@@ -1,6 +1,7 @@
 """グループに紐づく言語設定ページ。署名、未対応コード、空選択、重複、上限。"""
 
 import base64
+import json
 import time
 from urllib.parse import urlencode
 
@@ -11,6 +12,7 @@ from src.domain.services.language_detection_service import LanguageDetectionServ
 from src.domain.services.language_mention import MentionRead, read_mention
 from src.domain.services.language_settings_service import normalize_catalog_selection
 from src.group_language_handler import handle_group_language_request
+from src.presentation.rich_message import visible_reply_text
 from src.infra.signed_token import issue_token
 
 SECRET = "secret"
@@ -283,8 +285,21 @@ def test_settings_and_incomplete_replies_include_the_page_link():
 
         def reply_messages(self, _token, messages, **_kwargs):
             self.last_messages = messages
-            if messages and isinstance(messages[0], dict):
-                self.last_text = messages[0].get("text")
+            shown = visible_reply_text(messages)
+            uris = []
+
+            def _walk(node) -> None:
+                if isinstance(node, dict):
+                    if node.get("type") == "uri" and node.get("uri"):
+                        uris.append(str(node["uri"]))
+                    for value in node.values():
+                        _walk(value)
+                elif isinstance(node, list):
+                    for item in node:
+                        _walk(item)
+
+            _walk(messages)
+            self.last_text = "\n".join(part for part in (shown, *uris) if part)
 
     class _ChatRepo:
         def __init__(self, languages):
@@ -344,7 +359,20 @@ def test_settings_and_incomplete_replies_include_the_page_link():
 
 
 def test_join_message_includes_the_language_page_once():
-    line = type("Line", (), {"texts": [], "get_group_name": lambda *_: None, "reply_text": lambda self, _t, text: self.texts.append(text)})()
+    class _JoinLine:
+        def __init__(self):
+            self.texts = []
+
+        def get_group_name(self, *_args):
+            return None
+
+        def reply_text(self, _token, text):
+            self.texts.append(text)
+
+        def reply_messages(self, _token, messages):
+            self.texts.append(json.dumps(messages, ensure_ascii=False))
+
+    line = _JoinLine()
     repo = type(
         "Repo",
         (),

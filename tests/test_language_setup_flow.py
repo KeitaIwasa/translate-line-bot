@@ -1,6 +1,7 @@
 """言語設定の完了案内、Quick Reply、片側だけの依頼、複数言語の読み取り。"""
 
 from src.app.handlers.message_handler import MessageHandler
+from src.presentation.rich_message import visible_reply_text
 from src.app.handlers.postback_handler import PostbackHandler
 from src.domain import models
 from src.domain.services.language_detection_service import LanguageDetectionService
@@ -26,8 +27,16 @@ class _Line:
 
     def reply_messages(self, _token, messages):
         self.last_messages = messages
-        if messages and isinstance(messages[0], dict):
-            self.last_text = messages[0].get("text")
+        parts = [visible_reply_text(messages)]
+        for message in messages or []:
+            if not isinstance(message, dict):
+                continue
+            footer = ((message.get("contents") or {}).get("footer") or {})
+            for component in footer.get("contents") or []:
+                uri = ((component or {}).get("action") or {}).get("uri")
+                if uri:
+                    parts.append(str(uri))
+        self.last_text = "\n".join(part for part in parts if part)
 
 
 class _Repo:

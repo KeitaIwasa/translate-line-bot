@@ -378,8 +378,8 @@ def test_language_changes_during_quota_pause_keep_the_reason():
     assert "ja" not in {code.lower() for code in repo.languages}
     _assert_quota_pause(repo)
 
-    handler._handle_command(_build_event("Japanese"), "Japanese")
-    assert [code.lower() for code in repo.languages] == ["ja"]
+    handler._handle_command(_build_event("English and Korean"), "English and Korean")
+    assert {code.lower() for code in repo.languages} == {"en", "ko"}
     _assert_quota_pause(repo)
 
     handler._respond_unknown_instruction(_build_event("huh"), "")

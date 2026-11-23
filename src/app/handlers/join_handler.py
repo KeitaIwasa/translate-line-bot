@@ -6,16 +6,13 @@ from datetime import datetime, timezone
 from ...domain import models
 from ...domain.ports import LinePort, MessageRepositoryPort
 from ...domain.services.language_mention import join_settings_page_note
+from ...presentation.guidance_cards import JOIN_GUIDANCE, join_card
+from ...presentation.rich_message import deliver_reply
 
 logger = logging.getLogger(__name__)
 
-GROUP_PROMPT_MESSAGE = (
-    "I'm a multilingual translation bot. Please tell me the languages you want to translate to.\n\n"
-    "多言語翻訳ボットです。翻訳したい言語を教えてください。\n\n"
-    "我是一个多语言翻译机器人。请告诉我你想要翻译成哪些语言。\n\n"
-    "ฉันเป็นบอทแปลหลายภาษา กรุณาบอกฉันว่าคุณต้องการแปลเป็นภาษาใดบ้าง\n\n"
-    "ex) English, 中文, 日本語, ไทย"
-)
+# 参加案内の原文。Flex の本文と、送信失敗時の平文で同じ文字列を使う。
+GROUP_PROMPT_MESSAGE = JOIN_GUIDANCE
 
 
 class JoinHandler:
@@ -34,21 +31,25 @@ class JoinHandler:
             self._repo.upsert_group_name(event.group_id, group_name)
         self._repo.reset_group_language_settings(event.group_id)
         self._repo.set_translation_enabled(event.group_id, False)
-        self._line.reply_text(event.reply_token, _join_message(self._language_page_url, event.group_id))
+        deliver_reply(
+            self._line,
+            event.reply_token,
+            join_card(_join_page_note(self._language_page_url, event.group_id)),
+            logger=logger,
+        )
 
 
-def _join_message(language_page_url, group_id: str) -> str:
+def _join_page_note(language_page_url, group_id: str) -> str:
+    """参加案内に添える言語ページ。URL は Flex のボタンへ移す。"""
+
     if not language_page_url:
-        return GROUP_PROMPT_MESSAGE
+        return ""
     try:
         url = language_page_url(group_id) or ""
     except Exception:
         logger.debug("Failed to build language settings url", exc_info=True)
-        return GROUP_PROMPT_MESSAGE
-    note = join_settings_page_note(url)
-    if not note:
-        return GROUP_PROMPT_MESSAGE
-    return f"{GROUP_PROMPT_MESSAGE}\n\n{note}"
+        return ""
+    return join_settings_page_note(url)
 
 
 def _event_timestamp(event: models.BaseEvent):

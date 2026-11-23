@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from src.app.handlers.message_handler import MessageHandler
+from src.presentation.rich_message import visible_reply_text
 from src.domain import models
 from src.domain.models import TranslationRuntimeState
 from src.domain.services.quota_service import QuotaDecision, quota_should_notify
@@ -35,8 +36,10 @@ class RecordingLineClient:
         self.sent_texts.append(text)
 
     def reply_messages(self, _reply_token, messages):
-        texts = [_visible_message_text(msg) for msg in messages if isinstance(msg, dict)]
-        self.sent_texts.append("\n".join(texts))
+        shown = visible_reply_text(messages)
+        if not shown:
+            shown = "\n".join(_visible_message_text(msg) for msg in messages if isinstance(msg, dict))
+        self.sent_texts.append(shown)
 
     def get_display_name(self, *_args, **_kwargs):
         return None

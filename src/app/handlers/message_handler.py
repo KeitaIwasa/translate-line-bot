@@ -46,7 +46,15 @@ from ...presentation.free_limit_notice import (
     static_notice_button,
     static_notice_headline,
 )
+from ...presentation.guidance_cards import (
+    catalog_card,
+    howto_card,
+    language_reset_card,
+    settings_help_card,
+    unknown_command_card,
+)
 from ...presentation.list_layout import normalize_inline_lists
+from ...presentation.rich_message import RichButton, flex_action_count, flex_body_text, render_guidance
 from ...presentation.reply_formatter import (
     MAX_REPLY_LENGTH,
     _wrap_bidi_isolate,
@@ -189,6 +197,23 @@ class _QuotaResetDelivery:
         return False
 
 
+def _rich_quick_replies(items: Sequence[dict]) -> tuple:
+    """言語ページの Quick Reply を、Flex に付けられるボタンへ写す。"""
+
+    buttons = []
+    for item in items:
+        action = (item or {}).get("action") or {}
+        label = str(action.get("label") or "")
+        kind = action.get("type")
+        if kind == "uri":
+            buttons.append(RichButton(label=label, uri=str(action.get("uri") or "")))
+        elif kind == "postback":
+            buttons.append(RichButton(label=label, data=str(action.get("data") or "")))
+        elif kind == "message":
+            buttons.append(RichButton(label=label, text=str(action.get("text") or "")))
+    return tuple(buttons)
+
+
 RATE_LIMIT_MESSAGE = "You have reached the rate limit. Please try again later."
 # DB に届かないときは言語一覧を引けない。英語の原文をそのまま返す。
 DATABASE_RETRY_NOTICE = "I couldn't process that message. Please send it again in a moment."
@@ -296,6 +321,10 @@ class _CommandTrace:
                 continue
             if message.get("type") == "text":
                 self.text_length += len(message.get("text") or "")
+                continue
+            if message.get("type") == "flex":
+                self.text_length += len(flex_body_text(message))
+                self.template_action_count += flex_action_count(message)
                 continue
             if message.get("type") != "template":
                 continue
@@ -670,6 +699,43 @@ class MessageHandler:
             logger.exception("Failed to persist direct assistant message")
 
     # --- internal helpers ---
+    def _reply_guidance(
+        self,
+        event: models.MessageEvent,
+        guidance,
+        *,
+        command_trace: _CommandTrace | None = None,
+        quick_replies: Sequence[dict] | None = None,
+        extra_texts: Sequence[str] = (),
+    ) -> bool:
+        """案内を Flex で返す。送信に失敗したときだけ、URL を分けた平文に戻す。"""
+
+        if not event.reply_token:
+            return False
+        if quick_replies:
+            guidance = replace(
+                guidance,
+                quick_replies=guidance.quick_replies + _rich_quick_replies(quick_replies),
+            )
+        rendered = render_guidance(guidance)
+        trailing = [{"type": "text", "text": text[:LINE_REPLY_TEXT_LIMIT]} for text in extra_texts if text]
+        if rendered.flex is not None:
+            try:
+                return self._reply_messages(
+                    event,
+                    [rendered.flex, *trailing],
+                    command_trace=command_trace,
+                )
+            except Exception:
+                logger.warning("Flex reply failed; falling back to plain text", exc_info=True)
+        elif rendered.omit_reason:
+            logger.info("Flex guidance omitted | reason=%s", rendered.omit_reason)
+        return self._reply_messages(
+            event,
+            [*rendered.plain_messages, *trailing],
+            command_trace=command_trace,
+        )
+
     def _reply_text(
         self,
         event: models.MessageEvent,
@@ -866,9 +932,12 @@ class MessageHandler:
                 instruction_lang,
                 command_trace=command_trace,
             )
-            self._reply_text(
+            self._reply_guidance(
                 event,
-                self._with_settings_link(event.group_id, ack, family),
+                language_reset_card(
+                    self._with_settings_link(event.group_id, ack, family),
+                    lang=instruction_lang or family,
+                ),
                 command_trace=command_trace,
             )
             return True
@@ -1225,11 +1294,11 @@ class MessageHandler:
                     if not message or is_howto_loop(message):
                         message = howto_prompt(family=howto_family)
                     message = self._with_settings_link(event.group_id, message, howto_family)
-                    handled = self._reply_text(
+                    handled = self._reply_guidance(
                         event,
-                        message,
+                        howto_card(message, lang=howto_family),
                         command_trace=trace,
-                        quick_reply=self._language_quick_replies(event.group_id, howto_family),
+                        quick_replies=self._language_quick_replies(event.group_id, howto_family),
                     )
                 elif action == "pause":
                     if quota_paused:
@@ -1450,7 +1519,11 @@ class MessageHandler:
                 instruction_lang,
             )
         if parsed.kind == "catalog":
-            self._reply_text(event, catalog_prompt(family=family, limit=limit), command_trace=command_trace)
+            self._reply_guidance(
+                event,
+                catalog_card(catalog_prompt(family=family, limit=limit), lang=family),
+                command_trace=command_trace,
+            )
             return True
         if parsed.kind == "settings_help":
             records = [
@@ -1471,11 +1544,11 @@ class MessageHandler:
                     for name in ("ja", "zh", "ko", "th")
                 },
             )
-            self._reply_text(
+            self._reply_guidance(
                 event,
-                text,
+                settings_help_card(text, lang=button_family),
                 command_trace=command_trace,
-                quick_reply=self._language_quick_replies(event.group_id, button_family),
+                quick_replies=self._language_quick_replies(event.group_id, button_family),
             )
             return True
         if parsed.kind == "howto":
@@ -1485,11 +1558,11 @@ class MessageHandler:
                 english=howto_prompt(family="en"),
                 static={name: howto_prompt(family=name) for name in ("ja", "zh", "ko", "th")},
             )
-            self._reply_text(
+            self._reply_guidance(
                 event,
-                text,
+                howto_card(text, lang=button_family),
                 command_trace=command_trace,
-                quick_reply=self._language_quick_replies(event.group_id, button_family),
+                quick_replies=self._language_quick_replies(event.group_id, button_family),
             )
             return True
         if parsed.kind == "unsupported":
@@ -1870,7 +1943,12 @@ class MessageHandler:
             lift = delivery.lift
             if self._should_enable_after_reset_attempt(event.group_id or "", lift):
                 self._repo.set_translation_enabled(event.group_id, True)
-            self._reply_with_optional_quota_reset(event, fallback, lift, command_trace=command_trace)
+            self._reply_guidance(
+                event,
+                unknown_command_card(fallback, lang=detected, bot_name=self._bot_mention_name),
+                command_trace=command_trace,
+                extra_texts=(self._reset_notice_to_send(lift),),
+            )
             delivery.commit()
         return True
 
@@ -2628,6 +2706,7 @@ class MessageHandler:
             period_end=period_end,
             reminder=reminder,
         )
+        # 無料枠の Flex とは別に、有料プランの上限案内は平文のままにする。
         messages = [{"type": "text", "text": notice_text[:5000]}]
         # URL は左右書字方向混在時に誤判定されやすいため本文から分離する
         self._append_plan_link(messages, url, event.group_id)
