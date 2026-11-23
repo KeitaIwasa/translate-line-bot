@@ -243,6 +243,38 @@ def _already_applied_checks() -> Dict[str, str]:
                   AND column_name = 'pending_billing_owner_created_at'
               )
         """,
+        "20261022_add_quota_notice_claims.sql": """
+            SELECT
+              EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = 'group_usage_counters'
+                  AND column_name = 'approaching_notice_sent'
+              )
+              AND EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = 'group_usage_counters'
+                  AND column_name = 'quota_mention_reminder_on'
+              )
+        """,
+        "20261022_add_quota_reset_notice_claim.sql": """
+            SELECT
+              EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = 'group_usage_counters'
+                  AND column_name = 'quota_reset_notice_sent'
+              )
+        """,
+        "20261102_allow_billing_pause_reason.sql": """
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_constraint
+                WHERE conname = 'chk_translation_paused_reason'
+                  AND pg_get_constraintdef(oid) ILIKE '%billing%'
+            )
+        """,
     }
 
 
