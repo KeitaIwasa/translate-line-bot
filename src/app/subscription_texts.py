@@ -10,3 +10,7 @@ SUBS_CANCEL_DONE_TEXT = "Your subscription has been scheduled to cancel at the e
 SUBS_CANCEL_FAIL_TEXT = "Failed to cancel the subscription. Please try again later."
 SUBS_NOT_PRO_TEXT = "You are not on the Pro plan."
 SUBS_OWNER_ONLY_TEXT = "Only the billing owner can open billing management."
+SUBS_YES_LABEL = "Yes"
+SUBS_NO_LABEL = "No"
+SUBS_CANCEL_ABORTED_TEXT = "Subscription cancellation aborted."
+SUBS_STATUS_UNAVAILABLE_TEXT = "Subscription status is unavailable right now."

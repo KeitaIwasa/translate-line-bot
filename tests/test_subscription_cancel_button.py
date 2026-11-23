@@ -1,4 +1,6 @@
 from src.app.handlers.postback_handler import PostbackHandler
+from src.app.subscription_texts import SUBS_NOT_PRO_TEXT
+from src.app.ui_strings import ui_text
 from src.app.handlers.message_handler import MessageHandler
 from src.app.subscription_postback import encode_subscription_payload
 from src.domain import models
@@ -67,7 +69,7 @@ def test_cancel_button_on_canceled_subscription_sends_not_pro_message():
 
     handler.handle(event)
 
-    assert line.last_text == "translated-ja"
+    assert line.last_text == ui_text(SUBS_NOT_PRO_TEXT, "ja")
     assert line.last_template is None
 
 
@@ -109,4 +111,4 @@ def test_mention_cancel_on_non_pro_replies_not_pro_in_primary_language():
     # instruction_lang 未設定でもグループ主要言語 (ja) で返信される
     handler._handle_subscription_cancel(event, "")
 
-    assert line.last_text == "translated-ja"
+    assert line.last_text == ui_text(SUBS_NOT_PRO_TEXT, "ja")

@@ -1,3 +1,5 @@
+from src.app.subscription_texts import SUBS_OWNER_ONLY_TEXT
+from src.app.ui_strings import ui_text
 from src.app.handlers.message_handler import MessageHandler
 from src.app.handlers.postback_handler import PostbackHandler
 from src.app.subscription_postback import encode_subscription_payload
@@ -59,7 +61,7 @@ def test_message_cancel_rejects_non_owner():
     )
 
     handler._handle_subscription_cancel(event, "")
-    assert line.last_text == "Only the billing owner can open billing management."
+    assert line.last_text == ui_text(SUBS_OWNER_ONLY_TEXT, "ja")
 
 
 def test_postback_cancel_rejects_non_owner():
@@ -85,5 +87,5 @@ def test_postback_cancel_rejects_non_owner():
     )
 
     handler.handle(event)
-    assert line.last_text == "Only the billing owner can open billing management."
+    assert line.last_text == ui_text(SUBS_OWNER_ONLY_TEXT, "ja")
     assert line.last_template is None
