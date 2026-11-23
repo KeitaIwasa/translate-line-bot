@@ -197,6 +197,26 @@ def _decide_language_update(
     same = set(projected) == set(current_codes)
 
     if exceeds_language_limit(projected, limit=limit):
+        if canonical == "remove" and len(projected) < len(current_codes):
+            # ダウングレード後など、今の集合がすでに上限を超えている。
+            # 削除は保存し、まだ超えていれば残す言語を聞く。翻訳フラグは触らない。
+            removed_codes = tuple(code for code in current_codes if code not in set(projected))
+            labels = [language_label(code, family, stored=names.get(code, "")) for code in projected]
+            notice = selection_prompt(labels, family=family, limit=limit)
+            if not notice:
+                raise ValueError("over-limit remove produced no reply")
+            return LanguageUpdate(
+                action="save",
+                mode="remove",
+                state=state,
+                write="remove",
+                languages=result,
+                removed=removed_codes,
+                reply=notice,
+                page_error="too_many",
+                enable_translation=None,
+                changed=True,
+            )
         if canonical == "remove":
             raise ValueError("remove cannot exceed the language limit")
         notice_mode = "replace" if canonical == "replace" else "add"

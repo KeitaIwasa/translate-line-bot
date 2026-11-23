@@ -399,6 +399,73 @@ def test_language_changes_during_quota_pause_keep_the_reason():
     assert _next_month(datetime.now(timezone.utc)) in reset
 
 
+def test_language_changes_unknown_pause_and_resume_keep_billing_pause():
+    """課金停止は言語変更・未知コマンド・一時停止・再開では外れない。"""
+
+    line = RecordingLineClient()
+    repo = _MutableLanguageRepo(
+        initial_usage=0,
+        paid=True,
+        entitlement_plan="standard",
+        translation_enabled=False,
+        paused_reason="billing",
+        languages=["en", "ja"],
+    )
+    handler = _with_checkout(_build_handler(repo, line, RecordingTranslationService()))
+
+    handler._handle_command(_build_event("add Thai"), "add Thai")
+    assert "th" in {code.lower() for code in repo.languages}
+    assert repo.translation_enabled is False
+    assert repo.paused_reason == "billing"
+
+    handler._handle_command(_build_event("remove Japanese"), "remove Japanese")
+    assert "ja" not in {code.lower() for code in repo.languages}
+    assert repo.paused_reason == "billing"
+    assert repo.translation_enabled is False
+
+    handler._handle_command(_build_event("English and Korean"), "English and Korean")
+    assert {code.lower() for code in repo.languages} == {"en", "ko"}
+    assert repo.paused_reason == "billing"
+
+    handler._respond_unknown_instruction(_build_event("huh"), "")
+    assert repo.paused_reason == "billing"
+    assert repo.translation_enabled is False
+
+    handler._command_router = _ResumeRouter()
+    line.sent_texts.clear()
+    handler._handle_command(_build_event("resume"), "resume")
+    assert repo.paused_reason == "billing"
+    assert repo.translation_enabled is False
+    assert "billing is updated" in "\n".join(line.sent_texts)
+
+    handler._command_router = _ActionRouter("pause")
+    line.sent_texts.clear()
+    handler._handle_command(_build_event("pause"), "pause")
+    assert repo.paused_reason == "billing"
+    assert repo.translation_enabled is False
+    assert "billing is updated" in "\n".join(line.sent_texts)
+
+
+def test_downgraded_group_can_remove_one_language_while_still_over_the_plan_limit():
+    """5言語のまま Free に落ちても、1言語の削除は保存して残りの選択を聞く。"""
+
+    line = RecordingLineClient()
+    repo = _MutableLanguageRepo(
+        initial_usage=0,
+        paid=False,
+        languages=["en", "ja", "zh", "ko", "vi"],
+    )
+    handler = _with_checkout(_build_handler(repo, line, RecordingTranslationService()))
+
+    handler._handle_command(_build_event("remove Vietnamese"), "remove Vietnamese")
+
+    assert "vi" not in {code.lower() for code in repo.languages}
+    assert len(repo.languages) == 4
+    reply = "\n".join(line.sent_texts)
+    assert "up to 3" in reply
+    assert "Korean" in reply
+
+
 def test_language_add_in_new_month_sends_the_reset_notice_once():
     """翌月の最初が言語追加でも、停止解除とリセット案内は通常投稿と同じ関数を通る。"""
 

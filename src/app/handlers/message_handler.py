@@ -109,6 +109,7 @@ from ...domain.services.plan_policy import (
     stop_translation_on_quota,
 )
 from ...domain.services.quota_pause import (
+    BILLING_PAUSE,
     QUOTA_PAUSE,
     NoticeClaim,
     PauseState,
@@ -924,8 +925,8 @@ class MessageHandler:
 
         if update.action == "reset":
             self._repo.reset_group_language_settings(event.group_id)
-            # 上限停止の理由を消すと翌月の自動再開が外れる。手動停止のときだけ理由を空にする。
-            if not self._translation_stays_paused_for_quota(event.group_id or ""):
+            # 上限停止と課金停止の理由は消さない。手動停止のときだけ理由を空にする。
+            if not self._must_keep_pause_reason(event.group_id or ""):
                 self._repo.set_translation_enabled(event.group_id, False)
             ack = self._translate_template(
                 "Your language settings have been reset. Please tell us all the languages ​​you would like to translate.",
@@ -950,7 +951,7 @@ class MessageHandler:
         if update.action == "noop":
             raise ValueError("language update produced no reply")
         if update.action == "reply":
-            if update.enable_translation is False and not self._translation_stays_paused_for_quota(event.group_id or ""):
+            if update.enable_translation is False and not self._must_keep_pause_reason(event.group_id or ""):
                 self._repo.set_translation_enabled(event.group_id, False)
             self._reply_language_update(
                 event,
@@ -983,14 +984,25 @@ class MessageHandler:
             if update.enable_translation is True:
                 if self._should_enable_after_reset_attempt(event.group_id or "", lift):
                     self._repo.set_translation_enabled(event.group_id, True)
-            elif update.enable_translation is False and not self._translation_stays_paused_for_quota(event.group_id or ""):
+            elif update.enable_translation is False and not self._must_keep_pause_reason(event.group_id or ""):
                 self._repo.set_translation_enabled(event.group_id, False)
-            pairs = self._confirmation_pairs(event.group_id, update.languages)
-            ack = setup_confirmation(
-                pairs,
-                url=self._language_settings_url(event.group_id, ""),
-                translate=self._group_copy_translate(),
-            )
+            if update.page_error == "too_many" and (update.reply or "").strip():
+                # ダウングレード後の削除など、まだ上限を超える。保存結果ではなく残す言語を聞く。
+                ack = update.reply
+                if source == "settings":
+                    ack = self._localize_fixed_reply(
+                        ack,
+                        family=family,
+                        instruction_lang=instruction_lang,
+                        command_trace=command_trace,
+                    )
+            else:
+                pairs = self._confirmation_pairs(event.group_id, update.languages)
+                ack = setup_confirmation(
+                    pairs,
+                    url=self._language_settings_url(event.group_id, ""),
+                    translate=self._group_copy_translate(),
+                )
             notice = unsupported_prompt(unsupported, family)
             if notice:
                 if source == "settings":
@@ -1305,6 +1317,14 @@ class MessageHandler:
                         # 上限停止を手動停止に上書きしない。理由が消えると翌月の自動再開が外れる
                         self._reply_quota_pause_reminder(event, runtime, repeat="silent")
                         handled = True
+                    elif (runtime.translation_paused_reason or "") == BILLING_PAUSE:
+                        # 課金停止は手動停止にしない。解除は支払いの復旧だけ。
+                        ack = self._safe_translate_for_instruction(
+                            "Translation stays paused until billing is updated.",
+                            instruction_lang,
+                            command_trace=trace,
+                        )
+                        handled = self._reply_text(event, ack, command_trace=trace)
                     else:
                         self._repo.set_translation_enabled(event.group_id, False)
                         base_ack = "I will pause translation. Please mention me again when you want to resume."
@@ -1317,7 +1337,17 @@ class MessageHandler:
                 elif action == "resume":
                     with _QuotaResetDelivery(self, event, runtime) as delivery:
                         lift = delivery.lift
-                        if lift.status == QuotaResetStatus.NOT_PAUSED and quota_paused:
+                        if lift.status == QuotaResetStatus.NOT_PAUSED and (
+                            runtime.translation_paused_reason or ""
+                        ) == BILLING_PAUSE:
+                            ack = self._safe_translate_for_instruction(
+                                "Translation stays paused until billing is updated.",
+                                instruction_lang,
+                                command_trace=trace,
+                            )
+                            handled = self._reply_text(event, ack, command_trace=trace)
+                            delivery.commit()
+                        elif lift.status == QuotaResetStatus.NOT_PAUSED and quota_paused:
                             # 「再開しました」とは返さない。無料枠が戻るまで翻訳は止まったまま
                             self._reply_quota_pause_reminder(event, runtime, repeat="short")
                             delivery.commit()
@@ -2150,11 +2180,21 @@ class MessageHandler:
         )
 
     def _should_enable_after_reset_attempt(self, group_id: str, lift: _QuotaResetLift) -> bool:
-        """手動停止だけ翻訳をオンに戻す。上限停止と案内失敗では理由を消さない。"""
+        """手動停止だけ翻訳をオンに戻す。上限停止・課金停止・案内失敗では理由を消さない。"""
 
         if lift.status != QuotaResetStatus.NOT_PAUSED:
             return False
-        return not self._translation_stays_paused_for_quota(group_id)
+        return not self._must_keep_pause_reason(group_id)
+
+    def _must_keep_pause_reason(self, group_id: str) -> bool:
+        """言語操作と未知コマンドでは、上限以上の quota と billing を残す。"""
+
+        if not group_id:
+            return False
+        if self._translation_stays_paused_for_quota(group_id):
+            return True
+        runtime = self._fetch_command_runtime_state(group_id)
+        return (runtime.translation_paused_reason or "") == BILLING_PAUSE
 
     def _runtime_after_quota_reset(
         self,

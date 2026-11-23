@@ -120,6 +120,29 @@ def test_unknown_projection_mode_raises():
         project_language_codes(["en", "ja"], ["ko"], mode="nope")
 
 
+def test_remove_that_shrinks_an_over_limit_set_is_saved_and_asks_which_to_keep():
+    """Pro の5言語が Free/Standard の3に落ちたあと、1言語の削除は例外にしない。"""
+
+    current = (EN, JA, ZH, KO, ("vi", "Vietnamese"))
+    update = decide_language_update(
+        mode="remove",
+        current=current,
+        requested=(("vi", "Vietnamese"),),
+        limit=LIMIT,
+        family="en",
+    )
+
+    assert update.action == "save"
+    assert update.write == "remove"
+    assert update.removed == ("vi",)
+    assert {code for code, _name in update.languages} == {"en", "ja", "zh", "ko"}
+    assert update.page_error == "too_many"
+    assert update.enable_translation is None
+    assert "up to 3" in update.reply
+    assert "Korean" in update.reply
+    assert "Vietnamese" not in update.reply
+
+
 def test_remove_of_a_language_that_is_not_set_replies():
     update = decide_language_update(
         mode="remove",
