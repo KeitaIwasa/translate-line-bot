@@ -26,6 +26,7 @@ WAF は導入しない前提です。
 - `GET /api/stats/total-users` → API Gateway 側 `GET /stats/total-users`
 - `POST /api/contact` → API Gateway 側 `POST /contact`
 - `GET /api/checkout?...` → API Gateway 側 `GET /checkout?...`
+- `GET/POST /api/group-languages?...` → API Gateway 側 `GET/POST /group-languages?...`
 
 ## セキュリティ設定
 
@@ -42,6 +43,7 @@ CloudFront Response Headers Policy で以下を付与:
 
 - フロントの API 呼び出しは相対パス固定
   - `/api/checkout`
+  - `/api/group-languages`
   - `/api/contact`
   - `/api/stats/total-users`
 - `api_base` / `apiBase` クエリは廃止
