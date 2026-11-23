@@ -468,6 +468,116 @@ def test_distinct_language_sets_do_not_grow_the_factory_cache():
     assert detector_factory._factory.word_lang_prob_map is shared_map
 
 
+def test_subscription_word_stays_romanian_until_plan_reply_asks():
+    """短い語だけの特別ルールは無い。subscription の生判定は ro のまま。"""
+
+    detector = LanguageDetectionService()
+    assert detector.detect("subscription") == "ro"
+    assert detector.resolve_instruction_language(
+        "subscription",
+        preferred="ro",
+        group_languages=["en", "th"],
+    ) == "ro"
+    # 12文字未満のラテン語は、もともとグループのその文字体系の言語に残る。語ごとの例外は足さない
+    assert detector.resolve_instruction_language("hello", group_languages=["en", "th"]) == "en"
+
+
+def test_plan_reply_uses_registered_language_not_romanian():
+    """プランメニューと上限通知は、登録外なら登録言語だけで再判定する。"""
+
+    detector = LanguageDetectionService()
+    assert detector.resolve_instruction_language(
+        "subscription",
+        preferred="ro",
+        group_languages=["en", "th"],
+        restrict_to_registered=True,
+    ) == "en"
+    # 先頭がタイ語でも、ラテン文字なので登録言語の中の en を使う
+    assert detector.resolve_instruction_language(
+        "subscription",
+        group_languages=["th", "en"],
+        restrict_to_registered=True,
+    ) == "en"
+
+
+def test_plan_reply_falls_back_when_detected_language_is_not_registered():
+    detector = LanguageDetectionService()
+    french = "Bonjour, comment allez-vous aujourd'hui?"
+    # ヘルプなどは登録外のフランス語のまま
+    assert detector.resolve_instruction_language(french, preferred="fr", group_languages=["ja", "en"]) == "fr"
+    assert detector.resolve_instruction_language(
+        french,
+        preferred="fr",
+        group_languages=["ja", "en"],
+        restrict_to_registered=True,
+    ) == "en"
+    assert detector.resolve_instruction_language(
+        "지금 뭐해?",
+        preferred="ko",
+        group_languages=["en", "th"],
+        restrict_to_registered=True,
+    ) == "en"
+    # 文字体系が登録言語に無いときは先頭の登録言語
+    assert detector.resolve_instruction_language(
+        "こんにちは",
+        group_languages=["th", "en"],
+        restrict_to_registered=True,
+    ) == "th"
+    # 複数言語・絵文字のみ・数字のみは、通常返信では従来どおり
+    assert detector.resolve_instruction_language("Please confirm 明日の予定", group_languages=["ja", "en"]) == "en"
+    assert detector.resolve_instruction_language("Hello こんにちは、元気？", group_languages=["ja", "en"]) == "ja"
+    assert detector.resolve_instruction_language("👍😂🎉", group_languages=["ja", "en"]) == "ja"
+    assert detector.resolve_instruction_language("12345 678", group_languages=["ja", "en"]) == "ja"
+    assert detector.resolve_instruction_language("👍😂🎉", group_languages=["en", "ja"], restrict_to_registered=True) == "en"
+    assert detector.resolve_instruction_language("12345 678", group_languages=["en", "ja"], restrict_to_registered=True) == "en"
+
+
+def test_detected_language_inside_group_is_kept_for_plan_reply():
+    detector = LanguageDetectionService()
+    spanish = "Hola, ¿cómo estás? Por favor dime los idiomas de traducción actuales."
+    thai = "สวัสดีครับ ช่วยบอกวิธีใช้งานของบอทนี้หน่อยได้ไหม"
+    assert detector.resolve_instruction_language(
+        spanish,
+        preferred="es",
+        group_languages=["es", "en"],
+        restrict_to_registered=True,
+    ) == "es"
+    assert detector.resolve_instruction_language(
+        thai,
+        preferred="th",
+        group_languages=["en", "th"],
+        restrict_to_registered=True,
+    ) == "th"
+    assert detector.resolve_instruction_language(
+        "how do I use this bot?",
+        preferred="en",
+        group_languages=["en", "th"],
+        restrict_to_registered=True,
+    ) == "en"
+
+
+def test_help_in_unregistered_language_is_not_forced_to_the_group():
+    """ヘルプは登録外の言語で返してよい。"""
+
+    french = "Bonjour, comment allez-vous aujourd'hui?"
+    repo = _Repo(["en", "th"])
+    translator = _Translator()
+    handler = _handler(repo, translator)
+
+    handler._handle_command(_event(french), french)
+
+    assert _langs(translator) == [["fr"]]
+
+
+def test_group_without_languages_keeps_raw_detection():
+    """言語未登録のグループは、登録言語への丸めをしない。"""
+
+    detector = LanguageDetectionService()
+    assert detector.resolve_instruction_language("subscription", restrict_to_registered=True) == "ro"
+    assert detector.resolve_instruction_language("hello") == "fi"
+    assert detector.resolve_instruction_language("Bonjour, comment allez-vous aujourd'hui?") == "fr"
+
+
 def test_status_set_question_lists_group_languages():
     repo = _Repo(GROUP)
     translator = _Translator()
