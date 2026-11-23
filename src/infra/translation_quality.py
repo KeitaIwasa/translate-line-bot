@@ -15,8 +15,12 @@ CloudWatch Logs Insights で数えるための数値とコードだけを、標�
 - 長さの比は、原文12文字以上で8倍以上、原文40文字以上で0.15倍未満。
   漢字かなの自然な訳は英語の2割前後まで短くなる（広東語で約0.20）ので、0.15まで許す。
   絵文字・数字・記号・URL だけの原文、短い反復の原文は比を見ない。
-- ja の稀な漢字は、cp932 に無く、GB2312 にあり、Big5 に無い字（冈・东・门）。
-  cp932 に無いだけの JIS X 0213 の字（嚙・𠮷）は日本語として残す。
+- ja の稀な漢字は、原文に無く cp932 でも表せない字。JIS X 0213 第1面（嚙など）と
+  人名の𠮷は残し、第2面の昈や GB2312 だけの冈は suspect。
+- 出力文字数の3倍を超え、かつ200を超える candidatesTokenCount は token_bloat。
+  正常な呼び出しは100トークン未満だった。
+- source_repeat は、しきい値以上の文字ランか n-gram、または短い反復の原文だけ。
+  tomorrow の rr や https の tt では付けない。
 """
 
 from __future__ import annotations
@@ -44,8 +48,8 @@ LETTER_RUN_MIN_SHORT_SOURCE = 12
 MARK_RUN_MIN_SHORT_SOURCE = 16
 SHORT_REPETITIVE_MAX_CHARS = 16
 SHORT_SOURCE_MIN_RUN = 3
-# 原文側に同じ文字がこの回数以上連続していれば、訳のその文字は反復扱いにしない
-SOURCE_CHAR_REPEAT_MIN = 2
+# 訳の文字ランを除外するのは、原文側がその文字種別のしきい値以上連続しているときだけ。
+# 2連続（tomorrow の rr、https の tt）では除外しない。
 
 # 空白の無い n-gram。「テスト」4回 = 12文字
 NGRAM_MIN_REPEATS = 4
@@ -71,6 +75,11 @@ SHORT_SOURCE_CHARS = 16
 
 UNEXPECTED_SCRIPT_MIN = 1
 
+# STG の壊れ呼び出しは candidatesTokenCount=445 で出力合計約111文字。
+# 正常な呼び出しは 42〜97 トークンだったので、200以下は見ない。
+TOKEN_BLOAT_MIN_TOKENS = 200
+TOKEN_BLOAT_CHARS_FACTOR = 3
+
 REASON_REPEAT_RUN = "repeat_run"
 REASON_NGRAM_REPEAT = "ngram_repeat"
 REASON_RATIO_HIGH = "ratio_high"
@@ -79,6 +88,9 @@ REASON_UNEXPECTED_SCRIPT = "unexpected_script"
 REASON_RARE_HAN = "rare_han"
 REASON_EMPTIED = "emptied_by_cleanup"
 REASON_FINISH = "finish_not_stop"
+REASON_PARSE_FAILED = "parse_failed"
+REASON_NO_VISIBLE = "no_visible_text"
+REASON_TOKEN_BLOAT = "token_bloat"
 
 REASONS = (
     REASON_REPEAT_RUN,
@@ -89,7 +101,18 @@ REASONS = (
     REASON_RARE_HAN,
     REASON_EMPTIED,
     REASON_FINISH,
+    REASON_PARSE_FAILED,
+    REASON_NO_VISIBLE,
+    REASON_TOKEN_BLOAT,
 )
+
+# 呼び出し全体の理由。各言語の suspect にも載せる
+_CALL_REASONS = frozenset(
+    {REASON_FINISH, REASON_PARSE_FAILED, REASON_NO_VISIBLE, REASON_TOKEN_BLOAT}
+)
+
+# cp932 にも JIS X 0213 第1面にも無いが、日本語の人名で使う字
+_ALLOWED_NON_CP932_HAN = frozenset({"𠮷"})
 
 # 比を見ない原文。URL や絵文字のエコーは壊れた訳ではない
 _RATIO_SKIP_KINDS = frozenset(
@@ -190,6 +213,7 @@ def assess_translation_quality(
     source_text: str,
     raw_items: Sequence[object],
     target_languages: Sequence[str],
+    parse_failure: str | None = None,
 ) -> dict:
     """1回の翻訳の品質シグナル。ログ用の dict で、本文は含めない。"""
 
@@ -206,11 +230,19 @@ def assess_translation_quality(
     reasons: set[str] = set()
     if finish and finish != "STOP":
         reasons.add(REASON_FINISH)
+    if parse_failure == "parse_failed":
+        reasons.add(REASON_PARSE_FAILED)
+    elif parse_failure == "no_visible_text":
+        reasons.add(REASON_NO_VISIBLE)
 
     for lang, raw in _iter_raw_items(raw_items, allowed):
         output, output_reasons = _assess_output(source, profile, lang, raw)
         outputs.append(output)
         reasons.update(output_reasons)
+
+    total_out_chars = sum(item["chars"] for item in outputs)
+    if _is_token_bloat(_token(usage, "candidatesTokenCount"), total_out_chars):
+        reasons.add(REASON_TOKEN_BLOAT)
 
     ordered = [code for code in REASONS if code in reasons]
     suspect = bool(ordered)
@@ -223,6 +255,7 @@ def assess_translation_quality(
         outputs=outputs,
         reasons=ordered,
         suspect=suspect,
+        total_out_chars=total_out_chars,
     )
     return payload
 
@@ -234,6 +267,7 @@ def emit_translation_quality(
     source_text: str,
     raw_items: Sequence[object],
     target_languages: Sequence[str],
+    parse_failure: str | None = None,
 ) -> dict:
     """品質シグナルを EMF 1行で出す。呼び出し側が例外を握る。"""
 
@@ -243,6 +277,7 @@ def emit_translation_quality(
         source_text=source_text,
         raw_items=raw_items,
         target_languages=target_languages,
+        parse_failure=parse_failure,
     )
     stage = _metric_stage()
     payload["Stage"] = stage
@@ -317,6 +352,7 @@ def _base_payload(
     outputs: Sequence[dict],
     reasons: Sequence[str],
     suspect: bool,
+    total_out_chars: int,
 ) -> dict:
     reason_set = set(reasons)
     max_chars = max((item["chars"] for item in outputs), default=0)
@@ -337,6 +373,7 @@ def _base_payload(
         "sourceFlags": ",".join(profile["flags"]),
         "sourceScript": profile["script"],
         "maxOutChars": max_chars,
+        "totalOutChars": total_out_chars,
         "maxRun": max_run,
         "maxRatio": max_ratio,
         "suspect": suspect,
@@ -352,7 +389,7 @@ def _base_payload(
         if not key or key in seen:
             continue
         seen.add(key)
-        text_suspect = bool(item["reasons"]) or REASON_FINISH in reason_set
+        text_suspect = bool(item["reasons"]) or bool(reason_set & _CALL_REASONS)
         payload[f"calls_{key}"] = 1
         payload[f"suspect_{key}"] = 1 if text_suspect else 0
     return payload
@@ -379,7 +416,7 @@ def _source_profile(source: str) -> dict:
         flags.append("short")
     max_run, _, _ = _max_run(visible)
     repetitive = _is_short_repetitive(visible, max_run)
-    if repetitive or max_run >= SOURCE_CHAR_REPEAT_MIN:
+    if _source_has_threshold_repeat(visible, repetitive):
         flags.append("source_repeat")
     kind = _primary_kind(raw, visible, without_urls, flags)
     return {
@@ -431,13 +468,32 @@ def _suspect_run(profile: dict, text: str, source: str) -> tuple[int, bool]:
 def _run_is_suspect(profile: dict, length: int, char: str, is_letter: bool, source: str) -> bool:
     if length <= 1 or not char:
         return False
-    if _max_char_run(source, char) >= SOURCE_CHAR_REPEAT_MIN:
-        return False
     if is_letter:
         limit = LETTER_RUN_MIN_SHORT_SOURCE if profile["repetitive"] else LETTER_RUN_MIN
     else:
         limit = MARK_RUN_MIN_SHORT_SOURCE if profile["repetitive"] else MARK_RUN_MIN
+    # 原文が同じ文字を、訳を壊れたとみなす長さまで重ねているときだけ除外する
+    if _max_char_run(source, char) >= limit:
+        return False
     return length >= limit
+
+
+def _source_has_threshold_repeat(text: str, repetitive: bool) -> bool:
+    """www / 555 / ㅋㅋ のような反復だけを source_repeat にする。"""
+
+    if repetitive:
+        return True
+    for _char, length, is_letter in _iter_runs(text):
+        limit = LETTER_RUN_MIN if is_letter else MARK_RUN_MIN
+        if length >= limit:
+            return True
+    token_reps, token_unit = _max_token_repeat(text)
+    if token_unit and token_reps >= WORD_REPEAT_MIN:
+        return True
+    ngram_reps, ngram_unit = _max_segment_ngram(text)
+    if not ngram_unit:
+        return False
+    return ngram_reps >= NGRAM_MIN_REPEATS and ngram_reps * len(ngram_unit) >= NGRAM_MIN_COVERAGE
 
 
 def _ngram_is_suspect(
@@ -504,22 +560,37 @@ def _has_unexpected_script(lang: str, text: str, source: str) -> bool:
 
 
 def _has_rare_han(text: str, source: str) -> bool:
-    """ja では使わない簡体字。cp932 に無く GB2312 にだけある漢字。"""
+    """ja で、原文に無く cp932 でも JIS X 0213 第1面でも表せない漢字。"""
 
     source_chars = set(source or "")
     for char in text:
         if char in source_chars or _script_of(char) != "han":
             continue
-        if _is_simplified_only(char):
+        if not _is_allowed_japanese_han(char):
             return True
     return False
 
 
-def _is_simplified_only(char: str) -> bool:
-    # cp932 は日本語の JIS X 0208。GB2312 にあって Big5 に無い字は簡体字側
-    if _can_encode(char, "cp932"):
+def _is_allowed_japanese_han(char: str) -> bool:
+    """cp932、JIS X 0213 第1面、人名の𠮷は日本語として残す。第2面の昈は残さない。"""
+
+    if char in _ALLOWED_NON_CP932_HAN or _can_encode(char, "cp932"):
+        return True
+    for encoding in ("euc_jis_2004", "euc_jisx0213"):
+        try:
+            raw = char.encode(encoding)
+        except UnicodeEncodeError:
+            continue
+        # 0x8F で始まるのは第2面。日常の日本語にはほぼ出てこない
+        if not raw.startswith(b"\x8f"):
+            return True
+    return False
+
+
+def _is_token_bloat(tokens: int | None, total_chars: int) -> bool:
+    if tokens is None:
         return False
-    return _can_encode(char, "gb2312") and not _can_encode(char, "big5")
+    return tokens > TOKEN_BLOAT_MIN_TOKENS and tokens > total_chars * TOKEN_BLOAT_CHARS_FACTOR
 
 
 def _can_encode(char: str, encoding: str) -> bool:

@@ -19,6 +19,8 @@ from src.infra.translation_quality import (
     RATIO_LOW,
     RATIO_LOW_MIN_SOURCE,
     SHORT_REPETITIVE_MAX_CHARS,
+    TOKEN_BLOAT_CHARS_FACTOR,
+    TOKEN_BLOAT_MIN_TOKENS,
     WORD_REPEAT_MIN,
     assess_translation_quality,
     emit_translation_quality,
@@ -28,7 +30,15 @@ EN_SOURCE = "Please meet at the station tomorrow morning."
 JA_SOURCE = "明日の朝、駅で会いましょう。"
 
 
-def _assess(source: str, translations: list[dict], *, targets=None, body=None, model="gemini-3.5-flash-lite"):
+def _assess(
+    source: str,
+    translations: list[dict],
+    *,
+    targets=None,
+    body=None,
+    model="gemini-3.5-flash-lite",
+    parse_failure=None,
+):
     langs = targets if targets is not None else [item["lang"] for item in translations]
     return assess_translation_quality(
         model=model,
@@ -36,6 +46,7 @@ def _assess(source: str, translations: list[dict], *, targets=None, body=None, m
         source_text=source,
         raw_items=translations,
         target_languages=langs,
+        parse_failure=parse_failure,
     )
 
 
@@ -107,11 +118,31 @@ def test_simplified_only_han_in_japanese_is_suspect():
 
 
 def test_japanese_kanji_outside_cp932_is_not_rare_han():
-    """JIS X 0213 の嚙や𠮷は cp932 に無いが、簡体字の混入ではない。"""
+    """JIS X 0213 第1面の嚙と、人名の𠮷は cp932 に無くても日本語として残す。"""
 
     report = _assess(EN_SOURCE, [{"lang": "ja", "text": "駅で嚙み合って、𠮷田さんに会う。"}])
     assert "rare_han" not in _reasons(report)
     assert report["suspect"] is False
+
+
+def test_hou_variant_in_japanese_is_rare_han():
+    """明が昈に化けた形。昈は cp932 に無く、JIS X 0213 第2面なので残さない。"""
+
+    broken = "昈日の会議は中止になりました、すみません"
+    report = _assess(
+        "明日のmeetingはcancelになりました、sorry",
+        [{"lang": "ja", "text": broken}],
+    )
+    assert "rare_han" in _reasons(report)
+    assert report["suspect"] is True
+    assert broken not in json.dumps(report, ensure_ascii=False)
+
+    normal = _assess(EN_SOURCE, [{"lang": "ja", "text": "明日の朝、駅で会いましょう。"}])
+    assert "rare_han" not in _reasons(normal)
+    assert normal["suspect"] is False
+
+    copied = _assess("この字は昈です", [{"lang": "ja", "text": "原文と同じ昈を残す"}])
+    assert "rare_han" not in _reasons(copied)
 
 
 def test_a_shorter_letter_run_is_not_hidden_by_punctuation():
@@ -194,6 +225,70 @@ def test_max_tokens_is_suspect_even_when_the_text_looks_fine():
     assert report["suspect"] is True
     assert _reasons(report) == {"finish_not_stop"}
     assert report["reason_finish_not_stop"] == 1
+
+
+def test_source_repeat_flag_is_only_for_real_repetition():
+    """2連続の rr や tt では source_repeat を付けない。短い反復には付ける。"""
+
+    ordinary = [
+        "See you at the station tomorrow morning!",
+        "明日のmeetingはcancelになりました、sorry",
+        "https://example.com/abc",
+    ]
+    for source in ordinary:
+        report = _assess(source, [{"lang": "ja", "text": "明日の会議は中止になりました。"}])
+        assert "source_repeat" not in report["sourceFlags"], (source, report["sourceFlags"])
+        assert source not in json.dumps(report, ensure_ascii=False)
+
+    for source in ("www", "ㅋㅋㅋ", "555", "555555", "笑笑笑"):
+        report = _assess(source, [{"lang": "ja", "text": "了解です"}])
+        assert "source_repeat" in report["sourceFlags"], source
+
+
+def test_token_bloat_when_candidates_dwarf_the_output():
+    """STG は 445 トークンで出力約111文字。正常な呼び出しは 42〜97 トークン。"""
+
+    assert TOKEN_BLOAT_MIN_TOKENS == 200
+    assert TOKEN_BLOAT_CHARS_FACTOR == 3
+    texts = [
+        "明日の会議は中止になりました、すみません",
+        "การประชุมวันพรุ่งนี้ถูกยกเลิกแล้วครับ",
+        "Tomorrow's meeting has been canceled, sorry.",
+    ]
+    bloated = _assess(
+        "明日のmeetingはcancelになりました、sorry",
+        [{"lang": lang, "text": text} for lang, text in zip(("ja", "th", "en"), texts)],
+        body={
+            "candidates": [{"finishReason": "STOP"}],
+            "usageMetadata": {"candidatesTokenCount": 445},
+        },
+    )
+    assert bloated["totalOutChars"] == sum(item["chars"] for item in bloated["outputs"])
+    assert bloated["candidatesTokenCount"] == 445
+    assert bloated["candidatesTokenCount"] > TOKEN_BLOAT_MIN_TOKENS
+    assert bloated["candidatesTokenCount"] > bloated["totalOutChars"] * TOKEN_BLOAT_CHARS_FACTOR
+    assert "token_bloat" in _reasons(bloated)
+
+    normal = _assess(
+        EN_SOURCE,
+        [{"lang": "ja", "text": "明日の朝、駅で会いましょう。"}],
+        body={
+            "candidates": [{"finishReason": "STOP"}],
+            "usageMetadata": {"candidatesTokenCount": 97},
+        },
+    )
+    assert "token_bloat" not in _reasons(normal)
+    assert normal["totalOutChars"] == normal["outputs"][0]["chars"]
+    # 200ちょうど、または出力文字数のちょうど3倍はまだ超えていない
+    borderline = _assess(
+        EN_SOURCE,
+        [{"lang": "en", "text": "x" * 67}],
+        body={
+            "candidates": [{"finishReason": "STOP"}],
+            "usageMetadata": {"candidatesTokenCount": TOKEN_BLOAT_MIN_TOKENS},
+        },
+    )
+    assert "token_bloat" not in _reasons(borderline)
 
 
 def test_source_repetition_is_not_a_broken_translation():
@@ -402,6 +497,8 @@ def test_unparsed_response_still_records_finish_reason(monkeypatch, capsys):
     assert logged["finishReason"] == "MAX_TOKENS"
     assert logged["suspect"] is True
     assert logged["reason_finish_not_stop"] == 1
+    assert logged["reason_parse_failed"] == 1
+    assert "parse_failed" in logged["reasons"]
     assert logged["TranslationQuality"] == 1
     assert logged["candidatesTokenCount"] == 80
     assert logged["outputs"] == []
@@ -423,6 +520,9 @@ def test_response_without_visible_text_still_records_finish_reason(monkeypatch, 
     assert "SENTINEL" not in json.dumps(logged, ensure_ascii=False)
     assert logged["finishReason"] == "SAFETY"
     assert logged["suspect"] is True
+    assert logged["reason_no_visible_text"] == 1
+    assert logged["reason_finish_not_stop"] == 1
+    assert "no_visible_text" in logged["reasons"]
     assert logged["TranslationQuality"] == 1
 
 

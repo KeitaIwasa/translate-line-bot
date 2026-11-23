@@ -385,7 +385,7 @@ aws cloudformation describe-stacks \
 
 ### 翻訳品質ログ
 
-グループ翻訳の Gemini 呼び出しごとに、本文も訳文も含まない JSON を1行出します（`message = "translation_quality"`）。時刻はログの `@timestamp` です。`suspect` が true のとき、`reasons` に `repeat_run` / `ngram_repeat` / `ratio_high` / `ratio_low` / `unexpected_script` / `rare_han` / `emptied_by_cleanup` / `finish_not_stop` が入ります。同じ内容は `KOTORI/Translation` の `TranslationQuality`（呼び出し数）と `TranslationSuspect`（疑い件数）にも出ます。ステージは `Stage` です。
+グループ翻訳の Gemini 呼び出しごとに、本文も訳文も含まない JSON を1行出します（`message = "translation_quality"`）。時刻はログの `@timestamp` です。`suspect` が true のとき、`reasons` に `repeat_run` / `ngram_repeat` / `ratio_high` / `ratio_low` / `unexpected_script` / `rare_han` / `emptied_by_cleanup` / `finish_not_stop` / `parse_failed` / `no_visible_text` / `token_bloat` が入ります。出力合計の文字数は `totalOutChars` です。同じ内容は `KOTORI/Translation` の `TranslationQuality`（呼び出し数）と `TranslationSuspect`（疑い件数）にも出ます。ステージは `Stage` です。
 
 言語ペアは `sourceScript`（原文の文字体系）と `targetLangs`（グループの言語、カンマ区切り）、言語数は `targetCount` です。原文の種類は `sourceKind`（`short` / `emoji_only` / `numeric_only` / `symbol_only` / `url_only` / `mixed` / `list` / `long` / `text` など）と `sourceChars` です。
 
@@ -397,7 +397,7 @@ fields @timestamp, sourceScript, targetLangs, targetCount, sourceKind, suspect, 
 
 ```
 filter message = "translation_quality"
-| stats sum(reason_repeat_run) as repeat_run, sum(reason_ngram_repeat) as ngram_repeat, sum(reason_ratio_high) as ratio_high, sum(reason_ratio_low) as ratio_low, sum(reason_unexpected_script) as unexpected_script, sum(reason_rare_han) as rare_han, sum(reason_emptied_by_cleanup) as emptied_by_cleanup, sum(reason_finish_not_stop) as finish_not_stop
+| stats sum(reason_repeat_run) as repeat_run, sum(reason_ngram_repeat) as ngram_repeat, sum(reason_ratio_high) as ratio_high, sum(reason_ratio_low) as ratio_low, sum(reason_unexpected_script) as unexpected_script, sum(reason_rare_han) as rare_han, sum(reason_emptied_by_cleanup) as emptied_by_cleanup, sum(reason_finish_not_stop) as finish_not_stop, sum(reason_parse_failed) as parse_failed, sum(reason_no_visible_text) as no_visible_text, sum(reason_token_bloat) as token_bloat
 ```
 
 ```

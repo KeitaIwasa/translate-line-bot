@@ -70,7 +70,14 @@ Requirements:
 """.strip()
 
 
-def _emit_quality_safely(model: str, body: object, request: TranslationRequest, raw_items: list) -> None:
+def _emit_quality_safely(
+    model: str,
+    body: object,
+    request: TranslationRequest,
+    raw_items: list,
+    *,
+    parse_failure: str | None = None,
+) -> None:
     """品質計測が落ちても、翻訳の例外と返信はそのまま続ける。"""
 
     try:
@@ -80,6 +87,7 @@ def _emit_quality_safely(model: str, body: object, request: TranslationRequest, 
             source_text=request.message_text,
             raw_items=raw_items,
             target_languages=list(request.candidate_languages),
+            parse_failure=parse_failure,
         )
     except Exception as exc:
         logger.warning(
@@ -177,6 +185,13 @@ class GeminiTranslationAdapter(TranslationPort):
         body = response.json()
         try:
             part_text = _visible_response_text(body)
+        except (KeyError, IndexError, TypeError) as exc:
+            # 本文が無くても finishReason は数える。形式エラー自体はこれまでどおり返す
+            _emit_quality_safely(self._model, body, request, [], parse_failure="no_visible_text")
+            logger.error("Gemini response format invalid | model=%s", self._model)
+            raise ValueError("Unexpected Gemini response format") from exc
+
+        try:
             data = json.loads(part_text)
             translations = data.get("translations", []) if isinstance(data, dict) else []
             allowed = {lang.lower() for lang in request.candidate_languages}
@@ -197,14 +212,12 @@ class GeminiTranslationAdapter(TranslationPort):
                 len(results),
                 [item.lang for item in results],
             )
-        except (KeyError, IndexError, TypeError) as exc:
-            # 本文が無くても finishReason は数える。形式エラー自体はこれまでどおり返す
-            _emit_quality_safely(self._model, body, request, [])
-            logger.error("Gemini response format invalid | model=%s", self._model)
-            raise ValueError("Unexpected Gemini response format") from exc
-        except Exception:
+        except json.JSONDecodeError:
             # 途中までの JSON（MAX_TOKENS など）でも、メタデータだけは記録してから同じ例外を返す
-            _emit_quality_safely(self._model, body, request, [])
+            _emit_quality_safely(self._model, body, request, [], parse_failure="parse_failed")
+            raise
+        except Exception:
+            _emit_quality_safely(self._model, body, request, [], parse_failure="parse_failed")
             raise
         else:
             _emit_quality_safely(
