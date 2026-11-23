@@ -164,6 +164,19 @@ def test_a_shorter_letter_run_is_not_hidden_by_punctuation():
     assert "repeat_run" in _reasons(copied)
 
 
+def test_qualifying_ngram_is_not_hidden_by_a_longer_run():
+    """被覆が最大でも回数が足りない反復は、条件を満たす短い反復を隠さない。"""
+
+    source = "Please meet at the station tomorrow morning."
+    repeated = "テスト" * NGRAM_MIN_REPEATS
+    longer = "abcdefgh" * (NGRAM_MIN_REPEATS - 1)
+    assert "ngram_repeat" in _reasons(_assess(source, [{"lang": "ja", "text": repeated}]))
+    hidden = _assess(source, [{"lang": "ja", "text": repeated + longer}])
+    assert "ngram_repeat" in _reasons(hidden)
+    alone = _assess(source, [{"lang": "ja", "text": longer}])
+    assert "ngram_repeat" not in _reasons(alone)
+
+
 def test_kana_run_and_repeated_word_are_suspect():
     stutter = _assess(EN_SOURCE, [{"lang": "ja", "text": "冈てててててステスト"}])
     assert stutter["suspect"] is True

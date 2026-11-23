@@ -308,15 +308,13 @@ def _assess_output(source: str, profile: dict, lang: str, raw: str) -> tuple[dic
     chars = _content_len(analyzed)
     ratio = _ratio(chars, profile["chars"])
     max_run, run_suspect = _suspect_run(profile, analyzed, source)
-    token_reps, token_unit = _max_token_repeat(analyzed)
-    ngram_reps, ngram_unit = _max_segment_ngram(analyzed)
-    max_ngram = max(token_reps, ngram_reps)
+    ngram_suspect, max_ngram = _suspect_ngram(profile, analyzed, source)
     emptied = _emptied_by_cleanup(source, raw)
     reasons: set[str] = set()
 
     if run_suspect:
         reasons.add(REASON_REPEAT_RUN)
-    if _ngram_is_suspect(profile, token_reps, token_unit, ngram_reps, ngram_unit, source):
+    if ngram_suspect:
         reasons.add(REASON_NGRAM_REPEAT)
     if _ratio_is_high(profile, ratio):
         reasons.add(REASON_RATIO_HIGH)
@@ -487,32 +485,37 @@ def _source_has_threshold_repeat(text: str, repetitive: bool) -> bool:
         limit = LETTER_RUN_MIN if is_letter else MARK_RUN_MIN
         if length >= limit:
             return True
-    token_reps, token_unit = _max_token_repeat(text)
-    if token_unit and token_reps >= WORD_REPEAT_MIN:
-        return True
-    ngram_reps, ngram_unit = _max_segment_ngram(text)
-    if not ngram_unit:
-        return False
-    return ngram_reps >= NGRAM_MIN_REPEATS and ngram_reps * len(ngram_unit) >= NGRAM_MIN_COVERAGE
+    for reps, _token in _iter_token_runs(text):
+        if reps >= WORD_REPEAT_MIN:
+            return True
+    for reps, unit in _iter_segment_ngrams(text):
+        if reps >= NGRAM_MIN_REPEATS and reps * len(unit) >= NGRAM_MIN_COVERAGE:
+            return True
+    return False
 
 
-def _ngram_is_suspect(
-    profile: dict,
-    token_reps: int,
-    token_unit: str,
-    ngram_reps: int,
-    ngram_unit: str,
-    source: str,
-) -> bool:
-    if token_reps >= WORD_REPEAT_MIN and token_unit and not _source_repeats_token(source, token_unit):
-        return True
+def _suspect_ngram(profile: dict, text: str, source: str) -> tuple[bool, int]:
+    """各反復を回数と被覆で見る。被覆が最大の反復だけを残すと、条件を満たす短い反復が隠れる。"""
+
+    suspect = False
+    longest = 0
+    for reps, token in _iter_token_runs(text):
+        if reps > longest:
+            longest = reps
+        if reps >= WORD_REPEAT_MIN and not _source_repeats_token(source, token):
+            suspect = True
     repeats_needed = NGRAM_MIN_REPEATS_SHORT_SOURCE if profile["repetitive"] else NGRAM_MIN_REPEATS
     coverage_needed = NGRAM_MIN_COVERAGE_SHORT_SOURCE if profile["repetitive"] else NGRAM_MIN_COVERAGE
-    if ngram_reps < repeats_needed or not ngram_unit:
-        return False
-    if ngram_reps * len(ngram_unit) < coverage_needed:
-        return False
-    return not _source_repeats_unit(source, ngram_unit)
+    for reps, unit in _iter_segment_ngrams(text):
+        if reps > longest:
+            longest = reps
+        if (
+            reps >= repeats_needed
+            and reps * len(unit) >= coverage_needed
+            and not _source_repeats_unit(source, unit)
+        ):
+            suspect = True
+    return suspect, longest
 
 
 def _ratio_is_high(profile: dict, ratio: float | None) -> bool:
@@ -798,37 +801,22 @@ def _max_char_run(text: str, char: str) -> int:
     return best
 
 
-def _max_token_repeat(text: str) -> tuple[int, str]:
+def _iter_token_runs(text: str):
     tokens = [token.casefold() for token in text.split() if token]
-    best = 1 if tokens else 0
-    unit = ""
     index = 0
     while index < len(tokens):
         end = index + 1
         while end < len(tokens) and tokens[end] == tokens[index]:
             end += 1
-        reps = end - index
-        if reps > best:
-            best = reps
-            unit = tokens[index]
+        yield end - index, tokens[index]
         index = end
-    return best, unit
 
 
-def _max_segment_ngram(text: str) -> tuple[int, str]:
-    best_reps = 0
-    best_unit = ""
-    best_cov = 0
+def _iter_segment_ngrams(text: str):
     segments = text.split() or [text]
     for segment in segments:
         for window in _scan_windows(segment):
-            reps, unit = _max_ngram_repeats(window)
-            coverage = reps * len(unit)
-            if coverage > best_cov:
-                best_cov = coverage
-                best_reps = reps
-                best_unit = unit
-    return best_reps, best_unit
+            yield from _iter_ngram_runs(window)
 
 
 def _scan_windows(text: str) -> Iterable[str]:
@@ -839,13 +827,12 @@ def _scan_windows(text: str) -> Iterable[str]:
     yield text[-NGRAM_SCAN_CHARS:]
 
 
-def _max_ngram_repeats(segment: str) -> tuple[int, str]:
+def _iter_ngram_runs(segment: str):
+    """連続する n-gram を、被覆の大小で落とさずに順に返す。"""
+
     length = len(segment)
-    best_reps = 0
-    best_unit = ""
-    best_cov = 0
     if length < NGRAM_MIN_COVERAGE:
-        return 0, ""
+        return
     max_unit = min(NGRAM_MAX_UNIT, length // 2)
     for unit in range(2, max_unit + 1):
         index = 0
@@ -860,13 +847,8 @@ def _max_ngram_repeats(segment: str) -> tuple[int, str]:
             while cursor + unit <= length and segment[cursor : cursor + unit] == piece:
                 reps += 1
                 cursor += unit
-            coverage = reps * unit
-            if coverage > best_cov:
-                best_cov = coverage
-                best_reps = reps
-                best_unit = piece
+            yield reps, piece
             index = cursor
-    return best_reps, best_unit
 
 
 def _source_repeats_token(source: str, token: str) -> bool:
