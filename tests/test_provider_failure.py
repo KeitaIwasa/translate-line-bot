@@ -7,10 +7,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import psycopg
 import pytest
 import requests
+from psycopg import errors
 
 from src.app.handlers.message_handler import (
+    DATABASE_RETRY_NOTICE,
     RATE_LIMIT_MESSAGE,
     MessageHandler,
     _last_rate_limit_message,
@@ -373,6 +376,84 @@ def test_non_retryable_outage_stays_quiet(capsys):
     assert payloads[0]["error_class"] == "non_retryable"
     assert payloads[0]["status"] == 402
     assert payloads[0]["dependency"] == "gemini"
+
+
+def _message_event(**overrides) -> models.MessageEvent:
+    values = {
+        "event_type": "message",
+        "reply_token": "reply",
+        "group_id": "G",
+        "user_id": "U",
+        "sender_type": "group",
+        "timestamp": 1_700_000_000_000,
+        "text": "hello",
+    }
+    values.update(overrides)
+    return models.MessageEvent(**values)
+
+
+def test_database_connection_failure_asks_the_user_to_resend(capsys):
+    handler = MessageHandler.__new__(MessageHandler)
+    event = _message_event()
+    handler._begin_group_message = lambda _event: (_ for _ in ()).throw(
+        psycopg.OperationalError("consuming input failed: SSL connection has been closed unexpectedly")
+    )
+    replies: list[str] = []
+
+    def reply(_event, text, **_kwargs):
+        replies.append(text)
+        return True
+
+    handler._reply_text = reply
+    handler._record_message = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("db write"))
+
+    handler.handle(event)
+
+    assert replies == [DATABASE_RETRY_NOTICE]
+    payloads = _failures(capsys.readouterr().out)
+    assert len(payloads) == 1
+    assert payloads[0]["dependency"] == "neon"
+    assert payloads[0]["error_class"] == "transient"
+    assert payloads[0]["retryable"] is True
+
+
+def test_database_notice_is_skipped_after_a_reply_was_sent(capsys):
+    handler = MessageHandler.__new__(MessageHandler)
+    event = _message_event()
+    start = SimpleNamespace(legacy=True, sender_name="A", messages_future=None)
+    handler._begin_group_message = lambda _event: start
+
+    def boom(_event, _start):
+        handler._replied_token = event.reply_token
+        raise psycopg.OperationalError("SSL connection has been closed unexpectedly")
+
+    handler._process_group_message = boom
+    replies: list[str] = []
+    handler._reply_text = lambda *_args, **_kwargs: replies.append("extra")
+    handler._drain_optional_future = lambda *_args, **_kwargs: None
+    handler._record_message = lambda *_args, **_kwargs: None
+
+    handler.handle(event)
+
+    assert replies == []
+    assert len(_failures(capsys.readouterr().out)) == 1
+
+
+def test_query_cancel_stays_quiet(capsys):
+    handler = MessageHandler.__new__(MessageHandler)
+    event = _message_event()
+    start = SimpleNamespace(legacy=True, sender_name="A", messages_future=None)
+    handler._begin_group_message = lambda _event: start
+    handler._process_group_message = lambda _event, _start: (_ for _ in ()).throw(errors.QueryCanceled("cancel"))
+    replies: list[str] = []
+    handler._reply_text = lambda *_args, **_kwargs: replies.append("reply")
+    handler._drain_optional_future = lambda *_args, **_kwargs: None
+    handler._record_message = lambda *_args, **_kwargs: None
+
+    handler.handle(event)
+
+    assert replies == []
+    assert _failures(capsys.readouterr().out)
 
 
 def test_rate_limit_still_notifies_once_per_group(monkeypatch):
