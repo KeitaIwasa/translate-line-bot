@@ -70,6 +70,25 @@ Requirements:
 """.strip()
 
 
+def _emit_quality_safely(model: str, body: object, request: TranslationRequest, raw_items: list) -> None:
+    """品質計測が落ちても、翻訳の例外と返信はそのまま続ける。"""
+
+    try:
+        emit_translation_quality(
+            model=model,
+            response_body=body if isinstance(body, dict) else None,
+            source_text=request.message_text,
+            raw_items=raw_items,
+            target_languages=list(request.candidate_languages),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Translation quality signal failed | model=%s exc=%s",
+            model,
+            type(exc).__name__,
+        )
+
+
 def _visible_response_text(body: dict) -> str:
     """思考パートを飛ばし、翻訳本文のパートを返す。"""
 
@@ -158,42 +177,41 @@ class GeminiTranslationAdapter(TranslationPort):
         body = response.json()
         try:
             part_text = _visible_response_text(body)
+            data = json.loads(part_text)
+            translations = data.get("translations", []) if isinstance(data, dict) else []
+            allowed = {lang.lower() for lang in request.candidate_languages}
+            results = [
+                TranslationResult(
+                    lang=item["lang"],
+                    text=strip_spurious_boundary_cjk(request.message_text, item["text"]),
+                )
+                for item in translations
+                if isinstance(item, dict)
+                and item.get("lang")
+                and item.get("text")
+                and item["lang"].lower() in allowed
+            ]
+            logger.info(
+                "Gemini translations parsed | model=%s count=%s langs=%s",
+                self._model,
+                len(results),
+                [item.lang for item in results],
+            )
         except (KeyError, IndexError, TypeError) as exc:
+            # 本文が無くても finishReason は数える。形式エラー自体はこれまでどおり返す
+            _emit_quality_safely(self._model, body, request, [])
             logger.error("Gemini response format invalid | model=%s", self._model)
             raise ValueError("Unexpected Gemini response format") from exc
-
-        data = json.loads(part_text)
-
-        translations = data.get("translations", [])
-        allowed = {lang.lower() for lang in request.candidate_languages}
-        results = [
-            TranslationResult(
-                lang=item["lang"],
-                text=strip_spurious_boundary_cjk(request.message_text, item["text"]),
-            )
-            for item in translations
-            if item.get("lang") and item.get("text") and item["lang"].lower() in allowed
-        ]
-        logger.info(
-            "Gemini translations parsed | model=%s count=%s langs=%s",
-            self._model,
-            len(results),
-            [item.lang for item in results],
-        )
-        # 品質計測が落ちても、訳そのものと返信は続ける
-        try:
-            emit_translation_quality(
-                model=self._model,
-                response_body=body if isinstance(body, dict) else None,
-                source_text=request.message_text,
-                raw_items=translations if isinstance(translations, list) else [],
-                target_languages=list(request.candidate_languages),
-            )
-        except Exception as exc:
-            logger.warning(
-                "Translation quality signal failed | model=%s exc=%s",
+        except Exception:
+            # 途中までの JSON（MAX_TOKENS など）でも、メタデータだけは記録してから同じ例外を返す
+            _emit_quality_safely(self._model, body, request, [])
+            raise
+        else:
+            _emit_quality_safely(
                 self._model,
-                type(exc).__name__,
+                body,
+                request,
+                translations if isinstance(translations, list) else [],
             )
         return results
 

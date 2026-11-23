@@ -272,14 +272,14 @@ def _assess_output(source: str, profile: dict, lang: str, raw: str) -> tuple[dic
     analyzed = _strip_controls(raw)
     chars = _content_len(analyzed)
     ratio = _ratio(chars, profile["chars"])
-    max_run, run_char, run_is_letter = _max_run(analyzed)
+    max_run, run_suspect = _suspect_run(profile, analyzed, source)
     token_reps, token_unit = _max_token_repeat(analyzed)
     ngram_reps, ngram_unit = _max_segment_ngram(analyzed)
     max_ngram = max(token_reps, ngram_reps)
     emptied = _emptied_by_cleanup(source, raw)
     reasons: set[str] = set()
 
-    if _run_is_suspect(profile, max_run, run_char, run_is_letter, source):
+    if run_suspect:
         reasons.add(REASON_REPEAT_RUN)
     if _ngram_is_suspect(profile, token_reps, token_unit, ngram_reps, ngram_unit, source):
         reasons.add(REASON_NGRAM_REPEAT)
@@ -413,6 +413,19 @@ def _primary_kind(raw: str, visible: str, without_urls: str, flags: Sequence[str
     if "short" in flags:
         return "short"
     return "text"
+
+
+def _suspect_run(profile: dict, text: str, source: str) -> tuple[int, bool]:
+    """文字と記号は別のしきい値で、各ランを見る。最長が記号でも短い仮名ランを隠さない。"""
+
+    longest = 0
+    suspect = False
+    for char, length, is_letter in _iter_runs(text):
+        if length > longest:
+            longest = length
+        if not suspect and _run_is_suspect(profile, length, char, is_letter, source):
+            suspect = True
+    return longest, suspect
 
 
 def _run_is_suspect(profile: dict, length: int, char: str, is_letter: bool, source: str) -> bool:
@@ -668,26 +681,36 @@ def _is_emoji(char: str) -> bool:
     return unicodedata.category(char) == "So" and code >= 0x2600
 
 
-def _max_run(text: str) -> tuple[int, str, bool]:
-    best = 0
-    best_char = ""
-    best_letter = False
+def _iter_runs(text: str):
     current = ""
     length = 0
     for char in text:
         if char.isspace() or unicodedata.category(char) in {"Cf", "Cc"}:
+            if length:
+                yield current, length, _is_letter(current)
             current = ""
             length = 0
             continue
         if char == current:
             length += 1
-        else:
-            current = char
-            length = 1
+            continue
+        if length:
+            yield current, length, _is_letter(current)
+        current = char
+        length = 1
+    if length:
+        yield current, length, _is_letter(current)
+
+
+def _max_run(text: str) -> tuple[int, str, bool]:
+    best = 0
+    best_char = ""
+    best_letter = False
+    for char, length, is_letter in _iter_runs(text):
         if length > best:
             best = length
             best_char = char
-            best_letter = _is_letter(char)
+            best_letter = is_letter
     return best, best_char, best_letter
 
 

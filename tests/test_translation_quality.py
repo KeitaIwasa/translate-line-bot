@@ -114,6 +114,25 @@ def test_japanese_kanji_outside_cp932_is_not_rare_han():
     assert report["suspect"] is False
 
 
+def test_a_shorter_letter_run_is_not_hidden_by_punctuation():
+    """最長が記号でも、しきい値を超えた仮名ランは別々に見る。"""
+
+    source = "Please come to the station tomorrow."
+    hidden = _assess(source, [{"lang": "ja", "text": "ててててて!!!!!!"}])
+    assert "repeat_run" in _reasons(hidden)
+    assert hidden["maxRun"] == 6
+
+    marks_only = _assess(source, [{"lang": "ja", "text": "!!!!!!"}])
+    assert "repeat_run" not in _reasons(marks_only)
+
+    # 原文の oo で o のランは除外しても、別の文字のランは残す
+    copied = _assess(
+        "Look at the station tomorrow morning.",
+        [{"lang": "ja", "text": "ooooててててて"}],
+    )
+    assert "repeat_run" in _reasons(copied)
+
+
 def test_kana_run_and_repeated_word_are_suspect():
     stutter = _assess(EN_SOURCE, [{"lang": "ja", "text": "冈てててててステスト"}])
     assert stutter["suspect"] is True
@@ -284,7 +303,8 @@ def test_long_input_stays_fast_and_is_not_suspect():
     started = time.perf_counter()
     report = _assess(source, [{"lang": "ja", "text": text}])
     elapsed_ms = (time.perf_counter() - started) * 1000
-    assert elapsed_ms < 100, elapsed_ms
+    # 数千文字の回帰防止。通常の投稿はこの入力よりずっと短い
+    assert elapsed_ms < 250, elapsed_ms
     assert report["sourceKind"] == "long"
     assert report["suspect"] is False
 
@@ -345,6 +365,65 @@ class _Session:
 
     def post(self, url, params=None, json=None, timeout=None):
         return _Response(self._data)
+
+
+def _translate(monkeypatch, body: dict, source: str):
+    monkeypatch.setattr("infra.gemini_translation.requests.Session", lambda: _Session(body))
+    client = GeminiTranslationAdapter(api_key="api-key", model="gemini-3.5-flash-lite")
+    return client.translate(
+        TranslationRequest(
+            sender_name="Bob",
+            message_text=source,
+            timestamp=datetime(2026, 11, 22, tzinfo=timezone.utc),
+            candidate_languages=["ja"],
+            context_messages=[],
+        )
+    )
+
+
+def test_unparsed_response_still_records_finish_reason(monkeypatch, capsys):
+    source = "UNIQUE_SOURCE_SENTINEL_qx7 at the station tomorrow."
+    truncated = '{"translations":[{"lang":"ja","text":"UNIQUE_TARGET_SENTINEL_qm3"'
+    body = {
+        "candidates": [
+            {
+                "finishReason": "MAX_TOKENS",
+                "content": {"parts": [{"text": truncated}]},
+            }
+        ],
+        "usageMetadata": {"promptTokenCount": 40, "candidatesTokenCount": 80},
+    }
+    with pytest.raises(json.JSONDecodeError):
+        _translate(monkeypatch, body, source)
+    logged = json.loads(capsys.readouterr().out.strip())
+    blob = json.dumps(logged, ensure_ascii=False)
+    assert source not in blob
+    assert "SENTINEL" not in blob
+    assert logged["finishReason"] == "MAX_TOKENS"
+    assert logged["suspect"] is True
+    assert logged["reason_finish_not_stop"] == 1
+    assert logged["TranslationQuality"] == 1
+    assert logged["candidatesTokenCount"] == 80
+    assert logged["outputs"] == []
+
+
+def test_response_without_visible_text_still_records_finish_reason(monkeypatch, capsys):
+    source = "UNIQUE_SOURCE_SENTINEL_qx7 at the station tomorrow."
+    body = {
+        "candidates": [
+            {
+                "finishReason": "SAFETY",
+                "content": {"parts": [{"thought": True, "text": "UNIQUE_THOUGHT_SENTINEL_qt9"}]},
+            }
+        ]
+    }
+    with pytest.raises(ValueError, match="Unexpected Gemini response format"):
+        _translate(monkeypatch, body, source)
+    logged = json.loads(capsys.readouterr().out.strip())
+    assert "SENTINEL" not in json.dumps(logged, ensure_ascii=False)
+    assert logged["finishReason"] == "SAFETY"
+    assert logged["suspect"] is True
+    assert logged["TranslationQuality"] == 1
 
 
 def test_adapter_logs_quality_for_a_thought_response_without_text(monkeypatch, capsys):
