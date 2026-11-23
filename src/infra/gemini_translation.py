@@ -14,6 +14,7 @@ from src.domain.ports import TranslationPort
 from src.infra.gemini_errors import GeminiRateLimitError
 from src.infra.gemini_generation_config import build_generation_config
 from src.infra.provider_failure import post_gemini
+from src.infra.translation_quality import emit_translation_quality
 from src.infra.translation_schema import TRANSLATION_SCHEMA
 from src.presentation.reply_formatter import strip_spurious_boundary_cjk
 
@@ -179,6 +180,21 @@ class GeminiTranslationAdapter(TranslationPort):
             len(results),
             [item.lang for item in results],
         )
+        # 品質計測が落ちても、訳そのものと返信は続ける
+        try:
+            emit_translation_quality(
+                model=self._model,
+                response_body=body if isinstance(body, dict) else None,
+                source_text=request.message_text,
+                raw_items=translations if isinstance(translations, list) else [],
+                target_languages=list(request.candidate_languages),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Translation quality signal failed | model=%s exc=%s",
+                self._model,
+                type(exc).__name__,
+            )
         return results
 
     def translate_ui_strings(self, texts: Sequence[str], target_language: str) -> List[str]:
