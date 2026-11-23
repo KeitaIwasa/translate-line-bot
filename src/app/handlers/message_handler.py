@@ -36,6 +36,16 @@ from ...infra.provider_failure import (
     is_database_connection_failure,
     record_provider_failure,
 )
+from ...presentation.free_limit_notice import (
+    FREE_LIMIT_BUTTON_LABEL,
+    FREE_LIMIT_HEADLINE,
+    accept_notice_translation,
+    build_free_limit_flex_message,
+    free_limit_body_text,
+    static_notice_body,
+    static_notice_button,
+    static_notice_headline,
+)
 from ...presentation.list_layout import normalize_inline_lists
 from ...presentation.reply_formatter import (
     MAX_REPLY_LENGTH,
@@ -1857,9 +1867,31 @@ class MessageHandler:
         period_key: Optional[str] = None,
         period_end: Optional[datetime] = None,
     ) -> None:
-        """上限到達/超過時の統一通知。言語は登録言語だけ。Dio作成"""
+        """上限到達/超過時の統一通知。言語は登録言語だけ。Dio作成
+
+        無料枠だけ Flex で送る。組み立てや送信に失敗したときは、同じ固定訳のテキストに戻す。
+        テキストも失敗した例外は呼び出し側へ返し、通知済みフラグを戻せるようにする。
+        Standard / Pro の文面はこの経路でもテキストのまま。
+        """
+
+        if normalize_plan_key(plan_key) == FREE_PLAN:
+            if self._reply_free_limit_flex(
+                event,
+                limit,
+                period_key=period_key,
+                period_end=period_end,
+            ):
+                return
+            self._reply_free_limit_text(
+                event,
+                limit,
+                period_key=period_key,
+                period_end=period_end,
+            )
+            return
+
         notice_text, url = self._build_limit_reached_notice_text(
-            event.group_id,
+            event.group_id or "",
             plan_key,
             limit,
             period_key=period_key,
@@ -1870,6 +1902,165 @@ class MessageHandler:
             # URL は左右書字方向混在時に誤判定されやすいため別メッセージで送る
             messages.append({"type": "text", "text": url})
         self._reply_messages(event, messages)
+
+    def _reply_free_limit_flex(
+        self,
+        event: models.MessageEvent,
+        limit: int,
+        *,
+        period_key: Optional[str],
+        period_end: Optional[datetime],
+    ) -> bool:
+        """無料枠の Flex を送れたら True。送れないときは False でテキストへ戻す。"""
+
+        try:
+            flex = self._build_free_limit_flex_message(
+                event.group_id or "",
+                limit,
+                period_key=period_key,
+                period_end=period_end,
+            )
+        except Exception:  # pylint: disable=broad-except
+            logger.warning(
+                "Failed to build free limit flex notice",
+                extra={"group_id": event.group_id},
+                exc_info=True,
+            )
+            return False
+        if flex is None:
+            return False
+        try:
+            sent = self._reply_messages(event, [flex])
+        except Exception:  # pylint: disable=broad-except
+            logger.warning(
+                "Free limit flex notice failed; falling back to text",
+                extra={"group_id": event.group_id},
+                exc_info=True,
+            )
+            return False
+        return bool(sent)
+
+    def _reply_free_limit_text(
+        self,
+        event: models.MessageEvent,
+        limit: int,
+        *,
+        period_key: Optional[str],
+        period_end: Optional[datetime],
+    ) -> None:
+        """Flex を送れないときの無料枠通知。文言は Flex と同じ固定訳。"""
+
+        languages = self._notice_languages(event.group_id or "")
+        reset_date = self._resolve_quota_reset_date(period_key=period_key, period_end=period_end)
+        headline, bodies, _button = self._free_limit_copy(languages, limit, reset_date)
+        lines = [headline, *bodies]
+        url = self._subscription_service.create_checkout_url(event.group_id or "")
+        if not url:
+            lines.append("(Unable to generate purchase link at this time, please contact administrator.)")
+        messages = [{"type": "text", "text": "\n\n".join(lines)[:5000]}]
+        if url:
+            messages.append({"type": "text", "text": url})
+        self._reply_messages(event, messages)
+
+    def _build_free_limit_flex_message(
+        self,
+        group_id: str,
+        limit: int,
+        *,
+        period_key: Optional[str],
+        period_end: Optional[datetime],
+    ) -> dict | None:
+        """無料枠通知の Flex。購入 URL が無いときは None。"""
+
+        url = self._subscription_service.create_checkout_url(group_id)
+        if not url:
+            return None
+        languages = self._notice_languages(group_id)
+        reset_date = self._resolve_quota_reset_date(period_key=period_key, period_end=period_end)
+        headline, bodies, button = self._free_limit_copy(languages, limit, reset_date)
+        return build_free_limit_flex_message(
+            headline=headline,
+            bodies=bodies,
+            button_label=button,
+            url=url,
+        )
+
+    def _free_limit_copy(
+        self,
+        languages: Sequence[str],
+        limit: int,
+        reset_date: Optional[str],
+    ) -> tuple[str, List[str], str]:
+        """見出しとボタンは先頭言語。本文は言語ごと。固定訳を優先する。"""
+
+        english_body = free_limit_body_text(limit, reset_date)
+        body_targets = [lang for lang in languages if static_notice_body(lang, limit, reset_date) is None]
+        translated_bodies = self._translate_notice_map(english_body, body_targets)
+        bodies = [
+            self._notice_line(
+                lang,
+                english_body,
+                static_notice_body(lang, limit, reset_date),
+                translated_bodies,
+            )
+            for lang in languages
+        ]
+        first = languages[0]
+        headline = self._notice_line(
+            first,
+            FREE_LIMIT_HEADLINE,
+            static_notice_headline(first),
+            self._translate_notice_map(
+                FREE_LIMIT_HEADLINE,
+                [] if static_notice_headline(first) else [first],
+            ),
+        )
+        button = self._notice_line(
+            first,
+            FREE_LIMIT_BUTTON_LABEL,
+            static_notice_button(first),
+            self._translate_notice_map(
+                FREE_LIMIT_BUTTON_LABEL,
+                [] if static_notice_button(first) else [first],
+            ),
+        )
+        return headline, bodies, button
+
+    def _notice_line(
+        self,
+        language: str,
+        english: str,
+        static_text: Optional[str],
+        translated: Dict[str, str],
+    ) -> str:
+        if static_text:
+            return static_text
+        return accept_notice_translation(english, translated.get((language or "").lower(), ""), language)
+
+    def _translate_notice_map(self, base_text: str, languages: Sequence[str]) -> Dict[str, str]:
+        """固定訳が無い言語だけ翻訳する。失敗した言語は空のまま英語へ戻す。"""
+
+        targets = [lang for lang in languages if (lang or "").lower() not in {"", "en"} and not (lang or "").lower().startswith("en-")]
+        if not targets:
+            return {}
+        try:
+            translations = self._invoke_interface_translation_with_retry(base_text, targets) or []
+        except Exception:  # pylint: disable=broad-except
+            logger.warning("Limit notice translation failed", exc_info=True)
+            return {}
+        text_by_lang: Dict[str, str] = {}
+        for item in translations:
+            lowered = (getattr(item, "lang", "") or "").lower()
+            cleaned = strip_source_echo(base_text, getattr(item, "text", "") or "").strip()
+            if lowered and cleaned and lowered not in text_by_lang:
+                text_by_lang[lowered] = cleaned
+        return text_by_lang
+
+    def _notice_languages(self, group_id: str) -> List[str]:
+        languages = self._limit_language_codes(self._repo.fetch_group_languages(group_id))
+        if not languages:
+            return ["en"]
+        return languages
 
     def _build_limit_reached_notice_text(
         self,
