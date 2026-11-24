@@ -111,12 +111,10 @@ from ...domain.services.plan_policy import (
 from ...domain.services.quota_pause import (
     BILLING_PAUSE,
     QUOTA_PAUSE,
-    NoticeClaim,
     PauseState,
     effective_plan_key,
     monthly_limit_for_plan,
     reevaluate_quota_pause,
-    reset_pause_for_claim,
 )
 from ...domain.services.quota_notice import (
     SEE_PLANS_BUTTON_TEXT,
@@ -126,7 +124,6 @@ from ...domain.services.quota_notice import (
     build_free_limit_notice,
     build_plan_link_message,
     build_pro_limit_notice,
-    build_quota_reset_notice,
     build_resume_blocked_short,
     build_standard_limit_notice,
     missing_plan_link_sentence,
@@ -135,9 +132,6 @@ from ...domain.services.quota_notice import (
 from .postback_handler import _build_cancel_message, _build_completion_message
 
 logger = logging.getLogger(__name__)
-
-# claim メソッドが無いリポジトリ向け。周期につき1回。
-_LOCAL_RESET_CLAIMS: set[tuple] = set()
 
 # 案内本文に付ける双方向制御。ボタンの文字数には含めない。
 _BIDI_CONTROLS = dict.fromkeys(map(ord, "\u200e\u200f\u202a\u202b\u202c\u202d\u202e"))
@@ -148,14 +142,12 @@ def _strip_bidi_controls(text: str) -> str:
 
 
 class QuotaResetStatus(Enum):
-    """無料枠の停止を解除しようとした結果。"""
+    """無料枠の停止を解除しようとした結果。案内は出さない。"""
 
     # 上限停止ではない。または、まだ上限内に戻っていない。
     NOT_PAUSED = "not_paused"
-    # 翻訳を再開した。notice が空なら、この周期の案内はもう送っている。
-    LIFTED_WITH_NOTICE = "lifted_with_notice"
-    # 翻訳は再開したが、案内は作れなかった。claim は空のまま次の投稿でやり直す。
-    NOTICE_FAILED = "notice_failed"
+    # 今周期は上限未満。送信が成功した commit で翻訳を戻す。
+    LIFTED = "lifted"
 
 
 @dataclass(frozen=True)
@@ -164,8 +156,6 @@ class _QuotaResetLift:
 
     status: QuotaResetStatus
     period_key: str = ""
-    notice: str = ""
-    claimed: bool = False
 
 
 def _not_paused() -> _QuotaResetLift:
@@ -173,10 +163,9 @@ def _not_paused() -> _QuotaResetLift:
 
 
 class _QuotaResetDelivery:
-    """リセット案内を送る区間。commit するまで停止理由は残す。
+    """quota 停止を外す区間。commit するまで理由は残す。
 
-    with を抜けるときに commit されていなければ、claim を未送信へ戻し quota 停止に戻す。
-    翻訳・案内の生成・LINE 送信のどれが落ちても、次の投稿でやり直せる。
+    翻訳や LINE 送信が落ちたら解除しない。月次の「枠が戻った」案内は出さない。
     """
 
     def __init__(self, handler: MessageHandler, event: models.MessageEvent, runtime=None) -> None:
@@ -193,8 +182,6 @@ class _QuotaResetDelivery:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
-        if not self._committed:
-            self._handler._rollback_quota_reset(self._group_id, self.lift)
         return False
 
 
@@ -977,8 +964,7 @@ class MessageHandler:
                 if source == "enroll":
                     return False
                 raise
-        # 言語の追加・削除・置換は通す。上限停止の解除はリセット案内とセットにする。
-        # 承諾文の翻訳が落ちても、claim 済みの案内を未送信に戻す。
+        # 言語の追加・削除・置換は通す。上限停止の解除は送信成功のあとだけ。案内は出さない。
         with _QuotaResetDelivery(self, event) as delivery:
             lift = delivery.lift
             if update.enable_translation is True:
@@ -1013,12 +999,7 @@ class MessageHandler:
                         command_trace=command_trace,
                     )
                 ack = f"{ack}\n{notice}"
-            self._reply_with_optional_quota_reset(
-                event,
-                ack,
-                lift,
-                command_trace=command_trace,
-            )
+            self._reply_text(event, ack, command_trace=command_trace)
             delivery.commit()
         return True
 
@@ -1361,12 +1342,7 @@ class MessageHandler:
                                 instruction_lang,
                                 command_trace=trace,
                             )
-                            handled = self._reply_with_optional_quota_reset(
-                                event,
-                                ack,
-                                lift,
-                                command_trace=trace,
-                            )
+                            handled = self._reply_text(event, ack, command_trace=trace)
                             delivery.commit()
                 elif action == "subscription_menu":
                     handled = self._handle_subscription_menu(
@@ -1968,7 +1944,7 @@ class MessageHandler:
             group_languages=self._group_languages_for_reply(event.group_id),
         )
         fallback = self._build_unknown_response(detected, command_trace=command_trace)
-        # unknown は通常、翻訳をオンに戻す。上限停止の解除はリセット案内とセットにする。
+        # unknown は通常、翻訳をオンに戻す。上限停止の解除は送信成功のあとだけ。
         with _QuotaResetDelivery(self, event) as delivery:
             lift = delivery.lift
             if self._should_enable_after_reset_attempt(event.group_id or "", lift):
@@ -1977,7 +1953,6 @@ class MessageHandler:
                 event,
                 unknown_command_card(fallback, lang=detected, bot_name=self._bot_mention_name),
                 command_trace=command_trace,
-                extra_texts=(self._reset_notice_to_send(lift),),
             )
             delivery.commit()
         return True
@@ -2012,8 +1987,7 @@ class MessageHandler:
             if self._attempt_language_enrollment(event):
                 return True
 
-        # 案内の作り直しは、すでに翻訳を再開したあとの次の投稿でも行う。
-        # 停止理由が quota のときだけ claim する。翻訳が落ちたら with が未送信へ戻す。
+        # 停止理由が quota で今周期が上限未満なら、送信成功のあとで翻訳を戻す。
         owes_reset = candidate_languages and (
             not runtime.translation_enabled or runtime.translation_paused_reason == "quota"
         )
@@ -2052,7 +2026,7 @@ class MessageHandler:
             self._log_translation_stage("after_translation_run", started, event.group_id)
 
             if self._handle_blocked_translation_flow(event, flow, period_end=runtime.period_end):
-                # リセット案内を同梱できていない。claim は戻して次の投稿でやり直す。
+                # 上限で止めた。quota 停止の解除はしない。
                 return True
 
             if flow.reply_text:
@@ -2064,14 +2038,7 @@ class MessageHandler:
                     limit=limit,
                     plan_key=plan_key,
                     period_end=runtime.period_end,
-                    quota_reset=quota_reset,
                 )
-                if delivery is not None:
-                    delivery.commit()
-                self._maybe_upsert_deferred_display_name(event, deferred_display_name)
-                self._log_translation_stage("after_line_reply", started, event.group_id)
-            elif self._reset_notice_to_send(quota_reset):
-                self._reply_text(event, quota_reset.notice)
                 if delivery is not None:
                     delivery.commit()
                 self._maybe_upsert_deferred_display_name(event, deferred_display_name)
@@ -2084,9 +2051,6 @@ class MessageHandler:
                     plan_key,
                     flow.decision.period_key,
                 )
-                # 案内を載せていない。claim 済みなら未送信へ戻す。
-                if delivery is not None and not quota_reset.claimed:
-                    delivery.commit()
 
         return True
 
@@ -2095,11 +2059,10 @@ class MessageHandler:
         event: models.MessageEvent,
         runtime: models.TranslationRuntimeState | None = None,
     ) -> _QuotaResetLift:
-        """無料枠の quota 停止を、今周期が上限未満なら解除する準備をする。
+        """quota 停止を、今周期が上限未満なら解除する準備をする。案内は出さない。
 
         通常投稿・言語設定・再開・unknown はここだけを通す。
-        停止理由は案内の生成と claim より先に残す。通知済みと理由の消去は、
-        送信が成功したあとの commit だけが行う。
+        理由を消すのは、送信が成功したあとの commit だけ。
         """
 
         group_id = event.group_id or ""
@@ -2109,78 +2072,24 @@ class MessageHandler:
             runtime = self._fetch_command_runtime_state(group_id)
         if runtime.translation_paused_reason != "quota":
             return _not_paused()
-        plan_key, period_key, limit, usage = self._quota_period_for_runtime(runtime, group_id)
+        _plan_key, period_key, limit, usage = self._quota_period_for_runtime(runtime, group_id)
         if not reevaluate_quota_pause(
             paused_reason=runtime.translation_paused_reason,
             usage=usage,
             limit=limit,
         ):
             return _not_paused()
-        if normalize_plan_key(plan_key) != FREE_PLAN:
-            # 有料化などで上限未満に戻った。無料枠のリセット案内は出さない。
-            self._apply_pause_state(group_id, PauseState(enabled=True, reason=None))
-            logger.info(
-                "Lifted quota pause after eligibility change | group=%s plan=%s usage=%s limit=%s",
-                group_id,
-                plan_key,
-                usage,
-                limit,
-            )
-            return _QuotaResetLift(
-                status=QuotaResetStatus.LIFTED_WITH_NOTICE,
-                period_key=period_key,
-                notice="",
-                claimed=False,
-            )
-
-        # 生成も claim も失敗しうる。先に未送信の quota 停止を確定する。
-        self._apply_pause_state(group_id, PauseState(enabled=False, reason=QUOTA_PAUSE))
-        try:
-            notice = self._quota_reset_notice_text(
-                group_id,
-                period_key=period_key,
-                period_end=runtime.period_end,
-            )
-        except Exception:
-            # Gemini が落ちても翻訳は止めたままにしない。案内だけ次の投稿でやり直す。
-            logger.warning("Failed to build quota reset notice", extra={"group_id": group_id})
-            self._apply_pause_state(group_id, reset_pause_for_claim(NoticeClaim.FAILED))
-            return _QuotaResetLift(status=QuotaResetStatus.NOTICE_FAILED, period_key=period_key)
-
-        claim = self._claim_quota_reset_notice(group_id, period_key)
-        self._apply_pause_state(group_id, reset_pause_for_claim(claim))
-        if claim is NoticeClaim.FAILED:
-            # 取得済みではない。理由は残し、案内は次の投稿でやり直す。
-            logger.warning("Failed to claim quota reset notice", extra={"group_id": group_id})
-            return _QuotaResetLift(status=QuotaResetStatus.NOTICE_FAILED, period_key=period_key)
-        if claim is NoticeClaim.ALREADY:
-            logger.info(
-                "Quota pause lifted without another reset notice | group=%s period=%s",
-                group_id,
-                period_key,
-            )
-            return _QuotaResetLift(
-                status=QuotaResetStatus.LIFTED_WITH_NOTICE,
-                period_key=period_key,
-                notice="",
-                claimed=False,
-            )
         logger.info(
-            "Prepared quota reset notice | group=%s period=%s usage=%s limit=%s",
+            "Quota pause can lift | group=%s period=%s usage=%s limit=%s",
             group_id,
             period_key,
             usage,
             limit,
         )
-        return _QuotaResetLift(
-            status=QuotaResetStatus.LIFTED_WITH_NOTICE,
-            period_key=period_key,
-            notice=notice,
-            claimed=True,
-        )
+        return _QuotaResetLift(status=QuotaResetStatus.LIFTED, period_key=period_key)
 
     def _should_enable_after_reset_attempt(self, group_id: str, lift: _QuotaResetLift) -> bool:
-        """手動停止だけ翻訳をオンに戻す。上限停止・課金停止・案内失敗では理由を消さない。"""
+        """手動停止だけ翻訳をオンに戻す。上限停止と課金停止では理由を消さない。"""
 
         if lift.status != QuotaResetStatus.NOT_PAUSED:
             return False
@@ -2201,52 +2110,9 @@ class MessageHandler:
         runtime: models.TranslationRuntimeState,
         lift: _QuotaResetLift,
     ) -> models.TranslationRuntimeState:
-        if lift.status == QuotaResetStatus.LIFTED_WITH_NOTICE:
+        if lift.status == QuotaResetStatus.LIFTED:
             return replace(runtime, translation_enabled=True, translation_paused_reason=None)
-        if lift.status == QuotaResetStatus.NOTICE_FAILED:
-            return replace(runtime, translation_enabled=True, translation_paused_reason="quota")
         return runtime
-
-    def _reset_notice_to_send(self, lift: _QuotaResetLift | None) -> str:
-        if lift is None or lift.status != QuotaResetStatus.LIFTED_WITH_NOTICE:
-            return ""
-        return lift.notice
-
-    def _enable_translation_pending_reset_notice(self, group_id: str) -> None:
-        """翻訳は再開し、リセット案内の未送信は quota 理由として残す。"""
-
-        keep = getattr(self._repo, "enable_translation_keep_quota_reason", None)
-        if callable(keep):
-            keep(group_id)
-            return
-        logger.warning(
-            "Repository cannot keep the quota reason after a failed reset notice",
-            extra={"group_id": group_id},
-        )
-        self._repo.set_translation_enabled(group_id, True)
-
-    def _reply_with_optional_quota_reset(
-        self,
-        event: models.MessageEvent,
-        text: str,
-        lift: _QuotaResetLift | None,
-        *,
-        command_trace: _CommandTrace | None = None,
-        normalize_lists: bool = True,
-    ) -> bool:
-        notice = self._reset_notice_to_send(lift)
-        if not notice:
-            return self._reply_text(event, text, command_trace=command_trace, normalize_lists=normalize_lists)
-        ack = normalize_inline_lists(text) if normalize_lists else text
-        # 送信失敗は呼び出し側の _QuotaResetDelivery が未送信へ戻す。
-        return self._reply_messages(
-            event,
-            [
-                {"type": "text", "text": ack},
-                {"type": "text", "text": notice},
-            ],
-            command_trace=command_trace,
-        )
 
     def _apply_pause_state(self, group_id: str, state: PauseState) -> None:
         """停止状態を一回で書く。無いリポジトリは既存のメソッドに分ける。"""
@@ -2255,33 +2121,30 @@ class MessageHandler:
         if callable(writer):
             writer(group_id, enabled=state.enabled, reason=state.reason)
             return
-        if state.enabled and state.reason == QUOTA_PAUSE:
-            self._enable_translation_pending_reset_notice(group_id)
-            return
         if not state.enabled and state.reason == QUOTA_PAUSE:
             self._pause_translation_for_quota(group_id)
             return
         self._repo.set_translation_enabled(group_id, state.enabled)
 
     def _commit_quota_reset(self, group_id: str, lift: _QuotaResetLift) -> None:
-        """案内を送り終えたときだけ quota 理由を外す。
+        """送信できたときだけ quota 理由を外す。案内は出さない。
 
-        同じ投稿で無料枠の上限に再度達していたら、案内で停止を外さない。
+        同じ投稿で無料枠の上限に再度達していたら、停止は外さない。
         """
 
-        if not lift.claimed or not group_id:
+        if lift.status != QuotaResetStatus.LIFTED or not group_id:
             return
         if self._free_quota_is_exhausted(group_id):
             self._pause_translation_for_quota(group_id)
             logger.info(
-                "Kept quota pause after the reset notice | group=%s period=%s",
+                "Kept quota pause after the period became eligible | group=%s period=%s",
                 group_id,
                 lift.period_key,
             )
             return
-        self._repo.set_translation_enabled(group_id, True)
+        self._apply_pause_state(group_id, PauseState(enabled=True, reason=None))
         logger.info(
-            "Committed quota reset notice | group=%s period=%s",
+            "Lifted quota pause | group=%s period=%s",
             group_id,
             lift.period_key,
         )
@@ -2290,41 +2153,6 @@ class MessageHandler:
         runtime = self._fetch_command_runtime_state(group_id)
         plan_key, _period_key, limit, usage = self._quota_period_for_runtime(runtime, group_id)
         return normalize_plan_key(plan_key) == FREE_PLAN and usage >= limit
-
-    def _claim_quota_reset_notice(self, group_id: str, period_key: str) -> NoticeClaim:
-        claim = getattr(self._repo, "claim_quota_reset_notice", None)
-        if not callable(claim):
-            key = ("quota_reset", group_id, period_key)
-            if key in _LOCAL_RESET_CLAIMS:
-                return NoticeClaim.ALREADY
-            _LOCAL_RESET_CLAIMS.add(key)
-            return NoticeClaim.ACQUIRED
-        try:
-            acquired = bool(claim(group_id, period_key))
-        except Exception:
-            logger.warning("Quota reset notice claim raised", extra={"group_id": group_id})
-            return NoticeClaim.FAILED
-        return NoticeClaim.ACQUIRED if acquired else NoticeClaim.ALREADY
-
-    def _release_quota_reset_notice(self, group_id: str, period_key: str) -> None:
-        release = getattr(self._repo, "release_quota_reset_notice", None)
-        if not callable(release):
-            _LOCAL_RESET_CLAIMS.discard(("quota_reset", group_id, period_key))
-            return
-        try:
-            release(group_id, period_key)
-        except Exception:
-            logger.warning("Failed to release quota reset notice", extra={"group_id": group_id})
-
-    def _rollback_quota_reset(self, group_id: str, lift: _QuotaResetLift) -> None:
-        """案内を送れなかったとき、同じ解除からやり直せるように戻す。"""
-
-        if not lift.claimed or not group_id:
-            return
-        self._release_quota_reset_notice(group_id, lift.period_key)
-        pause = getattr(self._repo, "set_translation_paused_by_quota", None)
-        if callable(pause):
-            pause(group_id)
 
     def _prepare_translation_context(
         self,
@@ -2383,7 +2211,6 @@ class MessageHandler:
         limit: int,
         plan_key: str,
         period_end: Optional[datetime],
-        quota_reset: _QuotaResetLift | None = None,
     ) -> None:
         # 50件目の案内生成は失敗しうる。停止理由はそれより先に残す。
         if flow.decision.should_notify and stop_translation_on_quota(plan_key):
@@ -2400,10 +2227,6 @@ class MessageHandler:
             messages.append({"type": "text", "text": shrink_notice})
 
         messages.append({"type": "text", "text": flow.reply_text})
-
-        reset_notice = self._reset_notice_to_send(quota_reset)
-        if reset_notice and normalize_plan_key(plan_key) == FREE_PLAN:
-            messages.append({"type": "text", "text": reset_notice})
 
         approaching_claimed = False
         approaching_period_key = flow.decision.period_key
@@ -3062,22 +2885,6 @@ class MessageHandler:
         if url:
             return f"{base}\n{price_page_sentence()}"
         return f"{base}\n{missing_plan_link_sentence()}"
-
-    def _quota_reset_notice_text(
-        self,
-        group_id: str,
-        *,
-        period_key: Optional[str],
-        period_end: Optional[datetime],
-    ) -> str:
-        reset_date = self._resolve_quota_reset_date(
-            period_key=period_key,
-            period_end=period_end,
-            plan_key=FREE_PLAN,
-        )
-        base = build_quota_reset_notice(reset_date=reset_date, free_quota=self._free_quota)
-        text, _url = self._build_multilingual_notice(base, group_id, None, add_missing_link_notice=False)
-        return text
 
     def _quota_period_for_runtime(
         self,

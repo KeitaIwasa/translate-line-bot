@@ -5,47 +5,20 @@
 - 翻訳中: enabled、理由なし
 - 手動停止: disabled、理由なし
 - 無料枠停止: disabled、quota
-- リセット案内の未送信: enabled、quota
 - 課金停止: disabled、billing
 
-案内を「送った」と記録するのは、LINE 送信が成功したあとだけ。
+事前案内と停止中の再案内を「送った」と記録するのは、LINE 送信が成功したあとだけ。
+月が変わって枠が戻っても、そのことを伝える案内は出さない。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
 
 from .plan_policy import FREE_PLAN, PRO_PLAN, STANDARD_PLAN, monthly_quota_for, normalize_plan_key, resolve_effective_plan
 
 QUOTA_PAUSE = "quota"
 BILLING_PAUSE = "billing"
-
-
-class NoticeClaim(Enum):
-    """リセット案内をこの周期で送ってよいか。例外と取得済みは別の値。"""
-
-    # この呼び出しが案内を送る。送信成功まで通知済みにしない。
-    ACQUIRED = "acquired"
-    # この周期は送り終えている。
-    ALREADY = "already"
-    # DB 例外などで確保できなかった。未送信のまま次の投稿でやり直す。
-    FAILED = "failed"
-
-
-def reset_pause_for_claim(claim: NoticeClaim) -> PauseState:
-    """claim の直後に保存する停止状態。送信が成功するまで理由は消さない。
-
-    ALREADY だけ、案内を送り終えているので quota 理由を外す。
-    FAILED は未送信。翻訳は再開し、理由を残して次の投稿でやり直す。
-    ACQUIRED はこれから送る。送信成功まで quota 停止のまま残す。
-    """
-
-    if claim is NoticeClaim.ALREADY:
-        return PauseState(enabled=True, reason=None)
-    if claim is NoticeClaim.FAILED:
-        return PauseState(enabled=True, reason=QUOTA_PAUSE)
-    return PauseState(enabled=False, reason=QUOTA_PAUSE)
 
 
 @dataclass(frozen=True)
@@ -59,8 +32,7 @@ class PauseState:
 def pause_for_billing(state: PauseState) -> PauseState:
     """支払い失敗・解約・未払い。手動停止と quota 停止は上書きしない。
 
-    翻訳中だけ billing にする。リセット案内待ち（enabled かつ quota）は、
-    翻訳を止めて quota のまま残す。案内のやり直し口を消さない。
+    翻訳中だけ billing にする。quota 理由は、翻訳がオンでもオフでも残す。
     """
 
     if state.reason == QUOTA_PAUSE:

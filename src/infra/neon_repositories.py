@@ -964,32 +964,6 @@ class NeonMessageRepository(MessageRepositoryPort):
             return
         self._invalidate_group_runtime(group_id)
 
-    def enable_translation_keep_quota_reason(self, group_id: str) -> None:
-        """翻訳は再開し、月次リセット案内の未送信は quota 理由のまま残す。"""
-
-        try:
-            with self._client.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO group_settings (group_id, translation_enabled, translation_paused_reason, updated_at)
-                    VALUES (%s, TRUE, 'quota', NOW())
-                    ON CONFLICT (group_id)
-                    DO UPDATE SET
-                        translation_enabled = TRUE,
-                        translation_paused_reason = 'quota',
-                        updated_at = NOW()
-                    """,
-                    (group_id,),
-                )
-            self._invalidate_group_runtime(group_id)
-        except errors.UndefinedColumn:
-            self.set_translation_enabled(group_id, True)
-        except errors.UndefinedTable:
-            logger.warning(
-                "group_settings table missing; skip persisting pending quota reset notice",
-                extra={"group_id": group_id},
-            )
-
     def set_translation_pause_state(self, group_id: str, *, enabled: bool, reason: Optional[str]) -> None:
         """停止フラグと理由を同じ文で書く。理由の種類は呼び出し側の遷移が決める。"""
 
@@ -1368,56 +1342,6 @@ class NeonMessageRepository(MessageRepositoryPort):
         except errors.UndefinedTable:
             logger.warning("group_usage_counters table missing; skip mention reminder", extra={"group_id": group_id})
             return False
-
-    def claim_quota_reset_notice(self, group_id: str, period_key: str) -> bool:
-        """月次リセット案内を、この周期でまだ出していなければ確保する。"""
-
-        try:
-            with self._client.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO group_usage_counters (
-                        group_id, period_key, translation_count, quota_reset_notice_sent, created_at, updated_at
-                    )
-                    VALUES (%s, %s, 0, TRUE, NOW(), NOW())
-                    ON CONFLICT (group_id, period_key)
-                    DO UPDATE SET
-                        quota_reset_notice_sent = TRUE,
-                        updated_at = NOW()
-                    WHERE group_usage_counters.quota_reset_notice_sent IS NOT TRUE
-                    RETURNING group_id
-                    """,
-                    (group_id, period_key),
-                )
-                return cur.fetchone() is not None
-        except errors.UndefinedColumn:
-            logger.warning("quota_reset_notice_sent column missing; using local claim", extra={"group_id": group_id})
-            return _claim_local(("quota_reset", group_id, period_key))
-        except errors.UndefinedTable:
-            logger.warning("group_usage_counters table missing; using local claim", extra={"group_id": group_id})
-            return _claim_local(("quota_reset", group_id, period_key))
-
-    def release_quota_reset_notice(self, group_id: str, period_key: str) -> None:
-        """リセット案内を送れなかったとき、同じ周期でやり直せるように戻す。"""
-
-        try:
-            with self._client.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE group_usage_counters
-                    SET quota_reset_notice_sent = FALSE, updated_at = NOW()
-                    WHERE group_id = %s AND period_key = %s
-                    """,
-                    (group_id, period_key),
-                )
-        except errors.UndefinedColumn:
-            logger.warning("quota_reset_notice_sent column missing; releasing local claim", extra={"group_id": group_id})
-            _release_local(("quota_reset", group_id, period_key))
-        except errors.UndefinedTable:
-            logger.warning("group_usage_counters table missing; releasing local claim", extra={"group_id": group_id})
-            _release_local(("quota_reset", group_id, period_key))
-        else:
-            _release_local(("quota_reset", group_id, period_key))
 
     def release_approaching_notice(self, group_id: str, period_key: str) -> None:
         """事前案内を送れなかったとき、同じ周期でやり直せるように戻す。"""

@@ -98,7 +98,6 @@ class ProQuotaRepo:
         self.entitlement_plan = entitlement_plan
         self.approaching_claimed = False
         self.mention_reminders: set[tuple[str, str]] = set()
-        self.reset_notices: set[str] = set()
 
     # group/lang settings
     def fetch_group_languages(self, _group_id):
@@ -139,15 +138,6 @@ class ProQuotaRepo:
 
     def release_quota_mention_reminder(self, _group_id, period_key, on_date):
         self.mention_reminders.discard((period_key, on_date))
-
-    def claim_quota_reset_notice(self, _group_id, period_key):
-        if period_key in self.reset_notices:
-            return False
-        self.reset_notices.add(period_key)
-        return True
-
-    def release_quota_reset_notice(self, _group_id, period_key):
-        self.reset_notices.discard(period_key)
 
     def get_subscription_period(self, _group_id):
         if self.subscription_status is not None or self.period_end is not None:
@@ -215,10 +205,6 @@ class ProQuotaRepo:
 
     def set_translation_paused_by_quota(self, _group_id):
         self.translation_enabled = False
-        self.paused_reason = "quota"
-
-    def enable_translation_keep_quota_reason(self, _group_id):
-        self.translation_enabled = True
         self.paused_reason = "quota"
 
     def is_translation_enabled(self, _group_id):

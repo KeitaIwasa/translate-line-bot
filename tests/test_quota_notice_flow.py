@@ -1,6 +1,5 @@
-"""無料枠の上限案内。49/50/51、事前案内、停止中メンション、リセット、多言語。"""
+"""無料枠の上限案内。49/50/51、事前案内、停止中メンション、月替わりの再開、多言語。"""
 
-import inspect
 import re
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -9,14 +8,12 @@ import pytest
 
 from src.app.handlers.message_handler import MessageHandler
 from src.domain import models
-from src.domain.services.plan_policy import monthly_quota_for
 from src.domain.services.quota_notice import (
     approaching_usage_threshold,
     build_approaching_notice,
     build_free_limit_notice,
     build_plan_link_message,
     build_pro_limit_notice,
-    build_quota_reset_notice,
     build_resume_blocked_short,
     build_standard_limit_notice,
     plan_catalog_text,
@@ -132,8 +129,6 @@ def _quota_notice_samples() -> list[str]:
         build_pro_limit_notice(limit=40000, reset_date=None, reminder=True),
         build_approaching_notice(usage=40, limit=50, reset_date="2026-11-01", **common),
         build_approaching_notice(usage=40, limit=50, reset_date=None, **common),
-        build_quota_reset_notice(reset_date="2026-11-01", free_quota=50),
-        build_quota_reset_notice(reset_date=None, free_quota=50),
         build_resume_blocked_short(limit=50, reset_date="2026-11-01"),
         build_resume_blocked_short(limit=50, reset_date=None),
     ]
@@ -159,49 +154,6 @@ def test_resume_blocked_short_stays_paused_until_reset():
     undated = build_resume_blocked_short(limit=50, reset_date=None)
     assert "until the monthly quota resets" in undated
     assert "when the monthly quota resets" not in undated
-
-
-def test_quota_reset_notice_states_plan_cap_not_remaining():
-    cap = monthly_quota_for("free")
-    dated = build_quota_reset_notice(reset_date="2026-11-01", free_quota=cap)
-    assert dated == (
-        "The free monthly quota has reset. "
-        f"The Free plan includes {cap:,} messages per month. "
-        "The next reset is on 2026-11-01 (UTC)."
-    )
-    undated = build_quota_reset_notice(reset_date=None, free_quota=cap)
-    assert undated == f"The free monthly quota has reset. The Free plan includes {cap:,} messages per month."
-    assert "on again" not in dated
-    assert "this month" not in dated
-    assert "left" not in dated.lower()
-    assert "remaining" not in dated.lower()
-    # 呼び出し側の残数でも、文面に直書きした 50 でもない
-    body = inspect.getsource(build_quota_reset_notice).split('"""', 2)[-1]
-    assert "50" not in body
-    assert "free_quota" in body
-    assert "monthly_quota_for" not in body
-
-
-def test_reset_notice_uses_the_configured_free_cap():
-    """FREE_QUOTA_PER_MONTH が 50 でなくても、上限判定と同じ件数を案内する。"""
-
-    line = RecordingLineClient()
-    repo = ProQuotaRepo(
-        initial_usage=0,
-        paid=False,
-        translation_enabled=False,
-        paused_reason="quota",
-    )
-    handler = _build_handler(repo, line, RecordingTranslationService())
-    handler._free_quota = 12
-
-    handler._handle_translation_flow(_build_event("new month"), sender_name="user", translation_enabled=False)
-
-    reset = "\n".join(line.sent_texts)
-    assert "The Free plan includes 12 messages per month." in reset
-    assert "includes 50" not in reset
-    assert repo.translation_enabled is True
-    assert repo.paused_reason is None
 
 
 def test_resume_sentences_start_from_the_reset():
@@ -346,14 +298,13 @@ def test_free_notices_use_next_month_when_canceled_period_end_remains():
     line.sent_texts.clear()
     handler._handle_translation_flow(_build_event("new month"), sender_name="user", translation_enabled=False)
 
-    reset = "\n".join(line.sent_texts)
-    assert "has reset" in reset
-    assert f"The Free plan includes {monthly_quota_for('free'):,} messages per month" in reset
-    assert "on again" not in reset
-    assert next_month in reset
-    assert "2024-03-17" not in reset
+    resumed = "\n".join(line.sent_texts)
+    assert "has reset" not in resumed
+    assert "The free monthly quota" not in resumed
+    assert "2024-03-17" not in resumed
     assert repo.translation_enabled is True
     assert repo.paused_reason is None
+    assert repo.usage == 1
 
 
 def test_language_changes_during_quota_pause_keep_the_reason():
@@ -392,11 +343,9 @@ def test_language_changes_during_quota_pause_keep_the_reason():
     assert repo.translation_enabled is True
     assert repo.paused_reason is None
     assert repo.usage == 1
-    reset = "\n".join(line.sent_texts)
-    assert "has reset" in reset
-    assert f"The Free plan includes {monthly_quota_for('free'):,} messages per month" in reset
-    assert "on again" not in reset
-    assert _next_month(datetime.now(timezone.utc)) in reset
+    resumed = "\n".join(line.sent_texts)
+    assert "has reset" not in resumed
+    assert "The free monthly quota" not in resumed
 
 
 def test_language_changes_unknown_pause_and_resume_keep_billing_pause():
@@ -466,8 +415,8 @@ def test_downgraded_group_can_remove_one_language_while_still_over_the_plan_limi
     assert "Korean" in reply
 
 
-def test_language_add_in_new_month_sends_the_reset_notice_once():
-    """翌月の最初が言語追加でも、停止解除とリセット案内は通常投稿と同じ関数を通る。"""
+def test_language_add_in_new_month_lifts_the_pause_without_a_reset_notice():
+    """翌月の最初が言語追加でも、停止は外し、枠が戻った案内は出さない。"""
 
     line = RecordingLineClient()
     repo = _MutableLanguageRepo(
@@ -484,104 +433,8 @@ def test_language_add_in_new_month_sends_the_reset_notice_once():
     assert "th" in {code.lower() for code in repo.languages}
     assert repo.translation_enabled is True
     assert repo.paused_reason is None
-    joined = "\n".join(line.sent_texts)
-    assert joined.count("has reset") == 1
-    assert f"The Free plan includes {monthly_quota_for('free'):,} messages per month" in joined
-    assert "The next reset is on" in joined
-
-    repo.translation_enabled = False
-    repo.paused_reason = "quota"
-    repo.usage = 0
-    line.sent_texts.clear()
-    handler._handle_command(_build_event("add Thai"), "add Thai")
-
-    assert repo.translation_enabled is True
-    assert repo.paused_reason is None
     assert "has reset" not in "\n".join(line.sent_texts)
-
-
-class _FailOnceInterface:
-    """最初の案内翻訳だけ失敗し、次の投稿では英語のまま返す。"""
-
-    def __init__(self):
-        self.calls = 0
-
-    def translate(self, *_args, **_kwargs):
-        self.calls += 1
-        if self.calls == 1:
-            raise RuntimeError("gemini down")
-        return []
-
-
-def _paused_new_month_repo():
-    return _MutableLanguageRepo(
-        initial_usage=0,
-        paid=False,
-        translation_enabled=False,
-        paused_reason="quota",
-        languages=["en", "ja"],
-    )
-
-
-def test_reset_notice_gemini_failure_on_a_normal_message_retries_next_message(monkeypatch):
-    """案内が作れなくても翻訳は再開し、次の投稿でリセット案内を出す。"""
-
-    monkeypatch.setattr("src.app.handlers.message_handler.time.sleep", lambda *_args, **_kwargs: None)
-    line = RecordingLineClient()
-    translation = RecordingTranslationService()
-    repo = _paused_new_month_repo()
-    handler = _build_handler(repo, line, translation)
-    handler._interface_translation = _FailOnceInterface()
-
-    handler._handle_translation_flow(_build_event("hello"), sender_name="user", translation_enabled=False)
-
-    assert translation.calls == 1
-    assert repo.usage == 1
-    assert repo.translation_enabled is True
-    assert repo.paused_reason == "quota"
-    assert repo.reset_notices == set()
-    joined = "\n".join(line.sent_texts)
-    assert "(en)" in joined
-    assert "still paused" not in joined
-    assert "has reset" not in joined
-
-    line.sent_texts.clear()
-    handler._handle_translation_flow(_build_event("again"), sender_name="user", translation_enabled=True)
-
-    assert repo.translation_enabled is True
-    assert repo.paused_reason is None
-    assert repo.reset_notices
-    reset = "\n".join(line.sent_texts)
-    assert "has reset" in reset
-    assert f"The Free plan includes {monthly_quota_for('free'):,} messages per month" in reset
-
-
-def test_reset_notice_gemini_failure_on_language_change_retries_next_message(monkeypatch):
-    """言語変更が月の最初でも、案内失敗で停止理由を消さず、次の投稿で案内する。"""
-
-    monkeypatch.setattr("src.app.handlers.message_handler.time.sleep", lambda *_args, **_kwargs: None)
-    line = RecordingLineClient()
-    translation = RecordingTranslationService()
-    repo = _paused_new_month_repo()
-    handler = _build_handler(repo, line, translation)
-    handler._interface_translation = _FailOnceInterface()
-
-    handler._handle_command(_build_event("add Thai"), "add Thai")
-
-    assert "th" in {code.lower() for code in repo.languages}
-    assert translation.calls == 0
-    assert repo.translation_enabled is True
-    assert repo.paused_reason == "quota"
-    assert repo.reset_notices == set()
-    assert "has reset" not in "\n".join(line.sent_texts)
-
-    line.sent_texts.clear()
-    handler._handle_translation_flow(_build_event("hello"), sender_name="user", translation_enabled=True)
-
-    assert translation.calls == 1
-    assert repo.paused_reason is None
-    assert repo.reset_notices
-    assert "has reset" in "\n".join(line.sent_texts)
+    assert "The free monthly quota" not in "\n".join(line.sent_texts)
 
 
 class _FailingLine(RecordingLineClient):
@@ -767,11 +620,10 @@ def test_free_50_persists_quota_pause_before_the_next_message():
     assert repo.paused_reason is None
     assert translation.calls == 2
     assert repo.usage == 1
-    reset = "\n".join(line.sent_texts)
-    assert "has reset" in reset
-    assert f"The Free plan includes {monthly_quota_for('free'):,} messages per month" in reset
-    assert "on again" not in reset
-    assert _next_month(datetime.now(timezone.utc)) in reset
+    resumed = "\n".join(line.sent_texts)
+    assert "has reset" not in resumed
+    assert "The free monthly quota" not in resumed
+    assert "(en)" in resumed
 
 
 def test_free_51_pauses_without_repeating_the_notice():
@@ -789,7 +641,7 @@ def test_free_51_pauses_without_repeating_the_notice():
     assert line.sent_texts == []
 
 
-def test_quota_reset_resumes_translation_and_says_so():
+def test_quota_reset_resumes_translation_without_a_notice():
     line = RecordingLineClient()
     translation = RecordingTranslationService()
     repo = ProQuotaRepo(
@@ -807,15 +659,15 @@ def test_quota_reset_resumes_translation_and_says_so():
     assert translation.calls == 1
     assert repo.usage == 1
     joined = "\n".join(line.sent_texts)
-    assert "has reset" in joined
-    assert f"The Free plan includes {monthly_quota_for('free'):,} messages per month" in joined
-    assert "on again" not in joined
+    assert "has reset" not in joined
+    assert "The free monthly quota" not in joined
     assert "Translation stopped" not in joined
-    assert _next_month(datetime.now(timezone.utc)) in joined
+    assert "(en)" in joined
 
     line.sent_texts.clear()
     handler._handle_translation_flow(_build_event("next"), sender_name="user", translation_enabled=True)
     assert "has reset" not in "\n".join(line.sent_texts)
+    assert repo.usage == 2
 
 
 def test_paused_mention_reminds_once_per_day_and_chat_stays_quiet():

@@ -12,11 +12,9 @@ from src.domain.services.language_detection_service import LanguageDetectionServ
 from src.domain.services.quota_pause import (
     BILLING_PAUSE,
     QUOTA_PAUSE,
-    NoticeClaim,
     PauseState,
     pause_for_billing,
     recover_pause,
-    reset_pause_for_claim,
 )
 from src.domain.services.translation_service import TranslationService
 from tests.test_quota_limits import (
@@ -59,18 +57,6 @@ _PAUSE_ROWS = [
     ("recover_quota_still_over", _stopped(QUOTA_PAUSE), "recover", 50, 50, False, QUOTA_PAUSE),
     ("recover_notice_pending", _active(QUOTA_PAUSE), "recover", 0, 50, True, None),
 ]
-
-
-@pytest.mark.parametrize(
-    ("claim", "enabled", "reason"),
-    [
-        (NoticeClaim.ACQUIRED, False, QUOTA_PAUSE),
-        (NoticeClaim.ALREADY, True, None),
-        (NoticeClaim.FAILED, True, QUOTA_PAUSE),
-    ],
-)
-def test_reset_claim_keeps_a_quota_reason_until_the_notice_is_sent(claim, enabled, reason):
-    assert reset_pause_for_claim(claim) == PauseState(enabled=enabled, reason=reason)
 
 
 @pytest.mark.parametrize(
@@ -136,7 +122,7 @@ def test_usage_grows_from_49_to_50_and_51_stays_quiet():
     assert repo.notice_plan == "free"
 
 
-def test_month_rollover_language_change_sends_one_reset_notice():
+def test_month_rollover_language_change_lifts_the_pause_without_a_notice():
     line = RecordingLineClient()
     repo = _MutableLanguageRepo(
         initial_usage=0,
@@ -152,7 +138,7 @@ def test_month_rollover_language_change_sends_one_reset_notice():
     assert "th" in {code.lower() for code in repo.languages}
     assert repo.translation_enabled is True
     assert repo.paused_reason is None
-    assert "\n".join(line.sent_texts).count("has reset") == 1
+    assert "has reset" not in "\n".join(line.sent_texts)
 
     line.sent_texts.clear()
     _run(handler, "hello")
@@ -215,53 +201,9 @@ def test_limit_notice_send_failure_does_not_record_the_plan():
     assert repo.paused_reason == "quota"
 
 
-def test_reset_claim_db_error_keeps_the_quota_reason_and_retries(monkeypatch):
-    """claim の DB 例外は通知済みではない。停止理由を残し、次の投稿で案内する。"""
+def test_failed_translation_does_not_lift_the_quota_pause():
+    """翻訳が落ちた投稿では停止を外さない。次の投稿で翻訳を戻し、案内は出さない。"""
 
-    monkeypatch.setattr("src.app.handlers.message_handler.time.sleep", lambda *_args, **_kwargs: None)
-    repo = _MutableLanguageRepo(
-        initial_usage=0,
-        paid=False,
-        translation_enabled=False,
-        paused_reason="quota",
-        languages=["en", "ja"],
-    )
-    line = RecordingLineClient()
-    translation = RecordingTranslationService()
-    handler = _free_handler(repo, line, translation)
-
-    def db_down(*_args, **_kwargs):
-        raise RuntimeError("db down")
-
-    repo.claim_quota_reset_notice = db_down
-
-    _run(handler, "hello", enabled=False)
-
-    assert translation.calls == 1
-    assert repo.usage == 1
-    assert repo.translation_enabled is True
-    assert repo.paused_reason == "quota"
-    assert repo.reset_notices == set()
-    assert "has reset" not in "\n".join(line.sent_texts)
-
-    def claim(_group_id, period_key):
-        if period_key in repo.reset_notices:
-            return False
-        repo.reset_notices.add(period_key)
-        return True
-
-    repo.claim_quota_reset_notice = claim
-    retry_line = RecordingLineClient()
-    retry = _free_handler(repo, retry_line, translation)
-    _run(retry, "again", enabled=True)
-
-    assert repo.translation_enabled is True
-    assert repo.paused_reason is None
-    assert repo.reset_notices
-    assert "has reset" in "\n".join(retry_line.sent_texts)
-
-
-def test_reset_claim_rolls_back_when_translation_times_out():
     repo = _MutableLanguageRepo(
         initial_usage=0,
         paid=False,
@@ -275,7 +217,6 @@ def test_reset_claim_rolls_back_when_translation_times_out():
         _run(handler, "hello", enabled=False)
 
     assert repo.usage == 0
-    assert repo.reset_notices == set()
     assert repo.translation_enabled is False
     assert repo.paused_reason == "quota"
 
@@ -284,11 +225,10 @@ def test_reset_claim_rolls_back_when_translation_times_out():
     _run(retry, "hello", enabled=False)
     assert repo.translation_enabled is True
     assert repo.paused_reason is None
-    assert repo.reset_notices
-    assert "has reset" in "\n".join(line.sent_texts)
+    assert "has reset" not in "\n".join(line.sent_texts)
 
 
-def test_reset_claim_rolls_back_when_line_send_fails():
+def test_failed_line_send_does_not_lift_the_quota_pause():
     repo = _MutableLanguageRepo(
         initial_usage=0,
         paid=False,
@@ -301,18 +241,18 @@ def test_reset_claim_rolls_back_when_line_send_fails():
     with pytest.raises(RuntimeError, match="line down"):
         _run(handler, "hello", enabled=False)
 
-    assert repo.reset_notices == set()
     assert repo.translation_enabled is False
     assert repo.paused_reason == "quota"
 
     line = RecordingLineClient()
     retry = _free_handler(repo, line)
     _run(retry, "hello", enabled=False)
-    assert "has reset" in "\n".join(line.sent_texts)
+    assert "has reset" not in "\n".join(line.sent_texts)
     assert repo.paused_reason is None
+    assert repo.translation_enabled is True
 
 
-def test_language_change_reset_rolls_back_when_line_send_fails():
+def test_language_change_keeps_the_quota_pause_when_line_send_fails():
     repo = _MutableLanguageRepo(
         initial_usage=0,
         paid=False,
@@ -326,15 +266,15 @@ def test_language_change_reset_rolls_back_when_line_send_fails():
         handler._handle_command(_build_event("add Thai"), "add Thai")
 
     assert "th" in {code.lower() for code in repo.languages}
-    assert repo.reset_notices == set()
     assert repo.paused_reason == "quota"
     assert repo.translation_enabled is False
 
     line = RecordingLineClient()
     retry = _free_handler(repo, line)
     retry._handle_command(_build_event("add Thai"), "add Thai")
-    assert "\n".join(line.sent_texts).count("has reset") == 1
+    assert "has reset" not in "\n".join(line.sent_texts)
     assert repo.paused_reason is None
+    assert repo.translation_enabled is True
 
 
 def _bind_catalog(monkeypatch, module):

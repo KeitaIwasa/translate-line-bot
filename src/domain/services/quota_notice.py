@@ -138,20 +138,6 @@ def build_approaching_notice(
     )
 
 
-def build_quota_reset_notice(*, reset_date: str | None, free_quota: int) -> str:
-    """無料枠の月次リセットで翻訳が戻ったときの一文。
-
-    件数は残数ではない。最初の翻訳と同時に送るので、実行時の残り件数は書かない。
-    月間上限は上限判定と同じ設定値（FREE_QUOTA_PER_MONTH）を渡し、文面に直書きしない。
-    """
-
-    cap = int(free_quota)
-    again = f" The next reset is on {reset_date} (UTC)." if reset_date else ""
-    return (
-        f"The free monthly quota has reset. The Free plan includes {cap:,} messages per month.{again}"
-    )
-
-
 def build_resume_blocked_short(*, limit: int, reset_date: str | None) -> str:
     """同じ日に再開を頼まれたときの短い再案内。リンクは再送しない。"""
 
