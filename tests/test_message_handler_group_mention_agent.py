@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timezone
 
 from src.app.handlers.message_handler import MessageHandler
+from src.presentation.rich_message import visible_reply_text
 from src.domain import models
 
 
@@ -14,8 +15,13 @@ class _Line:
     def reply_text(self, _token, text):
         self.last_text = text
 
-    def reply_messages(self, *_args, **_kwargs):
-        self.last_messages = _args[1] if len(_args) > 1 else _kwargs.get("messages")
+    def reply_messages(self, _token, messages=None, **_kwargs):
+        self.last_messages = messages
+        shown = visible_reply_text(messages)
+        if shown:
+            self.last_text = shown
+        elif messages and isinstance(messages[0], dict) and messages[0].get("text"):
+            self.last_text = messages[0]["text"]
 
     def get_display_name(self, *_args, **_kwargs):
         return None
@@ -103,7 +109,7 @@ def test_howto_uses_ack_text_without_forcing_resume():
 
     handler._handle_command(event, "使い方を教えて")
 
-    assert "Add Thai" in (handler._line.last_text or "")
+    assert "タイ語を追加して" in (handler._line.last_text or "")
     assert "使い方を教えてと送って" not in (handler._line.last_text or "")
     assert repo.translation_enabled_calls == []
 
@@ -188,7 +194,7 @@ def test_router_receives_runtime_payload_json():
     assert data["translation_enabled"] is True
 
 
-def test_command_logs_decision_timing_and_text_reply_metadata_without_body(caplog):
+def test_command_logs_decision_timing_and_flex_reply_metadata_without_body(caplog):
     class _Router:
         def decide(self, _text):
             return models.CommandDecision(
@@ -210,7 +216,7 @@ def test_command_logs_decision_timing_and_text_reply_metadata_without_body(caplo
     assert "Command stage | stage=router_decision" in logs
     assert "Command stage | stage=instruction_language_resolution" in logs
     assert "Command stage | stage=action_handler" in logs
-    assert "Command reply | status=sent reply_type=text message_count=1" in logs
+    assert "Command reply | status=sent reply_type=flex message_count=1" in logs
     assert "Command completed | status=success action=howto" in logs
     assert "total_elapsed_ms=" in logs
     assert "秘密の返信本文はログに出さない" not in logs

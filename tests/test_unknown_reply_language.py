@@ -1,6 +1,7 @@
 """unknown 経路の返信言語と、現在の翻訳言語を尋ねる質問。"""
 
 from src.app.handlers.message_handler import UNKNOWN_INSTRUCTION_BASE, MessageHandler
+from src.presentation.rich_message import visible_reply_text
 from src.domain import models
 from src.domain.services.current_languages_question import is_current_languages_question
 from src.domain.services.language_detection_service import LanguageDetectionService
@@ -17,8 +18,8 @@ class _Line:
     def reply_text(self, _token, text):
         self.last_text = text
 
-    def reply_messages(self, *_args, **_kwargs):
-        return None
+    def reply_messages(self, _token, messages):
+        self.last_text = visible_reply_text(messages)
 
 
 class _Translator:
@@ -156,7 +157,7 @@ def test_resolve_follows_message_language_or_group_language():
 def test_unknown_mentions_reply_in_the_message_language():
     cases = [
         ("開始時間は何?", "ja"),
-        ("言語設定", "ja"),
+        ("予定を教えて", "ja"),
         ("how do I use this bot?", "en"),
         ("Please confirm 明日の予定", "en"),
         # 「Add English と 日本語」は言語の追加として扱う。未知の混在文は別の文で見る

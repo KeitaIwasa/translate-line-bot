@@ -1,9 +1,31 @@
 from datetime import datetime, timezone
 
 from src.app.handlers.message_handler import MessageHandler
+from src.presentation.rich_message import visible_reply_text
 from src.domain import models
 from src.domain.models import TranslationRuntimeState
 from src.domain.services.quota_service import QuotaDecision, quota_should_notify
+
+
+def _visible_message_text(message: dict) -> str:
+    """テキストと Flex 本文を同じ検査に載せる。ボタンの URI は含めない。"""
+
+    if message.get("type") != "flex":
+        return str(message.get("text") or "")
+    found: list[str] = []
+
+    def _walk(node) -> None:
+        if isinstance(node, dict):
+            if node.get("type") == "text" and isinstance(node.get("text"), str):
+                found.append(node["text"])
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(message.get("contents"))
+    return "\n".join(found)
 
 
 class RecordingLineClient:
@@ -14,8 +36,10 @@ class RecordingLineClient:
         self.sent_texts.append(text)
 
     def reply_messages(self, _reply_token, messages):
-        texts = [msg.get("text", "") for msg in messages if isinstance(msg, dict)]
-        self.sent_texts.append("\n".join(texts))
+        shown = visible_reply_text(messages)
+        if not shown:
+            shown = "\n".join(_visible_message_text(msg) for msg in messages if isinstance(msg, dict))
+        self.sent_texts.append(shown)
 
     def get_display_name(self, *_args, **_kwargs):
         return None
@@ -60,12 +84,20 @@ class ProQuotaRepo:
         notice_plan: str | None = None,
         translation_enabled: bool = True,
         paused_reason: str | None = None,
+        subscription_status: str | None = None,
+        period_end: datetime | None = None,
+        entitlement_plan: str = "free",
     ):
         self.usage = initial_usage
         self.paid = paid
         self.translation_enabled = translation_enabled
         self.paused_reason = paused_reason
         self.notice_plan = notice_plan
+        self.subscription_status = subscription_status
+        self.period_end = period_end
+        self.entitlement_plan = entitlement_plan
+        self.approaching_claimed = False
+        self.mention_reminders: set[tuple[str, str]] = set()
 
     # group/lang settings
     def fetch_group_languages(self, _group_id):
@@ -88,7 +120,31 @@ class ProQuotaRepo:
     def set_limit_notice_plan(self, _group_id, _period_key, plan: str):
         self.notice_plan = plan
 
+    def claim_approaching_notice(self, _group_id, _period_key):
+        if self.approaching_claimed:
+            return False
+        self.approaching_claimed = True
+        return True
+
+    def claim_quota_mention_reminder(self, _group_id, period_key, on_date):
+        key = (period_key, on_date)
+        if key in self.mention_reminders:
+            return False
+        self.mention_reminders.add(key)
+        return True
+
+    def release_approaching_notice(self, _group_id, _period_key):
+        self.approaching_claimed = False
+
+    def release_quota_mention_reminder(self, _group_id, period_key, on_date):
+        self.mention_reminders.discard((period_key, on_date))
+
     def get_subscription_period(self, _group_id):
+        if self.subscription_status is not None or self.period_end is not None:
+            status = self.subscription_status
+            if status is None:
+                status = "active" if self.paid else "canceled"
+            return (status, None, self.period_end)
         if self.paid:
             return ("active", datetime(2025, 1, 1, tzinfo=timezone.utc), datetime(2025, 2, 1, tzinfo=timezone.utc))
         return (None, None, None)
@@ -139,6 +195,7 @@ class ProQuotaRepo:
             period_key="2025-01-01",
             usage=self.usage,
             limit_notice_plan=self.notice_plan,
+            entitlement_plan=self.entitlement_plan,
             translation_paused_reason=self.paused_reason,
         )
 
@@ -236,7 +293,7 @@ def test_pro_plan_blocks_when_usage_already_over_limit():
     handler._handle_translation_flow(_build_event(), sender_name="user", translation_enabled=True)
 
     assert translation.calls == 0
-    assert any("Pro plan monthly limit" in text for text in line.sent_texts)
+    assert any("Pro plan messages" in text for text in line.sent_texts)
     assert repo.usage == 8000
     assert repo.translation_enabled is True
 
@@ -319,7 +376,17 @@ def test_free_plan_50th_translation_does_not_consume_stop_notice():
     assert translation.calls == 1  # 50通目はまだ翻訳する
     assert repo.notice_plan is None  # 停止前に通知済みにしない
     assert repo.translation_enabled is True
+    assert not any("free messages" in text for text in line.sent_texts)
     assert not any("Free quota" in text for text in line.sent_texts)
+
+    handled = handler._handle_translation_flow(_build_event("blocked"), sender_name="user", translation_enabled=True)
+
+    assert handled is True
+    assert translation.calls == 1
+    assert repo.notice_plan == "free"
+    assert repo.translation_enabled is False
+    assert any("free messages are used up" in text for text in line.sent_texts)
+    assert any("Translation resumes on" in text for text in line.sent_texts)
 
 
 def test_free_plan_under_limit_allows_translation_even_if_notice_flag_exists():

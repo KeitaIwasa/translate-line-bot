@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 import logging
 import json
-import base64
-import zlib
 import re
 import time
 from dataclasses import dataclass, field, replace
+from enum import Enum
 from functools import partial
 from datetime import datetime, timezone
 from calendar import monthrange
@@ -46,7 +46,15 @@ from ...presentation.free_limit_notice import (
     static_notice_button,
     static_notice_headline,
 )
+from ...presentation.guidance_cards import (
+    catalog_card,
+    howto_card,
+    language_reset_card,
+    settings_help_card,
+    unknown_command_card,
+)
 from ...presentation.list_layout import normalize_inline_lists
+from ...presentation.rich_message import RichButton, flex_action_count, flex_body_text, render_guidance
 from ...presentation.reply_formatter import (
     MAX_REPLY_LENGTH,
     _wrap_bidi_isolate,
@@ -68,36 +76,131 @@ from ...domain.services.translation_flow_service import TranslationFlowService
 from ...domain.services.explicit_language_reset import allows_language_reset
 from ...domain.services.language_mention import (
     MentionRead,
-    catalog_labels,
     catalog_prompt,
-    completion_prompt,
+    exceeds_language_limit,
+    enrollment_prompt,
     family_for,
+    group_language_copy,
     howto_prompt,
     is_howto_loop,
     is_nonlinguistic,
     language_label,
+    language_quick_replies,
+    menu_family,
+    need_both_languages_prompt,
+    needs_catalog_fallback,
     read_mention,
-    selection_prompt,
+    reply_family,
     settings_help_prompt,
-    swap_prompt,
+    settings_page_line,
+    setup_confirmation,
     unrecognized_prompt,
     unsupported_prompt,
 )
 from ...domain.services.language_settings_service import LanguageSettingsService
+from ...domain.services.language_update import LanguageUpdate, decide_language_update, language_group_state
 from ...domain.services.private_chat_support_service import PrivateChatSupportService
 from ...domain.services.plan_policy import (
     FREE_PLAN,
     PRO_PLAN,
     STANDARD_PLAN,
     language_limit_for,
-    monthly_quota_for,
     normalize_plan_key,
-    resolve_effective_plan,
     stop_translation_on_quota,
+)
+from ...domain.services.quota_pause import (
+    BILLING_PAUSE,
+    QUOTA_PAUSE,
+    PauseState,
+    effective_plan_key,
+    monthly_limit_for_plan,
+    reevaluate_quota_pause,
+)
+from ...domain.services.quota_notice import (
+    SEE_PLANS_BUTTON_TEXT,
+    SEE_PLANS_LABEL,
+    approaching_usage_threshold,
+    build_approaching_notice,
+    build_free_limit_notice,
+    build_plan_link_message,
+    build_pro_limit_notice,
+    build_resume_blocked_short,
+    build_standard_limit_notice,
+    missing_plan_link_sentence,
+    price_page_sentence,
 )
 from .postback_handler import _build_cancel_message, _build_completion_message
 
 logger = logging.getLogger(__name__)
+
+# 案内本文に付ける双方向制御。ボタンの文字数には含めない。
+_BIDI_CONTROLS = dict.fromkeys(map(ord, "\u200e\u200f\u202a\u202b\u202c\u202d\u202e"))
+
+
+def _strip_bidi_controls(text: str) -> str:
+    return (text or "").translate(_BIDI_CONTROLS)
+
+
+class QuotaResetStatus(Enum):
+    """無料枠の停止を解除しようとした結果。案内は出さない。"""
+
+    # 上限停止ではない。または、まだ上限内に戻っていない。
+    NOT_PAUSED = "not_paused"
+    # 今周期は上限未満。送信が成功した commit で翻訳を戻す。
+    LIFTED = "lifted"
+
+
+@dataclass(frozen=True)
+class _QuotaResetLift:
+    """無料枠の停止解除。status で全呼び出し側が分岐する。"""
+
+    status: QuotaResetStatus
+    period_key: str = ""
+
+
+def _not_paused() -> _QuotaResetLift:
+    return _QuotaResetLift(status=QuotaResetStatus.NOT_PAUSED)
+
+
+class _QuotaResetDelivery:
+    """quota 停止を外す区間。commit するまで理由は残す。
+
+    翻訳や LINE 送信が落ちたら解除しない。月次の「枠が戻った」案内は出さない。
+    """
+
+    def __init__(self, handler: MessageHandler, event: models.MessageEvent, runtime=None) -> None:
+        self._handler = handler
+        self._group_id = event.group_id or ""
+        self.lift = handler._resume_quota_pause_after_reset(event, runtime=runtime)
+        self._committed = False
+
+    def commit(self) -> None:
+        self._handler._commit_quota_reset(self._group_id, self.lift)
+        self._committed = True
+
+    def __enter__(self) -> _QuotaResetDelivery:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+
+def _rich_quick_replies(items: Sequence[dict]) -> tuple:
+    """言語ページの Quick Reply を、Flex に付けられるボタンへ写す。"""
+
+    buttons = []
+    for item in items:
+        action = (item or {}).get("action") or {}
+        label = str(action.get("label") or "")
+        kind = action.get("type")
+        if kind == "uri":
+            buttons.append(RichButton(label=label, uri=str(action.get("uri") or "")))
+        elif kind == "postback":
+            buttons.append(RichButton(label=label, data=str(action.get("data") or "")))
+        elif kind == "message":
+            buttons.append(RichButton(label=label, text=str(action.get("text") or "")))
+    return tuple(buttons)
+
 
 RATE_LIMIT_MESSAGE = "You have reached the rate limit. Please try again later."
 # DB に届かないときは言語一覧を引けない。英語の原文をそのまま返す。
@@ -206,6 +309,10 @@ class _CommandTrace:
                 continue
             if message.get("type") == "text":
                 self.text_length += len(message.get("text") or "")
+                continue
+            if message.get("type") == "flex":
+                self.text_length += len(flex_body_text(message))
+                self.template_action_count += flex_action_count(message)
                 continue
             if message.get("type") != "template":
                 continue
@@ -580,6 +687,43 @@ class MessageHandler:
             logger.exception("Failed to persist direct assistant message")
 
     # --- internal helpers ---
+    def _reply_guidance(
+        self,
+        event: models.MessageEvent,
+        guidance,
+        *,
+        command_trace: _CommandTrace | None = None,
+        quick_replies: Sequence[dict] | None = None,
+        extra_texts: Sequence[str] = (),
+    ) -> bool:
+        """案内を Flex で返す。送信に失敗したときだけ、URL を分けた平文に戻す。"""
+
+        if not event.reply_token:
+            return False
+        if quick_replies:
+            guidance = replace(
+                guidance,
+                quick_replies=guidance.quick_replies + _rich_quick_replies(quick_replies),
+            )
+        rendered = render_guidance(guidance)
+        trailing = [{"type": "text", "text": text[:LINE_REPLY_TEXT_LIMIT]} for text in extra_texts if text]
+        if rendered.flex is not None:
+            try:
+                return self._reply_messages(
+                    event,
+                    [rendered.flex, *trailing],
+                    command_trace=command_trace,
+                )
+            except Exception:
+                logger.warning("Flex reply failed; falling back to plain text", exc_info=True)
+        elif rendered.omit_reason:
+            logger.info("Flex guidance omitted | reason=%s", rendered.omit_reason)
+        return self._reply_messages(
+            event,
+            [*rendered.plain_messages, *trailing],
+            command_trace=command_trace,
+        )
+
     def _reply_text(
         self,
         event: models.MessageEvent,
@@ -587,6 +731,7 @@ class MessageHandler:
         *,
         command_trace: _CommandTrace | None = None,
         normalize_lists: bool = True,
+        quick_reply: Sequence[dict] | None = None,
     ) -> bool:
         if not event.reply_token or not text:
             return False
@@ -594,6 +739,18 @@ class MessageHandler:
         # ユーザー翻訳は build_translation_reply 側で、原文に改行があるときだけ整える。
         reply_text = normalize_inline_lists(text) if normalize_lists else text
         reply_text = reply_text[:LINE_REPLY_TEXT_LIMIT]
+        if quick_reply:
+            return self._reply_messages(
+                event,
+                [
+                    {
+                        "type": "text",
+                        "text": reply_text,
+                        "quickReply": {"items": list(quick_reply)},
+                    }
+                ],
+                command_trace=command_trace,
+            )
         started = time.perf_counter()
         try:
             self._line.reply_text(event.reply_token, reply_text)
@@ -654,13 +811,47 @@ class MessageHandler:
         return True
 
     def _attempt_language_enrollment(self, event: models.MessageEvent) -> bool:
-        plan_key = self._resolve_effective_plan_for_group(event.group_id)
+        text = event.text or ""
+        family = self._reply_family_for(event.group_id, text)
+        if text and is_nonlinguistic(text):
+            self._reply_text(
+                event,
+                self._with_settings_link(event.group_id, unrecognized_prompt(family), family),
+            )
+            return True
+        parsed = read_mention(text)
+        if parsed.kind in {"settings_help", "howto", "catalog"}:
+            instruction = self._resolve_command_instruction_language(
+                text,
+                preferred="",
+                group_languages=[],
+            )
+            return self._handle_local_mention(event, text, parsed, instruction)
+        if parsed.kind in {"languages", "unsupported", "translate_all", "swap_unclear"}:
+            # カタログ外は未対応や一部保存にせず、下の propose へ渡す
+            if not needs_catalog_fallback(parsed) and self._enroll_from_local_parse(event, text, parsed, family):
+                return True
+        return self._propose_language_enrollment(event)
+
+    def _propose_language_enrollment(self, event: models.MessageEvent, text: str | None = None) -> bool:
+        """既存の propose。カタログ外はここで Gemini へ戻る。"""
+
+        target = event
+        if text is not None and text != (event.text or ""):
+            target = replace(event, text=text)
+        plan_key = self._resolve_effective_plan_for_group(target.group_id)
         bundle = self._language_settings.propose(
-            event,
+            target,
             max_languages=language_limit_for(plan_key),
         )
         if not bundle:
             return False
+        source = target.text or ""
+        family = self._reply_family_for(event.group_id, source)
+        if bundle.notice_kind == "read_empty":
+            body = bundle.texts[0] if bundle.texts else enrollment_prompt(family)
+            self._reply_with_language_menu(event, body, family)
+            return True
         if bundle.messages:
             self._reply_messages(event, list(bundle.messages))
         elif bundle.texts:
@@ -670,6 +861,287 @@ class MessageHandler:
             extra={"group_id": event.group_id, "user_id": event.user_id},
         )
         return True
+
+    def _enroll_from_local_parse(
+        self,
+        event: models.MessageEvent,
+        text: str,
+        parsed: MentionRead,
+        family: str,
+    ) -> bool:
+        """はっきり読めた言語は、確認ボタンを挟まず保存して一度だけ伝える。"""
+
+        limit = language_limit_for(self._resolve_effective_plan_for_group(event.group_id))
+        if parsed.kind not in {"translate_all", "unsupported", "languages", "swap_unclear"}:
+            return False
+        update = decide_language_update(
+            mode=parsed.mode,
+            current=self._current_language_pairs(event.group_id),
+            requested=parsed.languages,
+            limit=limit,
+            family=family,
+            kind=parsed.kind,
+            unsupported=parsed.unsupported,
+            swap_from=parsed.swap_from,
+            swap_to=parsed.swap_to,
+        )
+        # 削除や不明を置換として保存しない。propose へ落とすと、また言語として読まれる
+        return self._dispatch_language_update(
+            event,
+            update,
+            family,
+            parsed.unsupported,
+            source="enroll",
+        )
+
+    def _current_language_pairs(self, group_id: str) -> List[Tuple[str, str]]:
+        return [(code, name) for code, name in self._group_language_records(group_id) if code]
+
+    def _dispatch_language_update(
+        self,
+        event: models.MessageEvent,
+        update: LanguageUpdate,
+        family: str,
+        unsupported: Sequence[str] = (),
+        *,
+        source: str,
+        instruction_lang: str = "",
+        command_trace: _CommandTrace | None = None,
+    ) -> bool:
+        """決定どおりに返す。未知の action は保存せず失敗させる。"""
+
+        if update.action == "reset":
+            self._repo.reset_group_language_settings(event.group_id)
+            # 上限停止と課金停止の理由は消さない。手動停止のときだけ理由を空にする。
+            if not self._must_keep_pause_reason(event.group_id or ""):
+                self._repo.set_translation_enabled(event.group_id, False)
+            ack = self._translate_template(
+                "Your language settings have been reset. Please tell us all the languages ​​you would like to translate.",
+                instruction_lang,
+                command_trace=command_trace,
+            )
+            self._reply_guidance(
+                event,
+                language_reset_card(
+                    self._with_settings_link(event.group_id, ack, family),
+                    lang=instruction_lang or family,
+                ),
+                command_trace=command_trace,
+            )
+            return True
+        if update.action == "show":
+            return self._handle_show_languages(
+                event,
+                instruction_lang,
+                command_trace=command_trace,
+            )
+        if update.action == "noop":
+            raise ValueError("language update produced no reply")
+        if update.action == "reply":
+            if update.enable_translation is False and not self._must_keep_pause_reason(event.group_id or ""):
+                self._repo.set_translation_enabled(event.group_id, False)
+            self._reply_language_update(
+                event,
+                update,
+                family,
+                unsupported,
+                source=source,
+                instruction_lang=instruction_lang,
+                command_trace=command_trace,
+            )
+            return True
+        if update.action != "save":
+            raise ValueError(f"unknown language update action: {update.action}")
+
+        if source == "enroll" and update.write == "replace":
+            # 保存できないリポジトリは、確認ボタンの propose に戻す
+            if not self._persist_enrollment_languages(event.group_id, update.languages):
+                return False
+        else:
+            try:
+                self._write_language_update(event.group_id, update)
+            except AttributeError:
+                if source == "enroll":
+                    return False
+                raise
+        # 言語の追加・削除・置換は通す。上限停止の解除は送信成功のあとだけ。案内は出さない。
+        with _QuotaResetDelivery(self, event) as delivery:
+            lift = delivery.lift
+            if update.enable_translation is True:
+                if self._should_enable_after_reset_attempt(event.group_id or "", lift):
+                    self._repo.set_translation_enabled(event.group_id, True)
+            elif update.enable_translation is False and not self._must_keep_pause_reason(event.group_id or ""):
+                self._repo.set_translation_enabled(event.group_id, False)
+            if update.page_error == "too_many" and (update.reply or "").strip():
+                # ダウングレード後の削除など、まだ上限を超える。保存結果ではなく残す言語を聞く。
+                ack = update.reply
+                if source == "settings":
+                    ack = self._localize_fixed_reply(
+                        ack,
+                        family=family,
+                        instruction_lang=instruction_lang,
+                        command_trace=command_trace,
+                    )
+            else:
+                pairs = self._confirmation_pairs(event.group_id, update.languages)
+                ack = setup_confirmation(
+                    pairs,
+                    url=self._language_settings_url(event.group_id, ""),
+                    translate=self._group_copy_translate(),
+                )
+            notice = unsupported_prompt(unsupported, family)
+            if notice:
+                if source == "settings":
+                    notice = self._localize_fixed_reply(
+                        notice,
+                        family=family,
+                        instruction_lang=instruction_lang,
+                        command_trace=command_trace,
+                    )
+                ack = f"{ack}\n{notice}"
+            self._reply_text(event, ack, command_trace=command_trace)
+            delivery.commit()
+        return True
+
+    def _reply_language_update(
+        self,
+        event: models.MessageEvent,
+        update: LanguageUpdate,
+        family: str,
+        unsupported: Sequence[str],
+        *,
+        source: str,
+        instruction_lang: str,
+        command_trace: _CommandTrace | None,
+    ) -> None:
+        text = update.reply or ""
+        extra = unsupported_prompt(unsupported, family)
+        if extra and extra not in text:
+            text = f"{extra}\n{text}" if text else extra
+        if source == "settings" and text:
+            text = self._localize_fixed_reply(
+                text,
+                family=family,
+                instruction_lang=instruction_lang,
+                command_trace=command_trace,
+            )
+        if not text:
+            raise ValueError("language update produced no reply")
+        # 未設定の削除、片側だけ、役割が合わない置換は、ページへのリンク付きで返す
+        if source == "enroll" or update.page_error in {"need_pair", "none_set", "not_set", "clarify"}:
+            self._reply_with_language_menu(event, text, family, command_trace=command_trace)
+            return
+        if update.page_error in {"too_many", "select"}:
+            self._reply_text(
+                event,
+                self._with_settings_link(event.group_id, text, family),
+                command_trace=command_trace,
+            )
+            return
+        self._reply_text(event, text, command_trace=command_trace)
+
+    def _write_language_update(self, group_id: str, update: LanguageUpdate) -> None:
+        """決定の write だけを実行する。未知の write は置換にしない。"""
+
+        if update.languages and exceeds_language_limit(
+            [code for code, _name in update.languages],
+            limit=self._max_group_languages,
+        ):
+            raise ValueError("language update exceeds the absolute cap")
+        if update.write == "none":
+            return
+        if update.write == "replace":
+            self._repo.replace_group_languages(group_id, update.languages)
+            return
+        if update.write == "add":
+            if update.added:
+                self._repo.add_group_languages(group_id, update.added)
+            return
+        if update.write == "remove":
+            if update.removed:
+                self._repo.remove_group_languages(group_id, update.removed)
+            return
+        if update.write == "apply":
+            self._repo.apply_language_changes(group_id, update.added, update.removed)
+            return
+        raise ValueError(f"unknown language write: {update.write}")
+
+    def _persist_enrollment_languages(self, group_id: str, pairs: Sequence[Tuple[str, str]]) -> bool:
+        completer = getattr(self._repo, "try_complete_group_languages", None)
+        if completer:
+            try:
+                if completer(group_id, pairs):
+                    return True
+            except Exception:
+                logger.debug("Failed to complete group languages", exc_info=True)
+        replacer = getattr(self._repo, "replace_group_languages", None)
+        if not replacer:
+            return False
+        replacer(group_id, pairs)
+        return True
+
+    def _group_copy_translate(self):
+        """インターフェース翻訳。translate が無いスタブでは固定文のままにする。"""
+
+        translate = getattr(self._interface_translation, "translate", None)
+        return translate if callable(translate) else None
+
+    def _reply_setup_confirmation(
+        self,
+        event: models.MessageEvent,
+        pairs: Sequence[Tuple[str, str]],
+        family: str,
+        unsupported: Sequence[str] = (),
+    ) -> None:
+        url = self._language_settings_url(event.group_id, "")
+        ack = setup_confirmation(pairs, url=url, translate=self._group_copy_translate())
+        notice = unsupported_prompt(unsupported, family)
+        if notice:
+            ack = f"{ack}\n{notice}"
+        self._reply_text(event, ack)
+
+    def _reply_need_both(
+        self,
+        event: models.MessageEvent,
+        parsed: MentionRead,
+        family: str,
+        text: str,
+    ) -> None:
+        labels = [language_label(code, family, surface=surface) for code, surface in parsed.languages if code]
+        message = need_both_languages_prompt(labels, family=family)
+        notice = unsupported_prompt(parsed.unsupported, family)
+        if notice:
+            message = f"{notice}\n{message}"
+        message = self._localize_fixed_reply(
+            message,
+            family=family,
+            instruction_lang=family_for("", text),
+        )
+        self._reply_with_language_menu(event, message, family)
+
+    def _reply_with_language_menu(
+        self,
+        event: models.MessageEvent,
+        text: str,
+        family: str,
+        *,
+        command_trace: _CommandTrace | None = None,
+    ) -> None:
+        self._reply_text(
+            event,
+            self._with_settings_link(event.group_id, text, family),
+            command_trace=command_trace,
+            quick_reply=self._language_quick_replies(event.group_id, family),
+        )
+
+    def _language_quick_replies(self, group_id: str, family: str) -> list:
+        return language_quick_replies(family, self._language_settings_url(group_id, family))
+
+    @staticmethod
+    def _mention_language_name(code: str, surface: str) -> str:
+        if re.search(r"[ぁ-んァ-ン一-龯]", surface or ""):
+            return surface
+        return language_label(code, "en")
 
     # --- command mode helpers ---
     def _extract_command_text(self, event: models.MessageEvent) -> Optional[str]:
@@ -736,6 +1208,12 @@ class MessageHandler:
             finally:
                 trace.log_stage("runtime_fetch", runtime_started)
 
+            quota_paused = self._is_over_free_quota_pause(runtime, event.group_id or "")
+            if quota_paused and not (command_text or "").strip():
+                # 停止中の空メンションはコマンド判定に回さず、上限の再案内だけ返す
+                self._reply_quota_pause_reminder(event, runtime, repeat="silent")
+                return True
+
             local = read_mention(command_text)
             if local.kind != "none":
                 language_started = time.perf_counter()
@@ -745,15 +1223,20 @@ class MessageHandler:
                     group_languages=runtime.group_languages,
                 )
                 trace.log_stage("instruction_language_resolution", language_started)
-                handled = self._handle_local_mention(
-                    event,
-                    command_text,
-                    local,
-                    instruction_lang,
-                    command_trace=trace,
-                )
-                if handled:
-                    return True
+                # 未設定グループのカタログ外は、ローカル確定せず propose へ渡す
+                if needs_catalog_fallback(local) and not runtime.group_languages:
+                    if self._propose_language_enrollment(event, command_text):
+                        return True
+                else:
+                    handled = self._handle_local_mention(
+                        event,
+                        command_text,
+                        local,
+                        instruction_lang,
+                        command_trace=trace,
+                    )
+                    if handled:
+                        return True
 
             router_input = self._build_command_router_input(command_text, runtime)
             router_started = time.perf_counter()
@@ -799,30 +1282,68 @@ class MessageHandler:
                     )
                 elif action == "howto":
                     message = (decision.ack_text or "").strip()
+                    howto_family = reply_family(command_text, runtime.group_languages)
                     # 「使い方を教えてと送って」でループさせず、その場で答える
                     if not message or is_howto_loop(message):
-                        message = howto_prompt(
-                            family=family_for(instruction_lang or decision.instruction_language, command_text)
-                        )
-                    handled = self._reply_text(event, message, command_trace=trace)
+                        message = howto_prompt(family=howto_family)
+                    message = self._with_settings_link(event.group_id, message, howto_family)
+                    handled = self._reply_guidance(
+                        event,
+                        howto_card(message, lang=howto_family),
+                        command_trace=trace,
+                        quick_replies=self._language_quick_replies(event.group_id, howto_family),
+                    )
                 elif action == "pause":
-                    self._repo.set_translation_enabled(event.group_id, False)
-                    base_ack = "I will pause translation. Please mention me again when you want to resume."
-                    ack = decision.ack_text or self._safe_translate_for_instruction(
-                        base_ack,
-                        instruction_lang,
-                        command_trace=trace,
-                    )
-                    handled = self._reply_text(event, ack, command_trace=trace)
+                    if quota_paused:
+                        # 上限停止を手動停止に上書きしない。理由が消えると翌月の自動再開が外れる
+                        self._reply_quota_pause_reminder(event, runtime, repeat="silent")
+                        handled = True
+                    elif (runtime.translation_paused_reason or "") == BILLING_PAUSE:
+                        # 課金停止は手動停止にしない。解除は支払いの復旧だけ。
+                        ack = self._safe_translate_for_instruction(
+                            "Translation stays paused until billing is updated.",
+                            instruction_lang,
+                            command_trace=trace,
+                        )
+                        handled = self._reply_text(event, ack, command_trace=trace)
+                    else:
+                        self._repo.set_translation_enabled(event.group_id, False)
+                        base_ack = "I will pause translation. Please mention me again when you want to resume."
+                        ack = decision.ack_text or self._safe_translate_for_instruction(
+                            base_ack,
+                            instruction_lang,
+                            command_trace=trace,
+                        )
+                        handled = self._reply_text(event, ack, command_trace=trace)
                 elif action == "resume":
-                    self._repo.set_translation_enabled(event.group_id, True)
-                    base_ack = "I will resume the translation."
-                    ack = decision.ack_text or self._safe_translate_for_instruction(
-                        base_ack,
-                        instruction_lang,
-                        command_trace=trace,
-                    )
-                    handled = self._reply_text(event, ack, command_trace=trace)
+                    with _QuotaResetDelivery(self, event, runtime) as delivery:
+                        lift = delivery.lift
+                        if lift.status == QuotaResetStatus.NOT_PAUSED and (
+                            runtime.translation_paused_reason or ""
+                        ) == BILLING_PAUSE:
+                            ack = self._safe_translate_for_instruction(
+                                "Translation stays paused until billing is updated.",
+                                instruction_lang,
+                                command_trace=trace,
+                            )
+                            handled = self._reply_text(event, ack, command_trace=trace)
+                            delivery.commit()
+                        elif lift.status == QuotaResetStatus.NOT_PAUSED and quota_paused:
+                            # 「再開しました」とは返さない。無料枠が戻るまで翻訳は止まったまま
+                            self._reply_quota_pause_reminder(event, runtime, repeat="short")
+                            delivery.commit()
+                            handled = True
+                        else:
+                            if lift.status == QuotaResetStatus.NOT_PAUSED:
+                                self._repo.set_translation_enabled(event.group_id, True)
+                            base_ack = "I will resume the translation."
+                            ack = decision.ack_text or self._safe_translate_for_instruction(
+                                base_ack,
+                                instruction_lang,
+                                command_trace=trace,
+                            )
+                            handled = self._reply_text(event, ack, command_trace=trace)
+                            delivery.commit()
                 elif action == "subscription_menu":
                     handled = self._handle_subscription_menu(
                         event,
@@ -842,12 +1363,17 @@ class MessageHandler:
                         command_trace=trace,
                     )
                 else:
-                    handled = self._respond_unknown_instruction(
-                        event,
-                        instruction_lang or decision.instruction_language,
-                        command_text,
-                        command_trace=trace,
-                    )
+                    if quota_paused:
+                        # unknown は翻訳をオンに戻す。上限停止中は戻さず案内する
+                        self._reply_quota_pause_reminder(event, runtime, repeat="silent")
+                        handled = True
+                    else:
+                        handled = self._respond_unknown_instruction(
+                            event,
+                            instruction_lang or decision.instruction_language,
+                            command_text,
+                            command_trace=trace,
+                        )
             finally:
                 trace.log_stage("action_handler", action_started)
             return handled
@@ -933,11 +1459,14 @@ class MessageHandler:
         return json.dumps(payload, ensure_ascii=False)
 
     def _resolve_next_reset_at_utc(self, runtime: models.TranslationRuntimeState) -> str:
-        if runtime.period_end:
+        plan_key = self._resolve_effective_plan_key(runtime.subscription_status, runtime.entitlement_plan)
+        # 解約後も旧 current_period_end が残る。Free は暦月の period_key から出す。
+        if runtime.period_end and normalize_plan_key(plan_key) != FREE_PLAN:
             return runtime.period_end.astimezone(timezone.utc).isoformat()
         reset_date = self._resolve_quota_reset_date(
             period_key=runtime.period_key,
             period_end=runtime.period_end,
+            plan_key=plan_key,
         )
         if not reset_date:
             return ""
@@ -988,7 +1517,7 @@ class MessageHandler:
     ) -> bool:
         """モデルが取りこぼす言語設定・使い方を、固定文で返す。"""
 
-        family = family_for(instruction_lang, command_text)
+        family = self._reply_family_for(event.group_id, command_text, instruction_lang)
         limit = language_limit_for(self._resolve_effective_plan_for_group(event.group_id))
         if command_trace:
             command_trace.set_decision(
@@ -996,22 +1525,51 @@ class MessageHandler:
                 instruction_lang,
             )
         if parsed.kind == "catalog":
-            self._reply_text(event, catalog_prompt(family=family, limit=limit), command_trace=command_trace)
-            return True
-        if parsed.kind == "settings_help":
-            names = [
-                language_label(code, family, stored=stored)
-                for code, stored in self._group_language_records(event.group_id)
-                if code
-            ]
-            self._reply_text(
+            self._reply_guidance(
                 event,
-                settings_help_prompt(names, family=family, limit=limit),
+                catalog_card(catalog_prompt(family=family, limit=limit), lang=family),
                 command_trace=command_trace,
             )
             return True
+        if parsed.kind == "settings_help":
+            records = [
+                (code, stored)
+                for code, stored in self._group_language_records(event.group_id)
+                if code
+            ]
+
+            def labels(target: str) -> list[str]:
+                return [language_label(code, target, stored=stored) for code, stored in records]
+
+            text, button_family = self._copy_for_group_languages(
+                event.group_id,
+                family,
+                english=settings_help_prompt(labels("en"), family="en", limit=limit),
+                static={
+                    name: settings_help_prompt(labels(name), family=name, limit=limit)
+                    for name in ("ja", "zh", "ko", "th")
+                },
+            )
+            self._reply_guidance(
+                event,
+                settings_help_card(text, lang=button_family),
+                command_trace=command_trace,
+                quick_replies=self._language_quick_replies(event.group_id, button_family),
+            )
+            return True
         if parsed.kind == "howto":
-            self._reply_text(event, howto_prompt(family=family), command_trace=command_trace)
+            text, button_family = self._copy_for_group_languages(
+                event.group_id,
+                family,
+                english=howto_prompt(family="en"),
+                static={name: howto_prompt(family=name) for name in ("ja", "zh", "ko", "th")},
+            )
+            self._reply_guidance(
+                event,
+                howto_card(text, lang=button_family),
+                command_trace=command_trace,
+                quick_replies=self._language_quick_replies(event.group_id, button_family),
+            )
             return True
         if parsed.kind == "unsupported":
             self._reply_text(
@@ -1059,12 +1617,14 @@ class MessageHandler:
                 languages_to_remove=choices,
                 instruction_language=instruction_lang,
             )
-        return models.CommandDecision(
-            action="language_settings",
-            operation="add",
-            languages_to_add=choices,
-            instruction_language=instruction_lang,
-        )
+        if parsed.mode == "add":
+            return models.CommandDecision(
+                action="language_settings",
+                operation="add",
+                languages_to_add=choices,
+                instruction_language=instruction_lang,
+            )
+        return models.CommandDecision(action="unknown", instruction_language=instruction_lang)
 
     def _handle_language_settings(
         self,
@@ -1075,163 +1635,150 @@ class MessageHandler:
         command_trace: _CommandTrace | None = None,
     ) -> bool:
         text = command_text or ""
-        family = family_for(decision.instruction_language, text)
+        family = self._reply_family_for(event.group_id, text, decision.instruction_language)
         parsed = read_mention(text)
+        # 未設定のカタログ外は、ここでも一部保存せず propose へ戻す
+        if needs_catalog_fallback(parsed) and not self._current_language_pairs(event.group_id):
+            if self._propose_language_enrollment(event, text):
+                return True
+            self._reply_text(
+                event,
+                self._with_settings_link(event.group_id, enrollment_prompt(family), family),
+                command_trace=command_trace,
+            )
+            return True
         # 絵文字だけ・数字だけでは、モデルが reset_all と返しても設定を消さない
         if text and is_nonlinguistic(text):
             self._reply_text(event, unrecognized_prompt(family), command_trace=command_trace)
             return True
-        plan_key = self._resolve_effective_plan_for_group(event.group_id)
-        language_limit = language_limit_for(plan_key)
-        # 上限を超える依頼は、全消去にも置換にもしない
-        over_set = (
-            parsed.kind == "languages"
-            and parsed.mode != "add"
-            and len(parsed.languages) > language_limit
-        )
-        if parsed.kind == "translate_all" or over_set:
-            if parsed.kind == "translate_all":
-                labels = catalog_labels(family)
-            else:
-                labels = [language_label(code, family, surface=surface) for code, surface in parsed.languages]
-            message = selection_prompt(labels, family=family, limit=language_limit)
-            notice = unsupported_prompt(parsed.unsupported, family)
-            if notice:
-                message = f"{notice}\n{message}"
-            self._reply_text(
+        limit = language_limit_for(self._resolve_effective_plan_for_group(event.group_id))
+        # 文面から読めた操作は、モデルの operation より先に同じ決定表へ乗せる
+        if parsed.kind in {"languages", "translate_all", "unsupported", "swap_unclear"}:
+            update = decide_language_update(
+                mode=parsed.mode,
+                current=self._current_language_pairs(event.group_id),
+                requested=parsed.languages,
+                limit=limit,
+                family=family,
+                kind=parsed.kind,
+                unsupported=parsed.unsupported,
+                swap_from=parsed.swap_from,
+                swap_to=parsed.swap_to,
+            )
+            return self._dispatch_language_update(
                 event,
-                self._localize_fixed_reply(
-                    message,
-                    family=family,
-                    instruction_lang=decision.instruction_language,
-                    command_trace=command_trace,
-                ),
+                update,
+                family,
+                parsed.unsupported,
+                source="settings",
+                instruction_lang=decision.instruction_language,
                 command_trace=command_trace,
             )
-            return True
-        if parsed.kind == "unsupported":
-            self._reply_text(
-                event,
-                self._localize_fixed_reply(
-                    unsupported_prompt(parsed.unsupported, family),
-                    family=family,
-                    instruction_lang=decision.instruction_language,
-                    command_trace=command_trace,
-                ),
-                command_trace=command_trace,
-            )
-            return True
-
-        op = decision.operation or "reset_all"
-        add_langs = [(lang.code, lang.name) for lang in decision.languages_to_add]
-        remove_codes = [lang.code for lang in decision.languages_to_remove]
-        # 「英語だけにして」が reset_all と追加リストで来たら、全消去ではなくその言語への置き換え
-        replacing = op == "reset_all" and any((code or "").strip() for code, _name in add_langs)
-        # モデルの explicit_reset か、英語・日本語の明示表現があるときだけ全消去する
-        if op == "reset_all" and not replacing and not allows_language_reset(
-            explicit_reset=decision.explicit_reset,
-            text=command_text or "",
-        ):
-            op = "show"
-        if op == "show":
-            return self._handle_show_languages(
-                event,
-                decision.instruction_language,
-                command_trace=command_trace,
-            )
-        valid_ops = {"reset_all", "add_and_remove", "add", "remove"}
-        if op not in valid_ops:
-            logger.info("Unsupported language operation", extra={"op": op})
+        update = self._language_update_from_decision(event, decision, text, family, limit)
+        if update is None:
+            logger.info("Unsupported language operation", extra={"op": decision.operation})
             return self._respond_unknown_instruction(
                 event,
                 decision.instruction_language,
                 command_text,
                 command_trace=command_trace,
             )
-        current_langs = self._dedup_language_codes(self._repo.fetch_group_languages(event.group_id))
-        if op in {"add", "add_and_remove"} or replacing:
-            # 置き換えは今の言語を残さないので、上限は追加リストだけで見る
-            limit_current = [] if replacing else current_langs
-            limit_remove = [] if replacing else remove_codes
-            if self._would_exceed_language_limit(
-                limit_current,
-                add_langs,
-                limit_remove,
-                max_languages=language_limit,
-            ):
-                logger.info(
-                    "Language update rejected: exceeds max",
-                    extra={
-                        "group_id": event.group_id,
-                        "current": current_langs,
-                        "add": [code for code, _ in add_langs],
-                        "remove": remove_codes,
-                    },
-                )
-                msg = self._localize_fixed_reply(
-                    self._language_limit_reply(
-                        family,
-                        language_limit,
-                        current=limit_current,
-                        wanted=add_langs,
-                    ),
-                    family=family,
-                    instruction_lang=decision.instruction_language,
-                    command_trace=command_trace,
-                )
-                self._reply_text(event, msg, command_trace=command_trace)
-                return True
-
-        if op == "reset_all" and not replacing:
-            self._repo.reset_group_language_settings(event.group_id)
-            # 言語設定モード中は翻訳停止
-            self._repo.set_translation_enabled(event.group_id, False)
-            # リセット時は必ずガイダンス文言を返す（LLM 生成のあいまいな承諾メッセージを避ける）
-            ack = self._translate_template(
-                "Your language settings have been reset. Please tell us all the languages ​​you would like to translate.",
-                decision.instruction_language,
-                command_trace=command_trace,
-            )
-            self._reply_text(event, ack, command_trace=command_trace)
-            return True
-
-        normalized_add: List[Tuple[str, str]] = []
-        if replacing:
-            # 削除と挿入は一つのトランザクション。挿入失敗で既存言語を消さない
-            normalized_add = self._normalize_new_languages(add_langs, set())
-            self._repo.replace_group_languages(event.group_id, normalized_add)
-        elif op == "add_and_remove":
-            remove_set = {code.lower() for code in remove_codes if code}
-            after_remove = [lang for lang in current_langs if lang not in remove_set]
-            normalized_add = self._normalize_new_languages(add_langs, set(after_remove))
-            self._repo.apply_language_changes(event.group_id, normalized_add, remove_codes)
-        elif op == "add":
-            normalized_add = self._normalize_new_languages(add_langs, set(current_langs))
-            if normalized_add:
-                self._repo.add_group_languages(event.group_id, normalized_add)
-        elif op == "remove":
-            if remove_codes:
-                self._repo.remove_group_languages(event.group_id, remove_codes)
-
-        # 言語変更後は翻訳再開。置き換えも翻訳を止めない
-        self._repo.set_translation_enabled(event.group_id, True)
-
-        # 結果の言語を固定文で言う。「言語設定を更新しました」だけでは何になったか分からない
-        ack = completion_prompt(self._resulting_language_pairs(event.group_id), family=family)
-        notice = unsupported_prompt(parsed.unsupported, family)
-        if notice:
-            ack = f"{ack}\n{notice}"
-        self._reply_text(
+        return self._dispatch_language_update(
             event,
-            self._localize_fixed_reply(
-                ack,
-                family=family,
-                instruction_lang=decision.instruction_language,
-                command_trace=command_trace,
-            ),
+            update,
+            family,
+            parsed.unsupported,
+            source="settings",
+            instruction_lang=decision.instruction_language,
             command_trace=command_trace,
         )
-        return True
+
+    def _language_update_from_decision(
+        self,
+        event: models.MessageEvent,
+        decision: models.CommandDecision,
+        text: str,
+        family: str,
+        limit: int,
+    ) -> LanguageUpdate | None:
+        """モデルの operation を決定表のモードへ写す。空は全消去にしない。"""
+
+        op = (decision.operation or "").strip()
+        add_langs = [(lang.code, lang.name) for lang in decision.languages_to_add]
+        remove_codes = [lang.code for lang in decision.languages_to_remove if lang.code]
+        state = language_group_state(
+            self._dedup_language_codes(self._repo.fetch_group_languages(event.group_id)),
+            limit=limit,
+        )
+        if op == "show":
+            return LanguageUpdate(action="show", mode="show", state=state)
+        named = any((code or "").strip() for code, _name in add_langs)
+        if op == "reset_all" and not named:
+            if allows_language_reset(explicit_reset=decision.explicit_reset, text=text):
+                return LanguageUpdate(action="reset", mode="reset", state=state, enable_translation=False)
+            return LanguageUpdate(action="show", mode="show", state=state)
+        if op == "reset_all":
+            mode, requested, remove = "replace", add_langs, ()
+        elif op == "add":
+            mode, requested, remove = "add", add_langs, ()
+        elif op == "remove":
+            mode, requested, remove = "remove", [(code, "") for code in remove_codes], ()
+        elif op == "add_and_remove":
+            mode, requested, remove = "add_remove", add_langs, remove_codes
+        else:
+            return None
+        return decide_language_update(
+            mode=mode,
+            current=self._current_language_pairs(event.group_id),
+            requested=requested,
+            remove=remove,
+            limit=limit,
+            family=family,
+            kind="languages",
+        )
+
+    def _language_settings_url(self, group_id: str, family: str) -> str:
+        builder = getattr(self._subscription_service, "create_language_settings_url", None)
+        if not builder or not group_id:
+            return ""
+        try:
+            return builder(group_id, family=family) or ""
+        except Exception:
+            logger.debug("Failed to build language settings url", exc_info=True)
+            return ""
+
+    def _with_settings_link(self, group_id: str, text: str, family: str) -> str:
+        line = settings_page_line(family, self._language_settings_url(group_id, family))
+        if not line:
+            return text
+        return f"{text}\n\n{line}"
+
+    def _copy_for_group_languages(
+        self,
+        group_id: str,
+        family: str,
+        *,
+        english: str,
+        static: dict[str, str],
+    ) -> tuple[str, str]:
+        """設定言語があれば英語原文を各言語へ出す。未設定なら送ってきた文の固定文。
+
+        戻り値は本文と、クイック返信の表示言語。
+        """
+
+        codes = [code for code, _name in self._group_language_records(group_id) if code]
+        if not codes:
+            body = static.get(family) or english
+            return self._with_settings_link(group_id, body, family), family
+        page_family = menu_family(codes)
+        text = group_language_copy(
+            codes,
+            english=english,
+            static=static,
+            url=self._language_settings_url(group_id, page_family),
+            translate=self._group_copy_translate(),
+        )
+        return text, page_family
 
     def _localize_fixed_reply(
         self,
@@ -1248,25 +1795,27 @@ class MessageHandler:
         lowered = (instruction_lang or "").strip().lower()
         if not lowered or lowered.startswith("en"):
             return text
+        # 本文が英語なら、ja/zh/ko/th の指示には固定文を切り替えず英語のまま返す
+        if family_for(lowered) != "en":
+            return text
         return self._safe_translate_for_instruction(
             text,
             instruction_lang,
             command_trace=command_trace,
         )
 
-    def _language_limit_reply(
+    def _confirmation_pairs(
         self,
-        family: str,
-        limit: int,
-        *,
-        current: Sequence[str],
-        wanted: Sequence[Tuple[str, str]],
-    ) -> str:
-        wanted_labels = [language_label(code, family, stored=name) for code, name in wanted if code]
-        if not current:
-            return selection_prompt(wanted_labels, family=family, limit=limit)
-        current_labels = [language_label(code, family) for code in current if code]
-        return swap_prompt(current_labels, wanted_labels, family=family, limit=limit)
+        group_id: str,
+        written: Sequence[Tuple[str, str]],
+    ) -> List[Tuple[str, str]]:
+        """保存後のコードに、依頼文の表示名を残す。"""
+
+        stored = self._resulting_language_pairs(group_id)
+        names = {code: name for code, name in written if code and name}
+        if not stored:
+            return [(code, name) for code, name in written if code]
+        return [(code, names.get(code) or name) for code, name in stored if code]
 
     def _resulting_language_pairs(self, group_id: str) -> List[Tuple[str, str]]:
         records = self._group_language_records(group_id)
@@ -1293,6 +1842,12 @@ class MessageHandler:
                 current_languages_base_text(records),
                 instruction_lang,
                 command_trace=command_trace,
+            )
+        if len([code for code, _name in records if code]) < 2:
+            message = self._with_settings_link(
+                event.group_id,
+                message,
+                family_for(instruction_lang),
             )
         self._reply_text(event, message, command_trace=command_trace)
         return True
@@ -1354,6 +1909,19 @@ class MessageHandler:
                 logger.debug("Failed to fetch group language names", exc_info=True)
         return [(code, "") for code in self._group_languages_for_reply(group_id)]
 
+    def _reply_family_for(self, group_id: str, text: str, instruction_lang: str = "") -> str:
+        """本文で決まらなければグループ言語、それも無ければ指示言語。漢字だけの日本語は中国語にしない。"""
+
+        group_languages = self._group_languages_for_reply(group_id)
+        hinted = instruction_lang
+        if not hinted:
+            hinted = self._resolve_command_instruction_language(
+                text,
+                preferred="",
+                group_languages=group_languages,
+            )
+        return reply_family(text, group_languages, hinted)
+
     def _group_languages_for_reply(self, group_id: str) -> List[str]:
         try:
             languages = getattr(self._repo, "fetch_group_languages", lambda *_: [])(group_id)
@@ -1376,8 +1944,17 @@ class MessageHandler:
             group_languages=self._group_languages_for_reply(event.group_id),
         )
         fallback = self._build_unknown_response(detected, command_trace=command_trace)
-        self._repo.set_translation_enabled(event.group_id, True)
-        self._reply_text(event, fallback, command_trace=command_trace)
+        # unknown は通常、翻訳をオンに戻す。上限停止の解除は送信成功のあとだけ。
+        with _QuotaResetDelivery(self, event) as delivery:
+            lift = delivery.lift
+            if self._should_enable_after_reset_attempt(event.group_id or "", lift):
+                self._repo.set_translation_enabled(event.group_id, True)
+            self._reply_guidance(
+                event,
+                unknown_command_card(fallback, lang=detected, bot_name=self._bot_mention_name),
+                command_trace=command_trace,
+            )
+            delivery.commit()
         return True
 
     def _handle_translation_flow(
@@ -1410,99 +1987,172 @@ class MessageHandler:
             if self._attempt_language_enrollment(event):
                 return True
 
-        if not runtime.translation_enabled:
-            if self._maybe_resume_quota_paused_translation(
-                event=event,
-                runtime=runtime,
-                plan_key=plan_key,
-                candidate_languages=candidate_languages,
-            ):
-                runtime = replace(
-                    runtime,
-                    translation_enabled=True,
-                    translation_paused_reason=None,
-                )
-            else:
+        # 停止理由が quota で今周期が上限未満なら、送信成功のあとで翻訳を戻す。
+        owes_reset = candidate_languages and (
+            not runtime.translation_enabled or runtime.translation_paused_reason == "quota"
+        )
+        opener = _QuotaResetDelivery(self, event, runtime) if owes_reset else nullcontext()
+        with opener as delivery:
+            quota_reset = delivery.lift if delivery is not None else _not_paused()
+            if quota_reset.status == QuotaResetStatus.NOT_PAUSED and not runtime.translation_enabled:
                 logger.info(
                     "Translation disabled; sending pause notice",
                     extra={"group_id": event.group_id, "user_id": event.user_id},
                 )
                 # 停止理由に応じた案内を返して終了
                 self._send_pause_notice(event)
+                if delivery is not None:
+                    delivery.commit()
                 return True
+            runtime = self._runtime_after_quota_reset(runtime, quota_reset)
 
-        limit = self._quota_limit_for_plan(plan_key)
-        stop_translation_on_limit = stop_translation_on_quota(plan_key)
+            limit = self._quota_limit_for_plan(plan_key)
+            stop_translation_on_limit = stop_translation_on_quota(plan_key)
 
-        self._log_translation_stage("before_translation_run", started, event.group_id)
+            self._log_translation_stage("before_translation_run", started, event.group_id)
 
-        flow = self._translation_flow.run(
-            event=event,
-            sender_name=sender_name,
-            candidate_languages=candidate_languages,
-            stop_translation_on_limit=stop_translation_on_limit,
-            limit=limit,
-            plan_key=plan_key,
-            period_start=runtime.period_start,
-            period_end=runtime.period_end,
-            quota_anchor_day=runtime.quota_anchor_day,
-            prefetched_messages=messages_future,
-        )
-        self._log_translation_stage("after_translation_run", started, event.group_id)
-
-        if self._handle_blocked_translation_flow(event, flow, period_end=runtime.period_end):
-            return True
-
-        if flow.reply_text:
-            self._reply_translation_result(
+            flow = self._translation_flow.run(
                 event=event,
-                flow=flow,
-                language_limit=language_limit,
-                removed_languages=removed_languages,
+                sender_name=sender_name,
+                candidate_languages=candidate_languages,
+                stop_translation_on_limit=stop_translation_on_limit,
                 limit=limit,
                 plan_key=plan_key,
+                period_start=runtime.period_start,
                 period_end=runtime.period_end,
+                quota_anchor_day=runtime.quota_anchor_day,
+                prefetched_messages=messages_future,
             )
-            self._maybe_upsert_deferred_display_name(event, deferred_display_name)
-            self._log_translation_stage("after_line_reply", started, event.group_id)
-        else:
-            logger.warning(
-                "Translation finished without reply text | group=%s candidates=%s plan=%s period=%s",
-                event.group_id,
-                candidate_languages,
-                plan_key,
-                flow.decision.period_key,
-            )
+            self._log_translation_stage("after_translation_run", started, event.group_id)
+
+            if self._handle_blocked_translation_flow(event, flow, period_end=runtime.period_end):
+                # 上限で止めた。quota 停止の解除はしない。
+                return True
+
+            if flow.reply_text:
+                self._reply_translation_result(
+                    event=event,
+                    flow=flow,
+                    language_limit=language_limit,
+                    removed_languages=removed_languages,
+                    limit=limit,
+                    plan_key=plan_key,
+                    period_end=runtime.period_end,
+                )
+                if delivery is not None:
+                    delivery.commit()
+                self._maybe_upsert_deferred_display_name(event, deferred_display_name)
+                self._log_translation_stage("after_line_reply", started, event.group_id)
+            else:
+                logger.warning(
+                    "Translation finished without reply text | group=%s candidates=%s plan=%s period=%s",
+                    event.group_id,
+                    candidate_languages,
+                    plan_key,
+                    flow.decision.period_key,
+                )
 
         return True
 
-    def _maybe_resume_quota_paused_translation(
+    def _resume_quota_pause_after_reset(
         self,
-        *,
         event: models.MessageEvent,
-        runtime: models.TranslationRuntimeState,
-        plan_key: str,
-        candidate_languages: Sequence[str],
-    ) -> bool:
-        if normalize_plan_key(plan_key) != FREE_PLAN:
-            return False
-        if runtime.translation_paused_reason != "quota":
-            return False
-        if not candidate_languages:
-            return False
-        limit = self._quota_limit_for_plan(plan_key)
-        if int(runtime.usage or 0) >= limit:
-            return False
+        runtime: models.TranslationRuntimeState | None = None,
+    ) -> _QuotaResetLift:
+        """quota 停止を、今周期が上限未満なら解除する準備をする。案内は出さない。
 
-        self._repo.set_translation_enabled(event.group_id, True)
+        通常投稿・言語設定・再開・unknown はここだけを通す。
+        理由を消すのは、送信が成功したあとの commit だけ。
+        """
+
+        group_id = event.group_id or ""
+        if not group_id:
+            return _not_paused()
+        if runtime is None:
+            runtime = self._fetch_command_runtime_state(group_id)
+        if runtime.translation_paused_reason != "quota":
+            return _not_paused()
+        _plan_key, period_key, limit, usage = self._quota_period_for_runtime(runtime, group_id)
+        if not reevaluate_quota_pause(
+            paused_reason=runtime.translation_paused_reason,
+            usage=usage,
+            limit=limit,
+        ):
+            return _not_paused()
         logger.info(
-            "Resumed translation after quota reset | group=%s period=%s usage=%s limit=%s",
-            event.group_id,
-            runtime.period_key,
-            runtime.usage,
+            "Quota pause can lift | group=%s period=%s usage=%s limit=%s",
+            group_id,
+            period_key,
+            usage,
             limit,
         )
-        return True
+        return _QuotaResetLift(status=QuotaResetStatus.LIFTED, period_key=period_key)
+
+    def _should_enable_after_reset_attempt(self, group_id: str, lift: _QuotaResetLift) -> bool:
+        """手動停止だけ翻訳をオンに戻す。上限停止と課金停止では理由を消さない。"""
+
+        if lift.status != QuotaResetStatus.NOT_PAUSED:
+            return False
+        return not self._must_keep_pause_reason(group_id)
+
+    def _must_keep_pause_reason(self, group_id: str) -> bool:
+        """言語操作と未知コマンドでは、上限以上の quota と billing を残す。"""
+
+        if not group_id:
+            return False
+        if self._translation_stays_paused_for_quota(group_id):
+            return True
+        runtime = self._fetch_command_runtime_state(group_id)
+        return (runtime.translation_paused_reason or "") == BILLING_PAUSE
+
+    def _runtime_after_quota_reset(
+        self,
+        runtime: models.TranslationRuntimeState,
+        lift: _QuotaResetLift,
+    ) -> models.TranslationRuntimeState:
+        if lift.status == QuotaResetStatus.LIFTED:
+            return replace(runtime, translation_enabled=True, translation_paused_reason=None)
+        return runtime
+
+    def _apply_pause_state(self, group_id: str, state: PauseState) -> None:
+        """停止状態を一回で書く。無いリポジトリは既存のメソッドに分ける。"""
+
+        writer = getattr(self._repo, "set_translation_pause_state", None)
+        if callable(writer):
+            writer(group_id, enabled=state.enabled, reason=state.reason)
+            return
+        if not state.enabled and state.reason == QUOTA_PAUSE:
+            self._pause_translation_for_quota(group_id)
+            return
+        self._repo.set_translation_enabled(group_id, state.enabled)
+
+    def _commit_quota_reset(self, group_id: str, lift: _QuotaResetLift) -> None:
+        """送信できたときだけ quota 理由を外す。案内は出さない。
+
+        同じ投稿で無料枠の上限に再度達していたら、停止は外さない。
+        """
+
+        if lift.status != QuotaResetStatus.LIFTED or not group_id:
+            return
+        if self._free_quota_is_exhausted(group_id):
+            self._pause_translation_for_quota(group_id)
+            logger.info(
+                "Kept quota pause after the period became eligible | group=%s period=%s",
+                group_id,
+                lift.period_key,
+            )
+            return
+        self._apply_pause_state(group_id, PauseState(enabled=True, reason=None))
+        logger.info(
+            "Lifted quota pause | group=%s period=%s",
+            group_id,
+            lift.period_key,
+        )
+
+    def _free_quota_is_exhausted(self, group_id: str) -> bool:
+        runtime = self._fetch_command_runtime_state(group_id)
+        plan_key, _period_key, limit, usage = self._quota_period_for_runtime(runtime, group_id)
+        return normalize_plan_key(plan_key) == FREE_PLAN and usage >= limit
 
     def _prepare_translation_context(
         self,
@@ -1562,6 +2212,10 @@ class MessageHandler:
         plan_key: str,
         period_end: Optional[datetime],
     ) -> None:
+        # 50件目の案内生成は失敗しうる。停止理由はそれより先に残す。
+        if flow.decision.should_notify and stop_translation_on_quota(plan_key):
+            self._pause_translation_for_quota(event.group_id)
+
         messages: List[dict] = []
         if removed_languages:
             base = (
@@ -1574,7 +2228,10 @@ class MessageHandler:
 
         messages.append({"type": "text", "text": flow.reply_text})
 
-        # 有料プランは上限ちょうどを翻訳した返信に通知を足す。無料はここでは通知しない。
+        approaching_claimed = False
+        approaching_period_key = flow.decision.period_key
+        # 有料プランは上限ちょうどを翻訳した返信に通知を足す。
+        # 無料は should_notify が翻訳停止時だけ真なので、50件目の成功翻訳には付けない。
         claimed = False
         if flow.decision.should_notify and self._claim_limit_notice(
             event.group_id or "",
@@ -1591,11 +2248,32 @@ class MessageHandler:
                     period_end=period_end,
                 )
                 messages.append({"type": "text", "text": notice_text})
-                if notice_url:
-                    messages.append({"type": "text", "text": notice_url})
+                self._append_plan_link(messages, notice_url, event.group_id)
             except Exception:
                 self._release_limit_notice(event.group_id or "", flow.decision.period_key, plan_key)
                 raise
+        elif self._should_send_approaching_notice(plan_key, limit, flow.decision.usage):
+            group_id = event.group_id or ""
+            if self._claim_approaching_notice(group_id, approaching_period_key):
+                try:
+                    notice_text, notice_url = self._build_approaching_notice_text(
+                        group_id,
+                        usage=flow.decision.usage,
+                        limit=limit,
+                        period_key=approaching_period_key,
+                        period_end=period_end,
+                    )
+                except Exception:
+                    # 翻訳文は届ける。案内の claim は戻し、41〜49件目でやり直す。
+                    logger.warning(
+                        "Failed to build approaching quota notice",
+                        extra={"group_id": group_id},
+                    )
+                    self._release_approaching_notice(group_id, approaching_period_key)
+                else:
+                    messages.append({"type": "text", "text": notice_text})
+                    self._append_plan_link(messages, notice_url, group_id)
+                    approaching_claimed = True
 
         try:
             if len(messages) == 1 and messages[0].get("type") == "text":
@@ -1603,6 +2281,8 @@ class MessageHandler:
             else:
                 self._reply_messages(event, messages)
         except Exception:
+            if approaching_claimed:
+                self._release_approaching_notice(event.group_id or "", approaching_period_key)
             if claimed:
                 self._release_limit_notice(event.group_id or "", flow.decision.period_key, plan_key)
             raise
@@ -1801,6 +2481,7 @@ class MessageHandler:
                 limit,
                 period_key=period_key,
                 period_end=period_end,
+                reminder=False,
             )
         except Exception:
             self._release_limit_notice(event.group_id or "", period_key, plan_key)
@@ -1855,15 +2536,16 @@ class MessageHandler:
         *,
         period_key: Optional[str] = None,
         period_end: Optional[datetime] = None,
+        reminder: bool = False,
     ) -> None:
         """上限到達/超過時の統一通知。言語は登録言語だけ。Dio作成
 
-        無料枠だけ Flex で送る。組み立てや送信に失敗したときは、同じ固定訳のテキストに戻す。
+        無料枠の初回停止は Flex で送る。組み立てや送信に失敗したときは、同じ固定訳のテキストに戻す。
         テキストも失敗した例外は呼び出し側へ返し、通知済みフラグを戻せるようにする。
-        Standard / Pro の文面はこの経路でもテキストのまま。
+        停止中の再案内と Standard / Pro は、理由とプランと課金ボタンを付けたテキストのまま。
         """
 
-        if normalize_plan_key(plan_key) == FREE_PLAN:
+        if normalize_plan_key(plan_key) == FREE_PLAN and not reminder:
             if self._reply_free_limit_flex(
                 event,
                 limit,
@@ -1885,11 +2567,12 @@ class MessageHandler:
             limit,
             period_key=period_key,
             period_end=period_end,
+            reminder=reminder,
         )
+        # 無料枠の Flex とは別に、有料プランの上限案内は平文のままにする。
         messages = [{"type": "text", "text": notice_text[:5000]}]
-        if url:
-            # URL は左右書字方向混在時に誤判定されやすいため別メッセージで送る
-            messages.append({"type": "text", "text": url})
+        # URL は左右書字方向混在時に誤判定されやすいため本文から分離する
+        self._append_plan_link(messages, url, event.group_id)
         self._reply_messages(event, messages)
 
     def _reply_free_limit_flex(
@@ -2060,6 +2743,7 @@ class MessageHandler:
         period_key: Optional[str] = None,
         period_end: Optional[datetime] = None,
         paid: Optional[bool] = None,
+        reminder: bool = False,
     ) -> tuple[str, Optional[str]]:
         normalized = normalize_plan_key(plan_key)
         if paid is True:
@@ -2067,59 +2751,231 @@ class MessageHandler:
         elif paid is False:
             normalized = FREE_PLAN
 
+        reset_date = self._resolve_quota_reset_date(
+            period_key=period_key,
+            period_end=period_end,
+            plan_key=normalized,
+        )
         if normalized == FREE_PLAN:
-            reset_date = self._resolve_quota_reset_date(period_key=period_key, period_end=period_end)
-            reset_line = (
-                f"Translation will resume automatically on {reset_date} (UTC) when the monthly quota resets."
-                if reset_date
-                else "Translation will resume automatically when the monthly quota resets."
-            )
-            base = (
-                f"Free quota ({limit:,} messages per month) is exhausted and translation will stop.\n"
-                f"{reset_line}\n"
-                "To continue using the service, please review plans from the link below."
+            base = build_free_limit_notice(
+                limit=limit,
+                reset_date=reset_date,
+                free_quota=self._free_quota,
+                standard_quota=self._standard_quota,
+                pro_quota=self._pro_quota,
+                reminder=reminder,
             )
             url = self._subscription_service.create_checkout_url(group_id)
         elif normalized == STANDARD_PLAN:
-            reset_date = self._resolve_quota_reset_date(period_key=period_key, period_end=period_end)
-            reset_line = (
-                f"Translation will resume automatically on {reset_date} (UTC) when the monthly quota resets."
-                if reset_date
-                else "Translation will resume automatically when the monthly quota resets."
-            )
-            base = (
-                f"The Standard plan monthly limit ({limit:,} messages) has been reached and translation is paused.\n"
-                f"{reset_line}\n"
-                "To unlock a higher limit now, upgrade to the Pro plan from the link below."
+            base = build_standard_limit_notice(
+                limit=limit,
+                reset_date=reset_date,
+                pro_quota=self._pro_quota,
+                reminder=reminder,
             )
             url = self._subscription_service.create_checkout_url(group_id)
         else:
-            reset_date = self._resolve_quota_reset_date(period_key=period_key, period_end=period_end)
-            reset_line = (
-                f"It will resume automatically on {reset_date} (UTC) when the monthly quota resets."
-                if reset_date
-                else "It will resume automatically when the monthly quota resets."
-            )
-            base = (
-                f"The Pro plan monthly limit ({limit:,} messages) has been reached and translation has stopped.\n"
-                f"{reset_line}"
-            )
+            base = build_pro_limit_notice(limit=limit, reset_date=reset_date, reminder=reminder)
             url = None
 
         # 無料枠・利用上限の通知は登録言語だけで出す。本文の検出言語が登録外でも足さない。Dio作成
+        base = self._append_plan_link_sentence(base, url, include_link=normalized != PRO_PLAN)
         return self._build_multilingual_notice(
             base,
             group_id,
             url,
-            add_missing_link_notice=(paid is not True and normalized != PRO_PLAN),
+            add_missing_link_notice=False,
         )
+
+    def _append_plan_link(self, messages: List[dict], url: Optional[str], group_id: str | None = None) -> None:
+        if not url:
+            return
+        button_text = self._translate_plan_button_field(SEE_PLANS_BUTTON_TEXT, group_id or "")
+        label = self._translate_plan_button_field(SEE_PLANS_LABEL, group_id or "")
+        messages.append(build_plan_link_message(url, button_text=button_text, label=label))
+
+    def _translate_plan_button_field(self, source: str, group_id: str) -> str:
+        """ボタン文言。案内本文と同じインターフェース翻訳。失敗時は英語原文。"""
+
+        try:
+            translated = self._build_multilingual_interface_message(source, group_id)
+        except Exception:
+            logger.warning("Failed to translate plan link copy", extra={"group_id": group_id})
+            return source
+        # 案内本文向けの方向制御はボタンの文字数に数えない。
+        cleaned = _strip_bidi_controls(translated).strip()
+        return cleaned or source
+
+    def _should_send_approaching_notice(self, plan_key: str, limit: int, usage: int) -> bool:
+        if normalize_plan_key(plan_key) != FREE_PLAN:
+            return False
+        threshold = approaching_usage_threshold(limit)
+        if threshold is None:
+            return False
+        return threshold <= int(usage) < int(limit)
+
+    def _claim_approaching_notice(self, group_id: str, period_key: str) -> bool:
+        claim = getattr(self._repo, "claim_approaching_notice", None)
+        if not callable(claim):
+            return False
+        try:
+            return bool(claim(group_id, period_key))
+        except Exception:
+            logger.warning("Failed to claim approaching quota notice", extra={"group_id": group_id})
+            return False
+
+    def _claim_quota_mention_reminder(self, group_id: str, period_key: str, on_date: str) -> bool:
+        claim = getattr(self._repo, "claim_quota_mention_reminder", None)
+        if not callable(claim):
+            return True
+        try:
+            return bool(claim(group_id, period_key, on_date))
+        except Exception:
+            logger.warning("Failed to claim quota mention reminder", extra={"group_id": group_id})
+            return False
+
+    def _release_approaching_notice(self, group_id: str, period_key: str) -> None:
+        release = getattr(self._repo, "release_approaching_notice", None)
+        if not callable(release):
+            return
+        try:
+            release(group_id, period_key)
+        except Exception:
+            logger.warning("Failed to release approaching quota notice", extra={"group_id": group_id})
+
+    def _release_quota_mention_reminder(self, group_id: str, period_key: str, on_date: str) -> None:
+        release = getattr(self._repo, "release_quota_mention_reminder", None)
+        if not callable(release):
+            return
+        try:
+            release(group_id, period_key, on_date)
+        except Exception:
+            logger.warning("Failed to release quota mention reminder", extra={"group_id": group_id})
+
+    def _build_approaching_notice_text(
+        self,
+        group_id: str,
+        *,
+        usage: int,
+        limit: int,
+        period_key: Optional[str],
+        period_end: Optional[datetime],
+    ) -> tuple[str, Optional[str]]:
+        reset_date = self._resolve_quota_reset_date(
+            period_key=period_key,
+            period_end=period_end,
+            plan_key=FREE_PLAN,
+        )
+        base = build_approaching_notice(
+            usage=usage,
+            limit=limit,
+            reset_date=reset_date,
+            free_quota=self._free_quota,
+            standard_quota=self._standard_quota,
+            pro_quota=self._pro_quota,
+        )
+        url = self._subscription_service.create_checkout_url(group_id)
+        base = self._append_plan_link_sentence(base, url, include_link=True)
+        return self._build_multilingual_notice(base, group_id, url, add_missing_link_notice=False)
+
+    @staticmethod
+    def _append_plan_link_sentence(base: str, url: Optional[str], *, include_link: bool) -> str:
+        if not include_link:
+            return base
+        if url:
+            return f"{base}\n{price_page_sentence()}"
+        return f"{base}\n{missing_plan_link_sentence()}"
+
+    def _quota_period_for_runtime(
+        self,
+        runtime: models.TranslationRuntimeState,
+        group_id: str,
+    ) -> tuple[str, str, int, int]:
+        """有効プラン、周期キー、上限、その周期の使用量。"""
+
+        plan_key = self._resolve_effective_plan_key(runtime.subscription_status, runtime.entitlement_plan)
+        period_key = self._current_period_key(
+            plan_key=plan_key,
+            period_start=runtime.period_start,
+            period_end=runtime.period_end,
+            quota_anchor_day=runtime.quota_anchor_day,
+        )
+        limit = self._quota_limit_for_plan(plan_key)
+        usage = int(runtime.usage or 0)
+        if runtime.period_key and runtime.period_key != period_key:
+            try:
+                usage = int(self._repo.get_usage(group_id, period_key) or 0)
+            except Exception:
+                logger.debug("Failed to read usage for quota pause reminder", exc_info=True)
+                usage = 0
+        return plan_key, period_key, limit, usage
+
+    def _translation_stays_paused_for_quota(self, group_id: str) -> bool:
+        """言語変更や unknown のあとでも、無料枠の停止理由を残すべきか。"""
+
+        if not group_id:
+            return False
+        return self._is_over_free_quota_pause(self._fetch_command_runtime_state(group_id), group_id)
+
+    def _is_over_free_quota_pause(self, runtime: models.TranslationRuntimeState, group_id: str) -> bool:
+        if runtime.translation_paused_reason != "quota" or runtime.translation_enabled:
+            return False
+        plan_key, _period_key, limit, usage = self._quota_period_for_runtime(runtime, group_id)
+        return normalize_plan_key(plan_key) == FREE_PLAN and usage >= limit
+
+    def _reply_quota_pause_reminder(
+        self,
+        event: models.MessageEvent,
+        runtime: models.TranslationRuntimeState,
+        *,
+        repeat: str,
+    ) -> None:
+        """停止中のメンションへ、UTC日に1回だけ上限案内を返す。"""
+
+        group_id = event.group_id or ""
+        plan_key, period_key, limit, _usage = self._quota_period_for_runtime(runtime, group_id)
+        on_date = datetime.now(timezone.utc).date().isoformat()
+        if self._claim_quota_mention_reminder(group_id, period_key, on_date):
+            try:
+                self._send_limit_reached_notice(
+                    event,
+                    plan_key,
+                    limit,
+                    period_key=period_key,
+                    period_end=runtime.period_end,
+                    reminder=True,
+                )
+            except Exception:
+                # 組み立てか送信に失敗した日は、同じUTC日の次のメンションでやり直す。
+                logger.warning("Failed to send quota pause reminder", extra={"group_id": group_id})
+                self._release_quota_mention_reminder(group_id, period_key, on_date)
+                raise
+            setter = getattr(self._repo, "set_limit_notice_plan", None)
+            if setter:
+                setter(group_id, period_key, plan_key)
+            return
+        if repeat != "short":
+            return
+        reset_date = self._resolve_quota_reset_date(
+            period_key=period_key,
+            period_end=runtime.period_end,
+            plan_key=plan_key,
+        )
+        base = build_resume_blocked_short(limit=limit, reset_date=reset_date)
+        text, _url = self._build_multilingual_notice(base, group_id, None, add_missing_link_notice=False)
+        self._reply_text(event, text)
 
     def _resolve_quota_reset_date(
         self,
         *,
         period_key: Optional[str],
         period_end: Optional[datetime],
+        plan_key: Optional[str] = None,
     ) -> Optional[str]:
+        # 解約済み・未払いでも購読行に旧 current_period_end が残る。
+        # Free は暦月なので、その終了日ではなく period_key の翌月1日（UTC）を使う。
+        if plan_key is not None and normalize_plan_key(plan_key) == FREE_PLAN:
+            period_end = None
         if period_end:
             return period_end.astimezone(timezone.utc).date().isoformat()
 
@@ -2743,47 +3599,15 @@ class MessageHandler:
         return status in {"active", "trialing"}
 
     def _resolve_effective_plan_key(self, status: Optional[str], entitlement_plan: Optional[str]) -> str:
-        plan_key = resolve_effective_plan(status, entitlement_plan)
-        if self._is_active_subscription(status) and plan_key == FREE_PLAN:
-            # 後方互換: entitlement_plan 未保存環境は paid を Pro 扱い
-            return PRO_PLAN
-        return plan_key
+        return effective_plan_key(status, entitlement_plan)
 
     def _quota_limit_for_plan(self, plan_key: str) -> int:
-        normalized = normalize_plan_key(plan_key)
-        if normalized == FREE_PLAN:
-            return self._free_quota
-        if normalized == STANDARD_PLAN:
-            return self._standard_quota
-        if normalized == PRO_PLAN:
-            return self._pro_quota
-        return monthly_quota_for(normalized)
-
-    def _would_exceed_language_limit(
-        self,
-        current_langs: Sequence[str],
-        add_langs: Sequence[Tuple[str, str]],
-        remove_codes: Sequence[str],
-        *,
-        max_languages: Optional[int] = None,
-    ) -> bool:
-        limit = max_languages if max_languages is not None else self._max_group_languages
-        remove_set = {code.lower() for code in remove_codes if code}
-        remaining = [code.lower() for code in current_langs if code and code.lower() not in remove_set]
-
-        to_add: list[str] = []
-        seen = set(remaining)
-        for code, _name in add_langs:
-            if not code:
-                continue
-            lowered = code.lower()
-            if lowered in seen:
-                continue
-            seen.add(lowered)
-            to_add.append(lowered)
-
-        final_count = len(remaining) + len(to_add)
-        return final_count > limit
+        return monthly_limit_for_plan(
+            plan_key,
+            free_quota=self._free_quota,
+            standard_quota=self._standard_quota,
+            pro_quota=self._pro_quota,
+        )
 
     def _limit_language_choices(self, languages: Sequence[models.LanguageChoice]) -> Tuple[List[models.LanguageChoice], List[models.LanguageChoice]]:
         limited: List[models.LanguageChoice] = []
@@ -2829,41 +3653,6 @@ class MessageHandler:
 
     @staticmethod
     def _encode_postback_payload(payload: Dict, max_bytes: int = 280) -> str:
-        """Encode payload for LINE postback with size guard (LINE上限≈300 bytes)."""
-        def _encode(data: Dict) -> str:
-            raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
-            compressed = base64.urlsafe_b64encode(zlib.compress(raw)).decode("ascii").rstrip("=")
-            return f"langpref2={compressed}"
+        """LINE postback 用。言語設定と同じ符号器を使い、切れ端は返さない。"""
 
-        encoded = _encode(payload)
-        if len(encoded.encode("utf-8")) <= max_bytes:
-            return encoded
-
-        # try shortening optional texts first
-        def _shrink_text(key: str, factor: float = 0.6) -> bool:
-            if key in payload and payload[key]:
-                text = payload[key]
-                new_len = max(int(len(text) * factor), 32)
-                payload[key] = text[:new_len]
-                return True
-            return False
-
-        optional_keys = ("limit_text", "cancel_text", "completion_text")
-        for key in optional_keys:
-            # try shrinking this key up to 3 times before moving on
-            for _ in range(3):
-                changed = _shrink_text(key)
-                encoded = _encode(payload)
-                if len(encoded.encode("utf-8")) <= max_bytes:
-                    return encoded
-                if not changed:
-                    break
-            # drop the key entirely if still too large
-            if key in payload:
-                payload.pop(key, None)
-                encoded = _encode(payload)
-                if len(encoded.encode("utf-8")) <= max_bytes:
-                    return encoded
-
-        encoded = _encode(payload)
-        return encoded[:max_bytes]
+        return LanguageSettingsService._encode_postback_payload(payload, max_bytes)

@@ -6,7 +6,9 @@ from ...domain import models
 from ...domain.ports import LinePort, MessageRepositoryPort
 from ...domain.services.interface_translation_service import InterfaceTranslationService
 from ...domain.services.subscription_service import SubscriptionService
+from ...presentation.guidance_cards import billing_notice_card
 from ...presentation.multilingual_message import build_multilingual_message, dedup_lang_codes
+from ...presentation.rich_message import deliver_push
 
 logger = logging.getLogger(__name__)
 
@@ -78,12 +80,16 @@ class MemberLeftHandler:
             warning_log="Owner-left DM notice translation failed",
         )
         checkout_url = self._subscription_service.create_checkout_url(group_id)
-        if checkout_url:
-            group_message = f"{group_message}\n\n{checkout_url}".strip()
+        notice_lang = next((lang for lang in languages if not lang.startswith("en")), languages[0] if languages else "en")
         group_push_result = "skipped"
         dm_push_result = "skipped"
         try:
-            self._line.push_text(group_id, group_message)
+            deliver_push(
+                self._line,
+                group_id,
+                billing_notice_card(group_message, lang=notice_lang, url=checkout_url),
+                logger=logger,
+            )
             group_push_result = "success"
         except Exception:  # pylint: disable=broad-except
             logger.warning("Failed to push owner-left notice", extra={"group_id": group_id}, exc_info=True)

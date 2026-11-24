@@ -26,6 +26,7 @@ WAF は導入しない前提です。
 - `GET /api/stats/total-users` → API Gateway 側 `GET /stats/total-users`
 - `POST /api/contact` → API Gateway 側 `POST /contact`
 - `GET /api/checkout?...` → API Gateway 側 `GET /checkout?...`
+- `GET/POST /api/group-languages?...` → API Gateway 側 `GET/POST /group-languages?...`
 
 ## セキュリティ設定
 
@@ -42,6 +43,7 @@ CloudFront Response Headers Policy で以下を付与:
 
 - フロントの API 呼び出しは相対パス固定
   - `/api/checkout`
+  - `/api/group-languages`
   - `/api/contact`
   - `/api/stats/total-users`
 - `api_base` / `apiBase` クエリは廃止
@@ -66,8 +68,10 @@ aws s3 sync ./kotori-homepage/ \
 
 ```bash
 cd translate-line-bot
-STACK_NAME=translate-line-bot-prod STAGE=prod PROFILE=line-translate-bot GEMINI_MODEL=gemini-2.5-flash ./scripts/deploy.sh
+STACK_NAME=translate-line-bot-prod STAGE=prod PROFILE=line-translate-bot ./scripts/deploy.sh
 ```
+
+`GEMINI_MODEL` を付けないときは `scripts/gemini_model_default.sh` の既定 `gemini-3.5-flash-lite` を使います。空文字はデプロイを止めます。
 
 ### 3. CloudFront キャッシュ無効化
 

@@ -3,6 +3,7 @@
 import pytest
 
 from src.app.handlers.message_handler import MessageHandler
+from src.presentation.rich_message import visible_reply_text
 from src.domain import models
 from src.domain.services.language_detection_service import LanguageDetectionService
 from src.domain.services.explicit_language_reset import is_explicit_language_reset
@@ -18,8 +19,13 @@ class _Line:
     def reply_text(self, _token, text):
         self.last_text = text
 
-    def reply_messages(self, *_args, **_kwargs):
-        return None
+    def reply_messages(self, _token, messages, **_kwargs):
+        self.last_messages = messages
+        shown = visible_reply_text(messages)
+        if shown:
+            self.last_text = shown
+        elif messages and isinstance(messages[0], dict) and messages[0].get("text"):
+            self.last_text = messages[0]["text"]
 
 
 class _Repo:
@@ -250,7 +256,9 @@ def test_completion_names_the_resulting_languages():
     handler._handle_command(_event("日本語を追加して"), "日本語を追加して")
 
     assert repo.languages == ["en", "ja"]
-    assert handler._line.last_text == "英語・日本語になったよ"
+    reply = handler._line.last_text or ""
+    assert "英語・日本語になったよ" in reply
+    assert "English and Japanese have been set as the translation languages." in reply
 
 
 def test_what_languages_do_you_know_returns_the_catalog():
@@ -288,7 +296,8 @@ def test_supported_language_plus_unknown_keeps_the_warning():
     reply = handler._line.last_text or ""
     assert "太陽語は対応していないよ" in reply
     assert "英語" in reply
-    assert repo.languages == ["en"]
+    assert "あなたの言語も" in reply
+    assert repo.languages == ["ko"]
 
 
 @pytest.mark.parametrize(

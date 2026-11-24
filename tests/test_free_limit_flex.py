@@ -410,7 +410,10 @@ def test_standard_and_pro_notices_stay_plain_text():
 
     assert line.batches[0][0]["type"] == "text"
     assert "Standard plan" in line.batches[0][0]["text"]
-    assert line.batches[0][1]["text"] == PLAN_URL
+    assert PLAN_URL not in line.batches[0][0]["text"]
+    button = line.batches[0][1]
+    assert button["type"] == "template"
+    assert button["template"]["actions"][0]["uri"] == PLAN_URL
     assert line.batches[1][0]["type"] == "text"
     assert "Pro plan" in line.batches[1][0]["text"]
     assert len(line.batches[1]) == 1
