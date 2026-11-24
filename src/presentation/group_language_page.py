@@ -328,6 +328,8 @@ p { margin: 0 0 12px; }
 #q { width: 100%; box-sizing: border-box; font-size: 16px; border: 1px solid #d5ddd6; border-radius: 12px; padding: 12px; margin: 8px 0 12px; }
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .card { display: flex; align-items: center; gap: 10px; min-height: 48px; background: #fff; border-radius: 12px; padding: 8px 10px; }
+/* display:flex はブラウザ標準の [hidden] より強い。検索で外したカードはここで消す。 */
+.card[hidden] { display: none; }
 .card input { width: 1.25rem; height: 1.25rem; accent-color: #0f6b4c; }
 .savebar { position: sticky; bottom: 0; background: #f4f6f3; padding: 12px 0 16px; }
 button { width: 100%; min-height: 48px; border: 0; border-radius: 12px; background: #0f6b4c; color: #fff; font-size: 1rem; }

@@ -122,6 +122,7 @@ def test_get_shows_current_languages_for_the_token_group_only():
     body = response["body"]
     assert "翻訳言語" in body
     assert "viewport" in body
+    assert ".card[hidden]" in body and "display: none" in body
     assert 'value="ja" checked' in body or 'value="ja" checked' in body.replace("  ", " ")
     assert 'value="en"' in body
     assert "checked" in body
