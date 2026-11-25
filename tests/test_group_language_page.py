@@ -303,6 +303,18 @@ def test_page_language_names_follow_the_ui_language():
         if ui == "th":
             assert 'data-label="fr ฝรั่งเศส french フランス語"' in body
 
+    filipino = _Repo([("tl", "Filipino"), ("en", "English")])
+    thai = handle_group_language_request(
+        _event(token=token, query={"st": token, "ui": "th"}),
+        repo=filipino,
+        line=_Line(),
+        secret=SECRET,
+    )
+    labels = _card_labels(thai["body"])
+    assert "ตากาล็อก" in labels
+    assert "Filipino" not in labels
+    assert "ตากาล็อก · อังกฤษ" in thai["body"]
+
 
 def test_empty_secret_does_not_render_a_form():
     response = handle_group_language_request(_event(token="anything"), repo=_Repo(), line=_Line(), secret="")

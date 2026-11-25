@@ -198,6 +198,17 @@ def test_zh_ko_th_names_cover_the_catalog_and_keep_ja_en():
     assert localized_language_name("fr", "th", "French") == "ฝรั่งเศส"
     assert localized_language_name("fr", "th", "フランス語") == "ฝรั่งเศส"
     assert localized_language_name("fr", "ko", "Français") == "Français"
+    # カタログは tl を Filipino で保存する。英語表の Tagalog とは別なので、定訳に戻す
+    assert localized_language_name("tl", "th", "Filipino") == "ตากาล็อก"
+    assert localized_language_name("tl", "ko", "Filipino") == "타갈로그어"
+    assert localized_language_name("tl", "zh", "Filipino") == "他加禄语"
+    assert localized_language_name("tl", "zh-Hant", "Filipino") == "他加祿語"
+    assert language_option_label("tl", "th", "Filipino") == "ตากาล็อก"
+    assert language_option_label("tl", "zh", "Filipino") == "他加祿語"
+    assert japanese_language_name("tl", "Filipino") == "Filipino"
+    assert english_language_name("tl", "Filipino") == "Filipino"
+    assert language_option_label("tl", "ja", "Filipino") == "Filipino"
+    assert language_option_label("tl", "en", "Filipino") == "Filipino"
 
 
 def test_repository_reads_stored_language_names():

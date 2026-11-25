@@ -474,6 +474,10 @@ _UNKNOWN_BY_FAMILY = {
 # 2〜3文字や zh-tw のようなコードを、言語名として採用しない
 _CODE_TOKEN = re.compile(r"^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$")
 _ENGLISH_NAME_FOLDS = {name.casefold() for name in ENGLISH_LANGUAGE_NAMES.values()}
+# カタログの保存名が英語表と違うもの。zh / ko / th では定訳に戻す。ja / en の判定は変えない。
+_CATALOG_ENGLISH_ALIASES = {
+    "tl": "filipino",
+}
 
 
 def english_language_name(code: str, stored_name: str = "") -> str:
@@ -523,8 +527,8 @@ def localized_language_name(code: str, family: str, stored_name: str = "") -> st
     canonical = ENGLISH_LANGUAGE_NAMES.get(normalized, "")
     japanese = JAPANESE_LANGUAGE_NAMES.get(normalized, "")
     local = _LOCAL_LANGUAGE_NAMES[resolved].get(normalized)
-    # 英語名・日本語名は表の名前に戻す。表に無い独自の保存名だけ残す
-    if usable and usable.casefold() != canonical.casefold() and usable != japanese and usable != local:
+    # 英語名・日本語名・カタログの英語保存名は表の名前に戻す。独自の保存名だけ残す
+    if usable and not _is_english_catalog_name(normalized, usable, canonical) and usable != japanese and usable != local:
         return usable
     if local:
         return local
@@ -549,6 +553,15 @@ def japanese_language_name(code: str, stored_name: str = "") -> str:
     if canonical:
         return canonical
     return UNKNOWN_LANGUAGE_NAME_JA
+
+
+def _is_english_catalog_name(code: str, usable: str, canonical: str) -> bool:
+    """英語表の名前と、カタログが別に保存する英語名。"""
+
+    folded = usable.casefold()
+    if canonical and folded == canonical.casefold():
+        return True
+    return folded == _CATALOG_ENGLISH_ALIASES.get(code, "")
 
 
 def _normalize_code(code: str) -> str:
