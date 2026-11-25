@@ -2,6 +2,7 @@
 
 import base64
 import json
+import re
 import time
 from urllib.parse import urlencode
 
@@ -259,6 +260,60 @@ def test_pro_plan_allows_five_languages_and_rejects_six():
     assert six["statusCode"] == 400
     assert repo.replaced == []
     assert line.pushed == []
+
+
+def _card_labels(body: str) -> list[str]:
+    return re.findall(r'<label class="card"[^>]*>.*?<span>(.*?)</span>', body)
+
+
+def test_page_language_names_follow_the_ui_language():
+    """タイ語・繁体字・韓国語の画面では、一覧の言語名もその言語になる。"""
+
+    token = _token()
+    repo = _Repo([("en", "English"), ("ja", "Japanese"), ("ko", "Korean"), ("xyz", "")])
+    cases = {
+        "th": ("th", "ญี่ปุ่น", "อังกฤษ", "เกาหลี", "ฝรั่งเศส", "ทมิฬ", "เขมร", "ภาษาที่ไม่รู้จัก"),
+        "zh": ("zh-Hant", "日語", "英語", "韓語", "法語", "坦米爾語", "高棉語", "未知語言"),
+        "ko": ("ko", "일본어", "영어", "한국어", "프랑스어", "타밀어", "크메르어", "알 수 없는 언어"),
+        "ja": ("ja", "日本語", "英語", "韓国語", "フランス語", "タミル語", "クメール語", "不明な言語"),
+        "en": ("en", "Japanese", "English", "Korean", "French", "Tamil", "Khmer", "Unknown language"),
+    }
+    for ui, (html_lang, japanese, english, korean, french, tamil, khmer, unknown) in cases.items():
+        response = handle_group_language_request(
+            _event(token=token, query={"st": token, "ui": ui}),
+            repo=repo,
+            line=_Line(),
+            secret=SECRET,
+        )
+        body = response["body"]
+        labels = _card_labels(body)
+        assert response["statusCode"] == 200, ui
+        assert f'lang="{html_lang}"' in body, ui
+        for name in (japanese, english, korean, french, tamil, khmer, unknown):
+            assert name in labels, (ui, name, labels)
+        assert f"{english} · {japanese} · {korean} · {unknown}" in body
+        # 英語名・日本語名は検索用に残し、カードの表示名にはしない（en / ja の画面は除く）
+        if ui not in {"en", "ja"}:
+            assert "Japanese" not in labels
+            assert "French" not in labels
+            assert "日本語" not in labels
+        if ui == "zh":
+            assert "日语" not in labels
+            assert "英语" not in labels
+        if ui == "th":
+            assert 'data-label="fr ฝรั่งเศส french フランス語"' in body
+
+    filipino = _Repo([("tl", "Filipino"), ("en", "English")])
+    thai = handle_group_language_request(
+        _event(token=token, query={"st": token, "ui": "th"}),
+        repo=filipino,
+        line=_Line(),
+        secret=SECRET,
+    )
+    labels = _card_labels(thai["body"])
+    assert "ตากาล็อก" in labels
+    assert "Filipino" not in labels
+    assert "ตากาล็อก · อังกฤษ" in thai["body"]
 
 
 def test_empty_secret_does_not_render_a_form():

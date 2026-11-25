@@ -7,7 +7,7 @@ from typing import Sequence
 from urllib.parse import urlencode
 
 from ..domain.services.language_mention import ui_family
-from ..domain.services.language_names import english_language_name, japanese_language_name
+from ..domain.services.language_names import localized_language_name
 
 UI_FAMILIES = ("ja", "en", "zh", "ko", "th")
 
@@ -158,9 +158,11 @@ def page_family(requested: str, group_codes: Sequence[str]) -> str:
 
 
 def language_option_label(code: str, family: str, stored: str = "") -> str:
-    if family == "ja":
-        return japanese_language_name(code, stored)
-    return english_language_name(code, stored)
+    """カードの言語名。ページの中文は繁体字なので、LINE の簡体字 zh とは分ける。"""
+
+    # スイッチの zh は html lang=zh-Hant。ja / en / ko / th はそのまま。
+    name_family = "zh-tw" if family == "zh" else family
+    return localized_language_name(code, name_family, stored)
 
 
 def render_group_language_page(
